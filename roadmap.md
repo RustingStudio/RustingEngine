@@ -3684,7 +3684,14 @@ The networking model depends on the Milestone 8 result. Bit-identical determinis
   despawned). `net::replicate::tests::a_desync_is_detected_and_repaired_by_a_resync`
   breaks a client in delta and snapshot mode and repairs it.
   `docs/networking.md` "Detecting and repairing a desync".
-- [ ] Support spectator clients that receive state and send no input.
+- [x] Support spectator clients that receive state and send no input.
+  Evidence 2026-10-10 (lane tools): `net::lobby::spectate` joins without a
+  player; the host's `Lobby` reports `Spectating`/`SpectatorLeft`,
+  refuses any other lobby message from a spectator, and
+  `accepts_input(peer)` is true only for players in the match.
+  `net::lobby::tests::spectators_watch_without_a_player_or_input` checks a
+  spectator cannot ready, hello or send input, still receives broadcasts,
+  and leaves cleanly. `docs/networking.md` "Spectators".
 
 ### Exit gate
 

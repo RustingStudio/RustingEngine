@@ -166,6 +166,24 @@ lobby::ready(&session)?;
   a new token on every rejoin. Only a dropped player can be taken over,
   so a token seen on the wire cannot steal a connected player.
 
+### Spectators
+
+A client that only watches calls `lobby::spectate(&session)` instead of
+`hello`. The host's lobby reports `LobbyEvent::Spectating(peer)` and,
+when it leaves, `SpectatorLeft(peer)`. A spectator has no player, cannot
+ready up or join a match, and receives everything the host broadcasts
+or sends each peer, replication included. Take game input only from
+peers the lobby accepts:
+
+```rust
+NetEvent::Message { from, bytes } if players.accepts_input(from) => {
+    // validate, then buffer the input
+}
+```
+
+`accepts_input` is true only for a player in the match. `spectators()`
+lists who is watching.
+
 ## Agreeing on the tick
 
 Predicted inputs carry a tick, and the host should get each one before
