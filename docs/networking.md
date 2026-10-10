@@ -450,6 +450,48 @@ match replica.verify(world, from, &bytes) {
   objects: changed values are set back, and replicated objects the host
   does not have are despawned.
 
+### Commands instead of bodies
+
+A deterministic simulation, such as physics bodies, does not need its
+state sent at all: send what happened each tick and let every peer run
+it. Mark those objects `net::replicate::Simulated` on every peer, and
+send each tick's commands with `net::lockstep`:
+
+```rust
+use rusting_engine::net::lockstep::{self, CommandStream};
+use rusting_engine::runtime::world_state_hash;
+
+// Host, every tick, before running it:
+lockstep::send(&session, tick, world_state_hash(world), &commands)?;
+run_tick(world, &commands);
+
+// Client: buffer the host's commands, then run every tick that arrived.
+let mut stream = CommandStream::<MyCommand>::new(start_tick);
+if let Some(Err(reason)) = stream.accept(from, &bytes) {
+    eprintln!("{reason}");
+}
+while let Some(tick) = stream.ready() {
+    if world_state_hash(world) != tick.hash {
+        eprintln!("tick {}: simulation drifted", tick.tick);
+    }
+    run_tick(world, &tick.commands);
+}
+```
+
+- A `Simulated` object's transform is never replicated or hashed by
+  `Replication`; its other listed components still are. Spawn it on
+  every peer, from the shared scene or by a command, since a replicated
+  spawn carries no transform for it.
+- Send every tick, in order, with no commands if nothing happened; a
+  client waits for each tick before running it. Commands for a tick more
+  than `input::MAX_AHEAD` ahead, repeated, or not from the host are
+  refused.
+- The hash is whatever the game computes of the state before the tick.
+  `world_state_hash` fits when every peer built its world the same way.
+  A mismatch means the simulation is not deterministic there: remove
+  `Simulated` from those objects on every peer and their transforms are
+  replicated again.
+
 ### Bandwidth per client
 
 Cap what the host sends each client with `net::limit::Bandwidth`, a byte

@@ -45,6 +45,7 @@ pub mod input;
 pub mod interpolate;
 pub mod limit;
 pub mod lobby;
+pub mod lockstep;
 pub mod predict;
 pub mod replicate;
 pub mod rpc;

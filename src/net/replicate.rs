@@ -51,6 +51,15 @@ pub const MAX_OBJECTS: usize = 16_384;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Replicated;
 
+/// Marks an object every peer simulates itself from the same commands
+/// ([`super::lockstep`]), such as a deterministic physics body. Its
+/// transform is never replicated or hashed; its other listed components
+/// are. Mark it on every peer, and spawn it on every peer (from the
+/// shared scene or a command), since a replicated spawn carries no
+/// transform for it.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct Simulated;
+
 /// What a client sent the host about replication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FromClient {
@@ -258,15 +267,18 @@ impl Replication {
             Option<&Transform>,
             Option<&NetTransform>,
             Option<&Name>,
+            Has<Simulated>,
         ), With<Replicated>>();
         let found: Vec<_> = query
             .iter(world)
-            .map(|(entity, id, transform, net, name)| {
+            .map(|(entity, id, transform, net, name, simulated)| {
                 (
                     entity,
                     id.0,
                     // On an interpolated client, the host's transform.
-                    net.map(|net| net.0).or(transform.copied()),
+                    net.map(|net| net.0)
+                        .or(transform.copied())
+                        .filter(|_| !simulated),
                     name.map(|name| name.0.clone()),
                 )
             })
