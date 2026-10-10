@@ -518,8 +518,8 @@ fn docs_lists_searches_shows_and_briefs_within_a_token_budget() {
     assert!(shown["data"]["tokens"].as_u64().unwrap() <= 50);
     assert!(shown["data"]["total_tokens"].as_u64().unwrap() > 50);
 
-    let (_, brief) = run(&["docs", "--brief", "--budget", "500"]);
-    assert!(brief["data"]["tokens"].as_u64().unwrap() <= 500);
+    let (_, brief) = run(&["docs", "--brief", "--budget", "600"]);
+    assert!(brief["data"]["tokens"].as_u64().unwrap() <= 600);
     assert!(brief["data"]["text"]
         .as_str()
         .unwrap()

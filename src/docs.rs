@@ -58,6 +58,11 @@ const PAGES: &[(&str, &str, &str)] = &[
         include_str!("../docs/tutorials/04-gpu-cube-rain.md"),
     ),
     (
+        "tutorial/physics-sandbox",
+        "tutorial",
+        include_str!("../docs/tutorials/05-physics-sandbox.md"),
+    ),
+    (
         "guide/gpu-condition-shaders",
         "guide",
         include_str!("../docs/gpu-condition-shaders.md"),

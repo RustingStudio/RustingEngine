@@ -25,6 +25,9 @@ were run against this version of the engine.
    scenes.
 4. [GPU cube rain](tutorials/04-gpu-cube-rain.md): simulate thousands of
    bodies on the GPU and get only the events you ask for back in Rust.
+5. [Physics sandbox](tutorials/05-physics-sandbox.md): make a ball bouncy,
+   throw balls from the camera with an input action, test it first, and
+   check that debug and release builds simulate the same.
 
 ## Guides and reference
 
