@@ -46,6 +46,12 @@ pub const MAX_OBJECTS: usize = 16_384;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Replicated;
 
+/// The host's latest transform for an object, when the [`Replica`] is
+/// [`interpolated`](Replica::interpolated); `Transform` is then what the
+/// client shows.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct NetTransform(pub Transform);
+
 /// Replicated state of one object: component name to scene form.
 type Object = Map<String, Value>;
 type State = BTreeMap<Uuid, Object>;
@@ -241,6 +247,7 @@ pub struct Replica {
     entities: BTreeMap<Uuid, Entity>,
     /// Snapshots received, oldest first; the last one is in the world.
     states: VecDeque<(u64, State)>,
+    interpolate: bool,
 }
 
 impl Replica {
@@ -251,7 +258,16 @@ impl Replica {
             components: replication.components.clone(),
             entities: BTreeMap::new(),
             states: VecDeque::new(),
+            interpolate: false,
         }
+    }
+
+    /// Writes received transforms into [`NetTransform`] instead of
+    /// `Transform`, for [`Interpolation`](super::interpolate::Interpolation)
+    /// to present smoothly. An object's first transform goes to both.
+    pub fn interpolated(mut self) -> Self {
+        self.interpolate = true;
+        self
     }
 
     /// Applies a message `from` a peer, made by [`Replication::delta`] or
@@ -403,7 +419,7 @@ impl Replica {
             });
             self.entities.insert(id, entity);
             for (name, value) in fields {
-                apply_component(world, entity, &name, value)
+                apply_component(world, entity, &name, value, self.interpolate)
                     .map_err(|error| format!("{name} on {id}: {error}"))?;
             }
         }
@@ -442,6 +458,7 @@ fn apply_component(
     entity: Entity,
     name: &str,
     value: Value,
+    interpolate: bool,
 ) -> Result<(), String> {
     match (name, value) {
         (TRANSFORM, Value::Null) => {}
@@ -457,7 +474,13 @@ fn apply_component(
             read("position", &mut transform.position);
             read("rotation", &mut transform.rotation);
             read("scale", &mut transform.scale);
-            world.entity_mut(entity).insert(transform);
+            let mut entity = world.entity_mut(entity);
+            if !interpolate || !entity.contains::<NetTransform>() {
+                entity.insert(transform);
+            }
+            if interpolate {
+                entity.insert(NetTransform(transform));
+            }
         }
         (NAME, Value::String(name)) => {
             world.entity_mut(entity).insert(Name(name));

@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 pub mod clock;
 pub mod input;
+pub mod interpolate;
 pub mod limit;
 pub mod lobby;
 pub mod predict;

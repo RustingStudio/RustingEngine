@@ -417,6 +417,36 @@ budget.forget(peer);
 - The burst must hold the largest message; a bigger one is an error.
 - Budgets count payload bytes; `NetSession::stats` adds the headers.
 
+## Smoothing remote objects
+
+Updates arrive a few times a second, each late by a different amount.
+`net::interpolate::Interpolation` shows every remote object where it was
+a fixed delay ago, blending between the two updates around that time:
+
+```rust
+use rusting_engine::net::interpolate::Interpolation;
+use std::time::Duration;
+
+let mut replica = Replica::new(&replication).interpolated();
+let mut smooth = Interpolation::new(Duration::from_millis(100));
+
+// After each replica.apply(...) that returns Some(Ok(())):
+smooth.record(world, host_time); // e.g. clock.host_tick(tick) * step
+// Every frame, before drawing:
+smooth.present(world, client_time);
+```
+
+- An `interpolated()` replica writes the host's transform into
+  `NetTransform`; `present` sets `Transform`, which is what the client
+  draws. Positions and scales blend linearly; rotations take the short
+  way around.
+- The delay is the trade: longer hides more jitter and loss, shorter
+  shows the host's state sooner. A bit more than two update intervals
+  hides one lost update (100 ms at 20 Hz). Change it with `set_delay`.
+- Past the newest update an object holds still rather than guessing
+  ahead. Use the same clock for `record` and `present`.
+- Set the player's own predicted object's `Transform` after `present`.
+
 ## Predicting the player's own object
 
 Waiting a round trip for the host makes a player's own raft feel slow.

@@ -3647,7 +3647,14 @@ The networking model depends on the Milestone 8 result. Bit-identical determinis
 
 ### Client
 
-- [ ] Interpolate remote entities with a documented, configurable interpolation delay.
+- [x] Interpolate remote entities with a documented, configurable interpolation delay.
+  Evidence 2026-10-10 (lane tools): `net::interpolate::Interpolation::new(delay)`
+  records each `NetTransform` an `interpolated()` replica writes, with
+  its update time, and `present` sets `Transform` to the state `delay`
+  ago, blending positions and scales and turning rotations the short
+  way; `set_delay` changes it. `net::interpolate::tests::remote_objects_show_where_they_were_one_delay_ago`
+  checks hold-before-first, halfway blend, a rotation across pi and
+  hold-at-newest. `docs/networking.md` "Smoothing remote objects".
 - [ ] Predict only the local hero. Never predict terrain destruction results unless determinism is proven.
 - [ ] Reconcile prediction error with presentation-only smoothing that never feeds back into simulation state.
 - [ ] Detect desync by periodic state-hash comparison, report it, and recover through full resynchronization.
