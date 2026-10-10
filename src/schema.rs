@@ -1051,9 +1051,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.fracture",
-        summary: "How the object's mesh breaks: pieces Voronoi cells around points picked by seed, then every piece cut by each of slices (planes [x, y, z, d] in the object's frame, cutting where [x, y, z] · p = d). The mesh counts as convex, so pieces fill its convex shape; every piece is convex and suits a ConvexMesh collider. Fracture::fracture(mesh) gives the pieces and the connectivity graph of pieces that share a face. At most 256 pieces.",
+        summary: "How the object's mesh breaks: pieces Voronoi cells around points picked by seed, then every piece cut by each of slices (planes [x, y, z, d] in the object's frame, cutting where [x, y, z] · p = d). The mesh counts as convex, so pieces fill its convex shape; every piece is convex and suits a ConvexMesh collider. Fracture::fracture(mesh) gives the pieces and the connectivity graph of pieces that share a face. At most 256 pieces. During play, contacts bringing break_energy joules or more within one fixed tick (half the reduced mass times the closing speed squared, summed over the tick's hits; 0 never breaks) replace the object (it needs a MeshRenderer) with one dynamic ConvexMesh body per piece, keeping its motion, material and collision layers, and the energy beyond break_energy scatters the pieces from the hardest hit.",
         gpu: NO_GPU,
-        example: || json!({"pieces": 8, "seed": 1, "slices": [[0.0, 1.0, 0.0, 0.0]]}),
+        example: || json!({"pieces": 8, "seed": 1, "slices": [[0.0, 1.0, 0.0, 0.0]], "break_energy": 50.0}),
     },
     ComponentSection {
         key: "rusting.heightfield",

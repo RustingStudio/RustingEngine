@@ -7,15 +7,33 @@
 //! a non-convex mesh loses its dents. Every piece is convex, so it can use
 //! a `ConvexMesh` collider as it is.
 //!
-//! Determinism: seeds come from [`RandomSeed`] streams of the fracture's own
-//! seed, cells are cut in index order, and nothing reads a global RNG, so
-//! the same fracture and mesh always give the same bits.
+//! At play time [`break_fractures`] breaks an object whose contacts in one
+//! fixed tick bring at least `break_energy` joules of impact energy (the
+//! stress of every hit that tick, summed): the object is replaced by one
+//! dynamic `ConvexMesh` body per piece, moving as the object moved, with
+//! the energy beyond `break_energy` scattering the pieces away from the
+//! hardest hit.
+//!
+//! Determinism: Voronoi seeds come from [`RandomSeed`] streams of the
+//! fracture's own seed, cells are cut in index order, objects break in
+//! `SceneId` order, and the scatter is drawn from the scene's
+//! [`RandomSeed`] at the fixed tick, so the same scene and inputs always
+//! give the same bits.
 
-use bevy_ecs::prelude::Component;
+use std::collections::BTreeMap;
+
+use bevy_ecs::entity::Entity;
+use bevy_ecs::prelude::{Component, World};
 use nalgebra::Vector3;
 
-use crate::assets::{MeshAsset, MeshVertex};
-use crate::runtime::RandomSeed;
+use super::cpu_physics::next_spawn_order;
+use crate::assets::{AssetServer, MeshAsset, MeshVertex};
+use crate::runtime::{
+    sim_math, Collider, ColliderShape, CollisionLayers, FrameTime,
+    MeshRenderer, PhysicsBody, PhysicsWorld, RandomSeed, RigidBody,
+    RigidBodyKind, SceneId,
+};
+use crate::Transform;
 
 /// Most pieces one fracture makes, Voronoi cells and slice halves
 /// together. Fracture settings come from scene files, and cutting costs
@@ -35,6 +53,9 @@ pub struct Fracture {
     /// Planes `[x, y, z, d]` in the object's local frame, each cutting every
     /// piece along the points `p` with `[x, y, z] · p = d`.
     pub slices: Vec<[f32; 4]>,
+    /// Impact energy in joules that breaks the object during play within
+    /// one fixed tick; 0 never breaks it.
+    pub break_energy: f32,
 }
 
 impl Default for Fracture {
@@ -43,6 +64,7 @@ impl Default for Fracture {
             pieces: 8,
             seed: 1,
             slices: Vec::new(),
+            break_energy: 0.0,
         }
     }
 }
@@ -120,6 +142,185 @@ impl Fracture {
             pieces: cells.iter().map(piece_mesh).collect(),
         }
     }
+}
+
+/// Per fixed step, after physics: breaks every object with a
+/// [`Fracture`] whose contacts this tick brought `break_energy` or more.
+pub(super) fn break_fractures(world: &mut World) {
+    let mut struck = BTreeMap::<Entity, Impact>::new();
+    {
+        let mass = |entity| {
+            world
+                .get::<RigidBody>(entity)
+                .filter(|body| body.kind == RigidBodyKind::Dynamic)
+                .map(|body| body.mass)
+        };
+        let Some(physics) = world.get_resource::<PhysicsWorld>() else {
+            return;
+        };
+        for contact in physics.contacts() {
+            if contact.sensor || contact.speed <= 0.0 {
+                continue;
+            }
+            // Energy the hit takes out of the closing motion: half the
+            // reduced mass times the closing speed squared.
+            let reduced = match (mass(contact.a), mass(contact.b)) {
+                (Some(a), Some(b)) => a * b / (a + b).max(f32::MIN_POSITIVE),
+                (Some(m), None) | (None, Some(m)) => m,
+                (None, None) => continue,
+            };
+            let energy = 0.5 * reduced * contact.speed * contact.speed;
+            for body in [contact.a, contact.b] {
+                let impact = struck.entry(body).or_default();
+                impact.energy += energy;
+                if energy > impact.hardest {
+                    impact.hardest = energy;
+                    impact.point = contact.point.into();
+                }
+            }
+        }
+    }
+    let mut breaking: Vec<_> = struck
+        .into_iter()
+        .filter_map(|(entity, impact)| {
+            let fracture = world.get::<Fracture>(entity)?;
+            (fracture.break_energy > 0.0
+                && impact.energy >= fracture.break_energy)
+                .then(|| {
+                    let id =
+                        world.get::<SceneId>(entity).map(|id| id.0.as_u128());
+                    (id, entity, impact)
+                })
+        })
+        .collect();
+    breaking.sort_unstable_by_key(|(id, entity, _)| (*id, entity.to_bits()));
+    let tick = world
+        .get_resource::<FrameTime>()
+        .map_or(0, |t| t.fixed_tick);
+    let seed = world
+        .get_resource::<RandomSeed>()
+        .copied()
+        .unwrap_or_default();
+    for (id, entity, impact) in breaking {
+        let stream = RandomSeed::stream(
+            "fracture",
+            id.map_or(entity.to_bits(), |id| id as u64 ^ (id >> 64) as u64),
+        );
+        shatter(world, entity, impact, |k| seed.unit(tick, stream ^ k));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Impact {
+    energy: f32,
+    hardest: f32,
+    point: V,
+}
+
+/// Replaces `entity` by its pieces; `draw(k)` is the k-th random value in
+/// [0, 1) of this break.
+fn shatter(
+    world: &mut World,
+    entity: Entity,
+    impact: Impact,
+    draw: impl Fn(u64) -> f32,
+) {
+    let (Some(fracture), Some(transform), Some(renderer)) = (
+        world.get::<Fracture>(entity).cloned(),
+        world.get::<Transform>(entity).copied(),
+        world.get::<MeshRenderer>(entity).copied(),
+    ) else {
+        return;
+    };
+    let Some(mesh) = world
+        .get_resource::<AssetServer>()
+        .and_then(|assets| assets.meshes.get(renderer.mesh))
+        .cloned()
+    else {
+        return;
+    };
+    let broken = fracture.fracture(&mesh);
+    if broken.pieces.is_empty() {
+        return;
+    }
+    let body = world.get::<RigidBody>(entity).copied().unwrap_or_default();
+    let collider = world.get::<Collider>(entity).copied().unwrap_or_default();
+    let layers = world.get::<CollisionLayers>(entity).copied();
+    let [roll, pitch, yaw] = transform.rotation;
+    let turn = sim_math::rotation_from_euler(roll, pitch, yaw);
+    let scale = V::from(transform.scale);
+    let moving = body.kind == RigidBodyKind::Dynamic;
+    let (velocity, spin) = if moving {
+        (
+            V::from(body.linear_velocity),
+            V::from(body.angular_velocity),
+        )
+    } else {
+        (V::zeros(), V::zeros())
+    };
+    let pieces: Vec<(MeshAsset, V, f32)> =
+        broken.pieces.into_iter().map(centred).collect();
+    let total: f32 = pieces.iter().map(|(.., volume)| volume).sum();
+    let excess = (impact.energy - fracture.break_energy).max(0.0);
+    let scatter = (excess / body.mass.max(1e-6)).sqrt();
+    world.despawn(entity);
+    for (k, (mesh, center, volume)) in pieces.into_iter().enumerate() {
+        let offset = turn * center.component_mul(&scale);
+        let position = V::from(transform.position) + offset;
+        let away = (position - impact.point)
+            .try_normalize(1e-6)
+            .unwrap_or_default();
+        let kick = scatter * (0.5 + 0.5 * draw(k as u64));
+        let mesh = match world.get_resource_mut::<AssetServer>() {
+            Some(mut assets) => assets.meshes.insert(mesh),
+            None => return,
+        };
+        let order = next_spawn_order(world);
+        let mut piece = world.spawn((
+            Transform {
+                position: position.into(),
+                ..transform
+            },
+            MeshRenderer { mesh, ..renderer },
+            Collider {
+                shape: ColliderShape::ConvexMesh,
+                ..collider
+            },
+            PhysicsBody::default(),
+            RigidBody {
+                kind: RigidBodyKind::Dynamic,
+                mass: body.mass * volume / total.max(f32::MIN_POSITIVE),
+                linear_velocity: (velocity + spin.cross(&offset) + away * kick)
+                    .into(),
+                angular_velocity: spin.into(),
+                gravity_scale: body.gravity_scale,
+            },
+            order,
+        ));
+        if let Some(layers) = layers {
+            piece.insert(layers);
+        }
+    }
+}
+
+/// `mesh` moved so its centre of volume is the origin, that centre, and
+/// its volume.
+fn centred(mut mesh: MeshAsset) -> (MeshAsset, V, f32) {
+    let mut volume = 0.0;
+    let mut moment = V::zeros();
+    for triangle in mesh.indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2]
+            .map(|k| V::from(mesh.vertices[triangle[k] as usize].position));
+        // The tetrahedron from the origin to the triangle.
+        let part = a.dot(&b.cross(&c)) / 6.0;
+        volume += part;
+        moment += part * (a + b + c) / 4.0;
+    }
+    let center = moment / if volume.abs() > 0.0 { volume } else { 1.0 };
+    for vertex in &mut mesh.vertices {
+        vertex.position = (V::from(vertex.position) - center).into();
+    }
+    (mesh, center, volume)
 }
 
 /// The convex shape of `mesh`: its box cut by every triangle's plane.
@@ -454,6 +655,7 @@ mod tests {
             pieces: 12,
             seed: 7,
             slices: vec![[0.0, 0.0, 1.0, 0.1]],
+            ..Fracture::default()
         };
         let broken = fracture.fracture(&prism);
         assert!(broken.pieces.len() > 12, "{}", broken.pieces.len());
@@ -480,6 +682,88 @@ mod tests {
         };
         assert_eq!(at(3), at(3));
         assert_ne!(at(3), at(4));
+    }
+
+    /// Drops a 10 kg crate that breaks at 100 J from `height` metres onto
+    /// fixed ground for 1 s; returns its bodies' positions and masses.
+    fn drop_crate(height: f32) -> Vec<([f32; 3], f32)> {
+        use crate::runtime::App;
+        let mut app = App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        let world = app.world_mut();
+        let (mesh, material) = {
+            let mut assets = world.resource_mut::<AssetServer>();
+            let material = assets.fallback_material;
+            (assets.meshes.insert(box_mesh([0.5; 3])), material)
+        };
+        world.spawn((
+            Transform::new([0.0, -0.5, 0.0]),
+            PhysicsBody::default(),
+            RigidBody {
+                kind: RigidBodyKind::Fixed,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::Box {
+                    half_extents: [5.0, 0.5, 5.0],
+                },
+                ..Collider::default()
+            },
+        ));
+        world.spawn((
+            Transform::new([0.0, 0.5 + height, 0.0]),
+            PhysicsBody::default(),
+            RigidBody {
+                mass: 10.0,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::ConvexMesh,
+                ..Collider::default()
+            },
+            MeshRenderer {
+                mesh,
+                material,
+                cast_shadows: true,
+                receive_shadows: true,
+            },
+            Fracture {
+                pieces: 6,
+                break_energy: 100.0,
+                ..Fracture::default()
+            },
+        ));
+        for _ in 0..60 {
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+        }
+        let world = app.world_mut();
+        let mut bodies: Vec<_> = world
+            .query::<(&Transform, &RigidBody)>()
+            .iter(world)
+            .filter(|(_, body)| body.kind == RigidBodyKind::Dynamic)
+            .map(|(transform, body)| (transform.position, body.mass))
+            .collect();
+        bodies.sort_by(|a, b| a.0[0].total_cmp(&b.0[0]));
+        bodies
+    }
+
+    #[test]
+    fn a_hard_landing_breaks_a_crate_and_a_soft_one_does_not() {
+        // 0.2 m: about 20 J at landing.
+        assert_eq!(drop_crate(0.2).len(), 1);
+        // 3 m: about 290 J.
+        let pieces = drop_crate(3.0);
+        assert_eq!(pieces.len(), 6);
+        let mass: f32 = pieces.iter().map(|(_, mass)| mass).sum();
+        assert!((mass - 10.0).abs() < 1e-3, "pieces weigh {mass} kg");
+        for (position, _) in &pieces {
+            assert!(position.iter().all(|x| x.is_finite()));
+            // Resting on or near the ground, not flung far or fallen through.
+            assert!(position[1] > -0.1 && position[1] < 1.5, "{position:?}");
+            assert!(position[0].hypot(position[2]) < 4.0, "{position:?}");
+        }
+        assert_eq!(pieces, drop_crate(3.0));
     }
 
     #[test]

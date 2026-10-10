@@ -287,6 +287,7 @@ impl Default for App {
                     vehicle::drive_vehicles,
                     rope::build_ropes,
                     cpu_physics::step_cpu_physics,
+                    fracture::break_fractures,
                 )
                     .chain(),
                 player::player_move,
