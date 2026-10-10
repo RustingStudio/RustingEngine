@@ -6014,6 +6014,36 @@ fn a_light_ball_floats_in_a_fluid_and_a_heavy_one_sinks() {
 }
 
 #[test]
+fn a_flowing_fluid_pushes_a_floating_ball_along() {
+    let drift = |flow: f32| {
+        let mut app = App::new();
+        cpu_ground(app.world_mut());
+        let settings = FluidSettings {
+            bounds: ([-1.0, 0.0, -0.5], [1.0, 2.0, 0.5]),
+            ..FluidSettings::default()
+        };
+        let mut fluid =
+            Fluid::block([-0.9, 0.0, -0.4], [19, 5, 9], settings.spacing);
+        for velocity in &mut fluid.velocities {
+            velocity[0] = flow;
+        }
+        app.world_mut().spawn(FluidVolume::new(settings, fluid));
+        let ball = cpu_body(
+            app.world_mut(),
+            [-0.3, 0.3, 0.0],
+            ColliderShape::Sphere { radius: 0.15 },
+            RigidBodyKind::Dynamic,
+        );
+        app.world_mut().get_mut::<RigidBody>(ball).unwrap().mass = 7.0;
+        run_fixed_steps(&mut app, 12);
+        app.world().get::<Transform>(ball).unwrap().position[0] + 0.3
+    };
+    let (still, flowing) = (drift(0.0), drift(2.0));
+    assert!(still.abs() < 0.02, "a still pool moves the ball {still}");
+    assert!(flowing > 0.05, "the stream moves the ball {flowing}");
+}
+
+#[test]
 fn a_light_box_floats_in_a_fluid_and_a_heavy_one_sinks() {
     let rest_height = |mass: f32| {
         let mut app = App::new();

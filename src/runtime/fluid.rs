@@ -712,12 +712,40 @@ pub(super) fn sync_fluid_visuals(
     }
 }
 
+/// Trades momentum between a particle pushed out of a body along `outward`
+/// and the body: a particle moving into the body leaves with the body's
+/// speed along `outward`, and the body takes the momentum it lost.
+/// `share` is the particle's mass over the body's.
+fn trade(
+    velocity: &mut [f32; 3],
+    outward: [f32; 3],
+    body: &mut [f32; 3],
+    share: f32,
+) {
+    let closing: f32 = (0..3)
+        .map(|axis| (velocity[axis] - body[axis]) * outward[axis])
+        .sum();
+    if closing >= 0.0 {
+        return;
+    }
+    // Split the closing speed so total momentum is kept: the particle and
+    // the body end with the same speed along `outward`.
+    let particle = -closing / (1.0 + share);
+    for axis in 0..3 {
+        velocity[axis] += particle * outward[axis];
+        body[axis] -= particle * share * outward[axis];
+    }
+}
+
 /// Per fixed step, before [`step_fluids`]: couples `FluidVolume`s with
 /// dynamic bodies that have a sphere collider. A body gets buoyancy from the
 /// volume of sphere its overlapping particles fill, and drag; particles
 /// inside the sphere are pushed out to its surface, which displaces the
-/// fluid. Bodies and volumes are visited in `SpawnOrder` (entity order for those without one), and each body
-/// reads the particles as the previous body left them.
+/// fluid, and trade momentum with the body along the way out (see
+/// [`trade`]), so a stream pushes a body and a moving body drags the fluid.
+/// Bodies and volumes are visited in `SpawnOrder` (entity order for those
+/// without one), and each body reads the particles as the previous body left
+/// them.
 /// ponytail: sphere, box and capsule colliders only (a box at a rest pose has no
 /// torque from the fluid), and every body checks every particle.
 /// Add other shapes and use the solver's grid when this shows in profiles.
@@ -795,11 +823,14 @@ pub(super) fn couple_fluids(
                 continue;
             }
             let mut inside = 0u32;
+            let share = settings.particle_mass / body.mass;
             let displaced = match collider.shape {
                 ColliderShape::Sphere { radius } => {
                     let radius = radius
                         * transform.scale.into_iter().fold(0.0, f32::max);
-                    for position in &mut fluid.positions {
+                    for (position, velocity) in
+                        fluid.positions.iter_mut().zip(&mut fluid.velocities)
+                    {
                         let offset = sub(*position, center);
                         let distance = dot(offset).sqrt();
                         if distance >= radius {
@@ -816,6 +847,12 @@ pub(super) fn couple_fluids(
                         *position = std::array::from_fn(|axis| {
                             center[axis] + outward[axis] * radius
                         });
+                        trade(
+                            velocity,
+                            outward,
+                            &mut body.linear_velocity,
+                            share,
+                        );
                     }
                     4.0 / 3.0 * PI * radius.powi(3)
                 }
@@ -828,7 +865,9 @@ pub(super) fn couple_fluids(
                         transform.rotation[1],
                         transform.rotation[2],
                     );
-                    for position in &mut fluid.positions {
+                    for (position, velocity) in
+                        fluid.positions.iter_mut().zip(&mut fluid.velocities)
+                    {
                         let offset = sub(*position, center);
                         let mut local =
                             rotation.inverse() * Vector3::from(offset);
@@ -850,6 +889,15 @@ pub(super) fn couple_fluids(
                         let world = rotation * local;
                         *position =
                             std::array::from_fn(|i| center[i] + world[i]);
+                        let mut face = Vector3::zeros();
+                        face[axis] = sign;
+                        let outward = rotation * face;
+                        trade(
+                            velocity,
+                            outward.into(),
+                            &mut body.linear_velocity,
+                            share,
+                        );
                     }
                     8.0 * half[0] * half[1] * half[2]
                 }
@@ -866,7 +914,9 @@ pub(super) fn couple_fluids(
                         transform.rotation[2],
                     );
                     let axis = rotation * Vector3::y();
-                    for position in &mut fluid.positions {
+                    for (position, velocity) in
+                        fluid.positions.iter_mut().zip(&mut fluid.velocities)
+                    {
                         let offset = Vector3::from(sub(*position, center));
                         // The nearest point of the core segment, then the
                         // same push as a sphere from there.
@@ -885,6 +935,12 @@ pub(super) fn couple_fluids(
                         let pushed = axis * along + outward * radius;
                         *position =
                             std::array::from_fn(|i| center[i] + pushed[i]);
+                        trade(
+                            velocity,
+                            outward.into(),
+                            &mut body.linear_velocity,
+                            share,
+                        );
                     }
                     PI * radius * radius * 2.0 * half
                         + 4.0 / 3.0 * PI * radius.powi(3)
@@ -991,6 +1047,21 @@ pub(super) fn sync_fluid_surfaces(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_trade_keeps_momentum_and_only_acts_on_closing_particles() {
+        let (mut particle, mut body) = ([0.0, -2.0, 1.0], [0.0, 1.0, 0.0]);
+        super::trade(&mut particle, [0.0, 1.0, 0.0], &mut body, 0.25);
+        // 0.25 * -2 + 1 = 0.5 before; both move at 0.4 along y after.
+        assert_eq!([particle[0], particle[2]], [0.0, 1.0]);
+        assert!((particle[1] - 0.4).abs() < 1e-6, "{particle:?}");
+        assert!((body[1] - 0.4).abs() < 1e-6, "{body:?}");
+        assert!((0.25 * particle[1] + body[1] - 0.5).abs() < 1e-6);
+        let leaving = [0.0, 3.0, 0.0];
+        let mut moved = leaving;
+        super::trade(&mut moved, [0.0, 1.0, 0.0], &mut body, 0.25);
+        assert_eq!(moved, leaving);
+    }
+
     use super::*;
 
     #[test]
