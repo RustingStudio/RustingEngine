@@ -8087,3 +8087,41 @@ fn a_2d_pin_joint_swings_in_plane_and_rays_hit_polygons_and_chains() {
         [wedge]
     );
 }
+
+#[test]
+fn a_fluid_surface_reaches_rendering_only_through_extraction() {
+    let mut app = App::new();
+    app.add_plugin(crate::assets::AssetPlugin).unwrap();
+    app.add_plugin(RenderExtractPlugin).unwrap();
+    let material = app
+        .world()
+        .resource::<crate::assets::AssetServer>()
+        .fallback_material;
+    let settings = FluidSettings::default();
+    let fluid = Fluid::block([0.0, 1.0, 0.0], [3, 3, 3], settings.spacing);
+    let mut volume = FluidVolume::new(settings, fluid);
+    volume.surface = Some(crate::runtime::FluidSurface::new(material));
+    app.world_mut().spawn(volume);
+    run_fixed_steps(&mut app, 2);
+    // The renderer sees one extracted renderable: a mesh asset and a
+    // material, not the particle buffers.
+    let extracted = app.world().resource::<RenderWorld>().renderables.clone();
+    assert_eq!(extracted.len(), 1);
+    let mesh = extracted[0].mesh;
+    assert_eq!(extracted[0].material, material);
+    let revision = |app: &App| {
+        app.world()
+            .resource::<crate::assets::AssetServer>()
+            .meshes
+            .revision(mesh)
+            .unwrap()
+    };
+    let before = revision(&app);
+    run_fixed_steps(&mut app, 5);
+    // The mesh asset is rewritten in place, so the renderer re-uploads it by
+    // its revision while the extracted handle stays the same.
+    assert!(revision(&app) > before);
+    let extracted = &app.world().resource::<RenderWorld>().renderables;
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].mesh, mesh);
+}
