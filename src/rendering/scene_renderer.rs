@@ -545,6 +545,8 @@ struct ShadowUpload {
     cluster_view: [f32; 4],
     /// Cluster near plane in x and `ln(far / near)` in y.
     cluster_depth: [f32; 4],
+    /// x is how much shadows block the fog's glow toward the sun.
+    fog_shafts: [f32; 4],
 }
 
 /// Side length in texels of the directional shadow map and the view
@@ -3168,6 +3170,12 @@ impl SceneRenderer {
                 cluster_depth: [
                     cluster_range[0],
                     (cluster_range[1] / cluster_range[0]).ln(),
+                    0.0,
+                    0.0,
+                ],
+                fog_shafts: [
+                    fog.map_or(0.0, |fog| fog.light_shafts.clamp(0.0, 1.0)),
+                    0.0,
                     0.0,
                     0.0,
                 ],
@@ -9571,6 +9579,7 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 cascade_info;
     vec4 cluster_view;
     vec4 cluster_depth;
+    vec4 fog_shafts;
 } shadow;
 layout(set = 2, binding = 2) uniform sampler2D environment_map;
 layout(set = 2, binding = 3) uniform sampler2D scene_color;
@@ -10638,6 +10647,7 @@ struct Light {
 layout(set = 0, binding = 2) readonly buffer Lights {
     Light data[];
 } lights;
+layout(set = 2, binding = 0) uniform sampler2DShadow shadow_map;
 layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 environment;
     vec4 scene_color;
@@ -10647,6 +10657,13 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 fog;
     vec4 fog_shape;
     vec4 ambient_occlusion;
+    mat4 cascades[6];
+    vec4 cascade_far;
+    vec4 cascade_forward;
+    vec4 cascade_info;
+    vec4 cluster_view;
+    vec4 cluster_depth;
+    vec4 fog_shafts;
 } shadow;
 #include "fog.glsl"
 void main() {
@@ -11586,6 +11603,69 @@ mod tests {
             ..fog
         });
         assert_eq!(render_pixel(&mut sky, center), [0, 0, 0]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn light_shafts_keep_fog_in_a_casters_shadow_dark() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // The camera looks down -Z into the sun, which shines up +Z from
+        // under a black slab at z = -3: all fog in view lies in its shadow.
+        let mut scene = SlabScene::new(&[(
+            -3.0,
+            MaterialAsset {
+                base_color: [0.0, 0.0, 0.0, 1.0],
+                ..MaterialAsset::default()
+            },
+        )]);
+        scene.render_world.ambient_light = None;
+        scene.render_world.renderables[0].cast_shadows = true;
+        let direction = Vector3::new(0.1, 0.0, 1.0).normalize();
+        scene.render_world.directional_lights.push(
+            crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &direction,
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: 500_000.0,
+                    shadows: true,
+                },
+            },
+        );
+        let fog = |light_shafts| crate::runtime::Fog {
+            color: [0.0; 3],
+            density: 1.0,
+            height_falloff: 0.0,
+            sun_scatter: 1.0,
+            light_shafts,
+            ..crate::runtime::Fog::default()
+        };
+        let center = [4, 4];
+        scene.render_world.fog = Some(fog(0.0));
+        let [glow, ..] = render_pixel(&mut scene, center);
+        assert!(glow > 150, "fog glows toward the sun, got {glow}");
+        scene.render_world.fog = Some(fog(1.0));
+        let [shaft, ..] = render_pixel(&mut scene, center);
+        assert!(shaft < 30, "shadowed fog stays dark, got {shaft}");
+        // Without a shadow map there is nothing to block the glow.
+        scene.render_world.directional_lights[0].light.shadows = false;
+        scene.render_world.lights_revision += 1;
+        let [unshadowed, ..] = render_pixel(&mut scene, center);
+        assert!(unshadowed > 150, "no shadows, no shafts: {unshadowed}");
     }
 
     #[test]

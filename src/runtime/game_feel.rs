@@ -1297,6 +1297,10 @@ pub struct Fog {
     pub sun_scatter: f32,
     /// How much the background behind everything fades into the fog.
     pub sky_affect: f32,
+    /// How much shadows block the glow toward the sun, 0 to 1: at 1 the
+    /// fog behind shadow-casting objects stays dark, showing light shafts.
+    /// Needs the sun to cast shadows.
+    pub light_shafts: f32,
 }
 
 impl Default for Fog {
@@ -1308,6 +1312,7 @@ impl Default for Fog {
             height_falloff: 0.1,
             sun_scatter: 0.3,
             sky_affect: 1.0,
+            light_shafts: 0.0,
         }
     }
 }
@@ -1324,6 +1329,7 @@ impl Fog {
             height_falloff: mix(self.height_falloff, other.height_falloff),
             sun_scatter: mix(self.sun_scatter, other.sun_scatter),
             sky_affect: mix(self.sky_affect, other.sky_affect),
+            light_shafts: mix(self.light_shafts, other.light_shafts),
         }
     }
 }

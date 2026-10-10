@@ -2589,8 +2589,17 @@ Depends on: Milestones 3 and 4.
   (distant red wall and the sky turn fog-colored, near surfaces keep their
   color) and `atmosphere_effects_combine_with_every_scene_path`; unit tests
   `atmosphere_settings_come_from_the_lowest_entity` and
-  `atmosphere_settings_go_on_one_environment_object`. Not started: froxel
-  volumetrics, light shafts through shadows, local fog volumes.
+  `atmosphere_settings_go_on_one_environment_object`.
+  Partial (light shafts): `rusting.fog` `light_shafts` (0..1) scales the
+  sun glow by the share of 16 hard shadow-map taps along the camera ray
+  that the sun reaches (cascade picked per tap, per-pixel interleaved
+  gradient offset), in both the surface fog and the sky pass. Evidence:
+  GPU test `light_shafts_keep_fog_in_a_casters_shadow_dark` (fog in a
+  slab's shadow looking into the sun: 255 with shafts off, under 30 with
+  shafts on, bright again when the sun casts no shadows); dropping the
+  visibility factor or replacing the shadow tap with 1.0 fails it. Not
+  started: froxel volumetrics (the march runs per shaded pixel), local fog
+  volumes. Spot and point light shafts are not covered.
   Editor: the Scene view's viewport menu has Scene Effects toggles that
   leave fog, bloom or ambient occlusion out of the Scene view only (Play
   and games draw them all), and a selected Fog draws squares at its

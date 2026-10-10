@@ -845,9 +845,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.fog",
-        summary: "Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre. Brighter toward the sun by sun_scatter; sky_affect fades the background too. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
-        gpu: "a few instructions per pixel, plus one full-screen sky pass when sky_affect > 0",
-        example: || json!({"color": [0.55, 0.65, 0.75], "density": 0.02, "height": 0.0, "height_falloff": 0.1, "sun_scatter": 0.3, "sky_affect": 1.0}),
+        summary: "Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre. Brighter toward the sun by sun_scatter; sky_affect fades the background too. light_shafts lets the sun's shadow map darken that glow, showing shafts behind shadow casters. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
+        gpu: "a few instructions per pixel, plus one full-screen sky pass when sky_affect > 0; light_shafts > 0 adds 16 shadow-map taps per fogged pixel",
+        example: || json!({"color": [0.55, 0.65, 0.75], "density": 0.02, "height": 0.0, "height_falloff": 0.1, "sun_scatter": 0.3, "sky_affect": 1.0, "light_shafts": 0.0}),
     },
     ComponentSection {
         key: "rusting.post_volume",

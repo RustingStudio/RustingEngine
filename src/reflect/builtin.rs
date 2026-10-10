@@ -1106,6 +1106,10 @@ crate::reflect! {
             unit: "factor", min: 0.0, max: 1.0,
             doc: "how much the background fades into the fog",
         },
+        light_shafts: f32 {
+            unit: "factor", min: 0.0, max: 1.0,
+            doc: "how much shadows block the glow toward the sun: light shafts",
+        },
     }
 }
 
