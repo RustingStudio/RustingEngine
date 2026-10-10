@@ -661,17 +661,114 @@ pub(super) fn reap_surfaces(
     }
 }
 
-/// Per fixed step: advances every `FluidVolume`.
+/// Per fixed step: advances every `FluidVolume`, then lets volumes push on
+/// each other (see [`separate_volumes`]), in `SpawnOrder`.
 pub(super) fn step_fluids(
     time: bevy_ecs::prelude::Res<super::FrameTime>,
-    mut volumes: bevy_ecs::prelude::Query<&mut FluidVolume>,
+    mut volumes: bevy_ecs::prelude::Query<(
+        bevy_ecs::prelude::Entity,
+        Option<&super::SpawnOrder>,
+        &mut FluidVolume,
+    )>,
 ) {
     let dt = time.fixed_delta.as_secs_f32();
-    for mut volume in &mut volumes {
+    let mut volumes: Vec<_> = volumes.iter_mut().collect();
+    volumes.sort_by_key(|(entity, order, _)| visit_key(*order, *entity));
+    let mut volumes: Vec<&mut FluidVolume> = volumes
+        .iter_mut()
+        .map(|(.., volume)| &mut **volume)
+        .collect();
+    for volume in &mut volumes {
         let FluidVolume {
             settings, fluid, ..
-        } = &mut *volume;
+        } = &mut **volume;
         fluid.step(settings, dt);
+    }
+    separate_volumes(&mut volumes, dt);
+}
+
+/// Passes of [`separate_volumes`] per step.
+const SEPARATION_PASSES: usize = 4;
+
+/// Pushes apart particles of different volumes closer than the mean of
+/// their spacings, shared by particle mass so momentum is kept, and gives the
+/// push to their velocities: so water and sand mix, a heavy fluid sinks
+/// through a light one, and both stay in their own containers. Pairs of
+/// volumes and particles go in index order.
+// ponytail: a few Gauss-Seidel passes after the volumes step, so the
+// volumes feel each other's weight but not each other's pressure; solve
+// them in one density solve if layered fluids must hold rest density.
+fn separate_volumes(volumes: &mut [&mut FluidVolume], dt: f32) {
+    for _ in 0..SEPARATION_PASSES {
+        for b in 1..volumes.len() {
+            let (head, tail) = volumes.split_at_mut(b);
+            let other = &mut *tail[0];
+            for volume in head.iter_mut() {
+                separate(volume, other, dt);
+            }
+        }
+    }
+}
+
+/// One pass of [`separate_volumes`] over the particles of `a` and `b`.
+fn separate(a: &mut FluidVolume, b: &mut FluidVolume, dt: f32) {
+    let (mass_a, mass_b) = (a.settings.particle_mass, b.settings.particle_mass);
+    if mass_a <= 0.0 || mass_b <= 0.0 {
+        return;
+    }
+    let reach = (a.settings.spacing + b.settings.spacing) / 2.0;
+    let cell = |p: [f32; 3]| p.map(|x| (x / reach).floor() as i32);
+    let mut grid: HashMap<[i32; 3], Vec<usize>> = HashMap::new();
+    for (j, &p) in b.fluid.positions.iter().enumerate() {
+        grid.entry(cell(p)).or_default().push(j);
+    }
+    let share_a = mass_b / (mass_a + mass_b);
+    let (bounds_a, bounds_b) = (a.settings.bounds, b.settings.bounds);
+    let (fa, fb) = (&mut a.fluid, &mut b.fluid);
+    for i in 0..fa.positions.len() {
+        let [x, y, z] = cell(fa.positions[i]);
+        for offset in 0..27 {
+            let key = [
+                x + offset % 3 - 1,
+                y + offset / 3 % 3 - 1,
+                z + offset / 9 - 1,
+            ];
+            let Some(near) = grid.get(&key) else {
+                continue;
+            };
+            for &j in near {
+                let delta = Vector3::from(fa.positions[i])
+                    - Vector3::from(fb.positions[j]);
+                let length = delta.norm();
+                if length >= reach || length < 1e-6 {
+                    continue;
+                }
+                let push = delta * ((reach - length) / length);
+                let (move_a, move_b) = (push * share_a, push * (1.0 - share_a));
+                for (p, v, d, (low, high)) in [
+                    (
+                        &mut fa.positions[i],
+                        &mut fa.velocities[i],
+                        move_a,
+                        bounds_a,
+                    ),
+                    (
+                        &mut fb.positions[j],
+                        &mut fb.velocities[j],
+                        -move_b,
+                        bounds_b,
+                    ),
+                ] {
+                    // A push into a wall stays in the container.
+                    let to = (Vector3::from(*p) + d)
+                        .sup(&Vector3::from(low))
+                        .inf(&Vector3::from(high));
+                    *v = (Vector3::from(*v) + (to - Vector3::from(*p)) / dt)
+                        .into();
+                    *p = to.into();
+                }
+            }
+        }
     }
 }
 
@@ -1192,5 +1289,90 @@ mod tests {
             / fluid.positions.len() as f32;
         let ratio = mean / s.rest_density();
         assert!((0.5..1.6).contains(&ratio), "density ratio {ratio}");
+    }
+
+    fn run_app(app: &mut crate::runtime::App, ticks: u32) {
+        for _ in 0..ticks {
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+        }
+    }
+
+    type Block = ([f32; 3], [u32; 3], f32, FluidSolver, [f32; 3]);
+
+    /// The particles of each volume after 300 ticks in one 0.6 m
+    /// container, for blocks `(min, counts, particle mass, solver,
+    /// velocity)`.
+    fn mixed(blocks: &[Block]) -> Vec<Vec<[f32; 3]>> {
+        let mut app = crate::runtime::App::new();
+        let volumes: Vec<_> = blocks
+            .iter()
+            .map(|&(min, counts, particle_mass, solver, velocity)| {
+                let settings = FluidSettings {
+                    bounds: ([-0.3, 0.0, -0.3], [0.3, 2.0, 0.3]),
+                    particle_mass,
+                    solver,
+                    ..FluidSettings::default()
+                };
+                let mut fluid = Fluid::block(min, counts, 0.1);
+                fluid.velocities.fill(velocity);
+                app.world_mut()
+                    .spawn(FluidVolume::new(settings, fluid))
+                    .id()
+            })
+            .collect();
+        run_app(&mut app, 300);
+        volumes
+            .into_iter()
+            .map(|entity| {
+                app.world()
+                    .get::<FluidVolume>(entity)
+                    .unwrap()
+                    .fluid
+                    .positions
+                    .clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn heavy_grains_sink_through_water_light_ones_float_and_a_wave_pushes_a_pile(
+    ) {
+        use FluidSolver::{Granular, Particles};
+        let lowest = |points: &[[f32; 3]]| {
+            points.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min)
+        };
+        let mean_x = |points: &[[f32; 3]]| {
+            points.iter().map(|p| p[0]).sum::<f32>() / points.len() as f32
+        };
+        let pool = ([-0.25, 0.0, -0.25], [6, 3, 6], 1.0, Particles, [0.0; 3]);
+        let grains =
+            |mass| ([-0.15, 0.5, -0.15], [4, 2, 4], mass, Granular, [0.0; 3]);
+        let [water, sand] = &mixed(&[pool, grains(3.0)])[..] else {
+            unreachable!()
+        };
+        assert!(lowest(sand) < 0.02, "sand bottom at {}", lowest(sand));
+        for grain in sand {
+            for drop in water {
+                let gap = (Vector3::from(*grain) - Vector3::from(*drop)).norm();
+                assert!(gap > 0.05, "a grain {gap} m from a drop");
+            }
+        }
+        assert!(lowest(&water[..]) >= 0.0);
+        let [_, chips] = &mixed(&[pool, grains(0.3)])[..] else {
+            unreachable!()
+        };
+        assert!(lowest(chips) > 0.04, "chips bottom at {}", lowest(chips));
+        let pile = ([0.0, 0.0, -0.1], [3, 2, 3], 1.0, Granular, [0.0; 3]);
+        let wave = (
+            [-0.3, 0.0, -0.25],
+            [2, 3, 6],
+            1.0,
+            Particles,
+            [4.0, 0.0, 0.0],
+        );
+        let still = mean_x(&mixed(&[pile])[0]);
+        let pushed = mean_x(&mixed(&[pile, wave])[0]);
+        assert!(pushed > still + 0.04, "pile at {pushed}, alone {still}");
     }
 }
