@@ -2809,6 +2809,30 @@ Depends on: Milestones 3 and 4.
 ### Geometry and effects
 
 - [ ] GPU particle system reusing the physics compute infrastructure, with collision against physics shapes, attractors, sub-emitters, and trails.
+  Partial (lane/render), step 1, GPU simulation: `rusting.particle_emitter`
+  takes `simulation` (`Cpu` default, `Gpu`). A GPU emitter's fixed step only
+  counts spawns (same rate, bursts, cycles and seed stream as the CPU path);
+  each frame `gpu_particles.comp` respawns the ring slots the new spawns
+  land in (spawn `n` in slot `n % max_particles`, up to
+  `MAX_GPU_PARTICLES` = 1048576), moves every live particle with gravity,
+  wind and drag, and writes its billboard straight into a vertex buffer the
+  existing particle pipelines draw, so nothing is read back. Shapes,
+  spread, lifetime, speed and size ranges match the CPU path; color and
+  size over life are sampled at 8 points. Inspector: Simulation choice,
+  Max Particles up to 1048576 for GPU. Limits: no turbulence, start
+  colors, rotation, spin, `Local` space, `Velocity` facing or collision
+  restarts; alpha particles are not sorted; steps by frame time, so they
+  freeze while `elapsed_seconds` does. Evidence: GPU test
+  `gpu_particles_spawn_move_and_die_on_the_gpu` (an 8x8 pixel red square
+  spawns, moves 1 m under 100 m/s² wind in 0.1 s, and is gone past its
+  0.15 s lifetime); it failed with the position update removed from the
+  shader ("moved by the wind"). Unit tests
+  `gpu_emitters_only_count_spawns_and_pack_their_settings` and
+  `new_spawns_cap_at_one_ring_and_restart_from_zero`. Full check: fmt,
+  clippy (default, `--no-default-features`, `gpu-tests`), `cargo test
+  --workspace` and the gpu-tests run (1004 lib tests) pass.
+  Not done: collision against physics shapes, attractors, sub-emitters,
+  trails.
 - [ ] Particle emission driven by physics events: impacts, fracture, debris settling.
 - [ ] Decals, including decals that survive or are invalidated by fracture.
   Partial (lane/render): `rusting.decal` projects an image (or plain color)

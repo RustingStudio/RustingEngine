@@ -178,6 +178,8 @@ pub struct RenderWorld {
     /// Live particles of each visible emitter, in entity order; each batch
     /// is one instanced draw.
     pub particles: Vec<super::ParticleBatch>,
+    /// Visible GPU-simulated emitters, in entity order.
+    pub gpu_particles: Vec<super::GpuParticleBatch>,
     pub lights_revision: u64,
     pub report: ExtractionReport,
     /// Bodies whose newest runtime transforms will be owned by GPU compute.
@@ -426,6 +428,7 @@ pub fn extract_render_world(world: &mut World) {
     let screens = collect_screens(world);
     let ambient_occlusion = collect_first::<super::AmbientOcclusion>(world);
     let particles = collect_particles(world);
+    let gpu_particles = collect_gpu_particles(world);
     let has_gpu_physics_resources = world
         .contains_resource::<super::PhysicsIdRegistry>()
         && world.contains_resource::<super::GpuEventRegistry>()
@@ -578,6 +581,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.screens = screens;
     render_world.ambient_occlusion = ambient_occlusion;
     render_world.particles = particles;
+    render_world.gpu_particles = gpu_particles;
     render_world.environment = environment;
     render_world.reflection_probes = reflection_probes;
     render_world.light_probe_grid = light_probe_grid;
@@ -656,6 +660,29 @@ fn collect_particles(world: &mut World) -> Vec<super::ParticleBatch> {
         .filter(|batch| !batch.instances.is_empty())
         .collect::<Vec<_>>();
     batches.sort_by_key(|batch| batch.entity.map(Entity::index));
+    batches
+}
+
+fn collect_gpu_particles(world: &mut World) -> Vec<super::GpuParticleBatch> {
+    let mut query = world.query::<(
+        Entity,
+        &super::ParticleEmitter,
+        &super::ParticleSystem,
+        Option<&GlobalTransform>,
+        Option<&super::SceneId>,
+    )>();
+    let world = &*world;
+    let mut batches = query
+        .iter(world)
+        .filter(|(entity, emitter, ..)| {
+            emitter.simulation == super::ParticleSimulation::Gpu
+                && visible_in_hierarchy(world, *entity)
+        })
+        .map(|(entity, emitter, system, global, id)| {
+            super::gpu_particle_batch(entity, emitter, system, global, id)
+        })
+        .collect::<Vec<_>>();
+    batches.sort_by_key(|batch| batch.entity);
     batches
 }
 

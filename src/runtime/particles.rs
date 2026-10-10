@@ -70,6 +70,24 @@ pub enum ParticleFacing {
     Velocity,
 }
 
+/// Where an emitter's particles are simulated.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+pub enum ParticleSimulation {
+    /// On the CPU each fixed step: every setting works.
+    #[default]
+    Cpu,
+    /// In a compute shader each frame, for up to `MAX_GPU_PARTICLES`.
+    /// Turbulence, start colors, rotation, spin, `Local` space, `Velocity`
+    /// facing and collision restarts are ignored, and alpha blended
+    /// particles are not sorted.
+    Gpu,
+}
+
+/// Most particles one GPU emitter keeps alive.
+pub const MAX_GPU_PARTICLES: u32 = 1 << 20;
+
 /// How a particle's color mixes with what is behind it.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
@@ -224,6 +242,7 @@ pub struct ParticleEmitter {
     pub stretch: f32,
     pub blend: ParticleBlend,
     pub sprite: ParticleSprite,
+    pub simulation: ParticleSimulation,
     /// Set by `play`, `pause`, `stop`, and `restart`.
     #[serde(skip)]
     pub command: ParticleCommand,
@@ -265,6 +284,7 @@ impl Default for ParticleEmitter {
             stretch: 0.1,
             blend: ParticleBlend::Alpha,
             sprite: ParticleSprite::Soft,
+            simulation: ParticleSimulation::Cpu,
             command: ParticleCommand::None,
         }
     }
@@ -622,6 +642,11 @@ fn step(
     if !emitter.looping && after >= duration && system.particles.is_empty() {
         system.playing = false;
     }
+    if emitter.simulation == ParticleSimulation::Gpu {
+        // The renderer spawns them; newer spawns overwrite the oldest.
+        system.spawned += count;
+        return;
+    }
     let room =
         u64::from(emitter.max_particles).saturating_sub(system.alive() as u64);
     for _ in 0..count.min(room) {
@@ -873,6 +898,88 @@ pub struct ParticleBatch {
     pub instances: Vec<ParticleInstance>,
 }
 
+/// What the renderer needs to simulate one GPU emitter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuParticleBatch {
+    pub entity: Entity,
+    /// Random stream of the emitter's spawns.
+    pub stream: u64,
+    /// Spawns so far; the renderer spawns the ones it has not seen.
+    pub spawned: u64,
+    /// Ring of particle slots, 1..=`MAX_GPU_PARTICLES`.
+    pub max_particles: u32,
+    pub blend: ParticleBlend,
+    pub sprite: ParticleSprite,
+    /// Shape as 0 point, 1 box, 2 sphere, 3 cone, 4 circle.
+    pub shape: u32,
+    /// Settings the compute shader reads: emitter matrix columns, then
+    /// direction and spread, wind and gravity, lifetime and speed ranges,
+    /// size range, drag and emissive, shape size, then
+    /// `GPU_PARTICLE_CURVE` samples of color and of size over life.
+    pub rows: Vec<[f32; 4]>,
+}
+
+/// Samples of color and size over life a GPU emitter takes.
+// ponytail: curves are sampled at 8 points and lerped between.
+pub const GPU_PARTICLE_CURVE: usize = 8;
+
+/// Builds the settings of one GPU emitter.
+#[must_use]
+pub fn gpu_particle_batch(
+    entity: Entity,
+    emitter: &ParticleEmitter,
+    system: &ParticleSystem,
+    global: Option<&GlobalTransform>,
+    id: Option<&SceneId>,
+) -> GpuParticleBatch {
+    let matrix = emitter_frame(global, None).matrix;
+    let direction = sim_math::normalize(emitter.direction);
+    let mut rows = matrix.to_vec();
+    rows.extend([
+        [direction[0], direction[1], direction[2], emitter.spread],
+        [
+            emitter.wind[0],
+            emitter.wind[1],
+            emitter.wind[2],
+            emitter.gravity,
+        ],
+        [
+            emitter.lifetime[0],
+            emitter.lifetime[1],
+            emitter.speed[0],
+            emitter.speed[1],
+        ],
+        [
+            emitter.size[0],
+            emitter.size[1],
+            emitter.drag,
+            emitter.emissive,
+        ],
+        [
+            emitter.shape_size[0],
+            emitter.shape_size[1],
+            emitter.shape_size[2],
+            0.0,
+        ],
+    ]);
+    let life = |sample: usize| sample as f32 / (GPU_PARTICLE_CURVE - 1) as f32;
+    rows.extend((0..GPU_PARTICLE_CURVE).map(|i| emitter.color_at(life(i))));
+    rows.extend(
+        (0..GPU_PARTICLE_CURVE)
+            .map(|i| [emitter.size_at(life(i)), 0.0, 0.0, 0.0]),
+    );
+    GpuParticleBatch {
+        entity,
+        stream: stream_key(entity, id),
+        spawned: system.spawned,
+        max_particles: emitter.max_particles.clamp(1, MAX_GPU_PARTICLES),
+        blend: emitter.blend,
+        sprite: emitter.sprite,
+        shape: emitter.shape as u32,
+        rows,
+    }
+}
+
 /// Builds the draw list of one emitter from its live particles.
 #[must_use]
 pub fn particle_batch(
@@ -955,6 +1062,41 @@ mod tests {
         // Half a second of particles at 60 per second, give or take one.
         assert!((29..=31).contains(&system.alive()), "{}", system.alive());
         assert_eq!(system.spawned, 60);
+    }
+
+    #[test]
+    fn gpu_emitters_only_count_spawns_and_pack_their_settings() {
+        let emitter = ParticleEmitter {
+            rate: 60.0,
+            simulation: ParticleSimulation::Gpu,
+            max_particles: u32::MAX,
+            shape: EmitterShape::Sphere,
+            ..ParticleEmitter::default()
+        };
+        let system = run(&emitter, 60, 1);
+        assert_eq!(system.alive(), 0, "the renderer owns the particles");
+        assert_eq!(system.spawned, 60);
+        let global = GlobalTransform {
+            matrix: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [3.0, 4.0, 5.0, 1.0],
+            ],
+        };
+        let entity = Entity::from_raw_u32(3).unwrap();
+        let batch =
+            gpu_particle_batch(entity, &emitter, &system, Some(&global), None);
+        assert_eq!(batch.spawned, 60);
+        assert_eq!(batch.max_particles, MAX_GPU_PARTICLES);
+        assert_eq!(batch.shape, 2);
+        assert_eq!(batch.rows.len(), 9 + 2 * GPU_PARTICLE_CURVE);
+        assert_eq!(batch.rows[3], [3.0, 4.0, 5.0, 1.0]);
+        assert_eq!(batch.rows[6], [1.0, 2.0, 1.0, 2.0], "lifetime, speed");
+        // Faded in from transparent, white in the middle of life.
+        assert_eq!(batch.rows[9][3], 0.0);
+        assert_eq!(batch.rows[9 + 3], [1.0; 4]);
+        assert_eq!(batch.rows[9 + GPU_PARTICLE_CURVE], [1.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

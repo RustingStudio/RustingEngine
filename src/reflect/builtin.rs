@@ -35,7 +35,8 @@ use crate::runtime::{
 };
 use crate::runtime::{
     ColorKey, CurveKey, EmitterShape, ParticleBlend, ParticleBurst,
-    ParticleEmitter, ParticleFacing, ParticleSpace, ParticleSprite,
+    ParticleEmitter, ParticleFacing, ParticleSimulation, ParticleSpace,
+    ParticleSprite,
 };
 
 crate::reflect! {
@@ -402,6 +403,10 @@ crate::reflect! {
 }
 
 crate::reflect! {
+    enum ParticleSimulation { Cpu, Gpu }
+}
+
+crate::reflect! {
     struct ParticleBurst {
         time: f32 { unit: "s", min: 0.0, doc: "into each cycle" },
         count: u32 { unit: "particles" },
@@ -469,6 +474,9 @@ crate::reflect! {
         },
         blend: ParticleBlend,
         sprite: ParticleSprite,
+        simulation: ParticleSimulation {
+            doc: "Gpu: up to 1M particles, fewer settings",
+        },
         #[skip] command: crate::runtime::ParticleCommand,
     }
 }

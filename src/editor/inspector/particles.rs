@@ -10,7 +10,8 @@ use crate::editor::gui_elements::EditorTheme;
 use crate::runtime::{
     effect_preset, ColorKey, CurveKey, EmitterShape, ParticleBlend,
     ParticleBurst, ParticleCommand, ParticleEmitter, ParticleFacing,
-    ParticleSpace, ParticleSprite, ParticleSystem, EFFECT_PRESETS,
+    ParticleSimulation, ParticleSpace, ParticleSprite, ParticleSystem,
+    EFFECT_PRESETS, MAX_GPU_PARTICLES,
 };
 
 const SHAPES: [(EmitterShape, &str); 5] = [
@@ -31,6 +32,10 @@ const FACINGS: [(ParticleFacing, &str); 2] = [
 const BLENDS: [(ParticleBlend, &str); 2] = [
     (ParticleBlend::Alpha, "Alpha"),
     (ParticleBlend::Additive, "Additive"),
+];
+const SIMULATIONS: [(ParticleSimulation, &str); 2] = [
+    (ParticleSimulation::Cpu, "CPU"),
+    (ParticleSimulation::Gpu, "GPU"),
 ];
 const SPRITES: [(ParticleSprite, &str); 3] = [
     (ParticleSprite::Soft, "Soft"),
@@ -75,10 +80,20 @@ pub(super) fn draw_particle_emitter(
                 .speed(0.5)
                 .suffix(" /s"),
         );
+        changed |= widgets::choice(
+            ui,
+            "Simulation",
+            &mut emitter.simulation,
+            &SIMULATIONS,
+        );
+        let most = match emitter.simulation {
+            ParticleSimulation::Cpu => 100_000,
+            ParticleSimulation::Gpu => MAX_GPU_PARTICLES,
+        };
         changed |= widgets::drag(
             ui,
             "Max Particles",
-            DragValue::new(&mut emitter.max_particles).range(1..=100_000),
+            DragValue::new(&mut emitter.max_particles).range(1..=most),
         );
         changed |= widgets::drag(
             ui,

@@ -431,7 +431,7 @@ fn lod_value(camera: [f32; 4], sphere: [f32; 4], screen_size: bool) -> f32 {
 /// One particle, read per instance by the particle pipelines.
 #[repr(C)]
 #[derive(BufferContents, Vertex, Clone, Copy, Debug, PartialEq)]
-struct ParticleVertex {
+pub(super) struct ParticleVertex {
     #[format(R32G32B32_SFLOAT)]
     center: [f32; 3],
     #[format(R32_SFLOAT)]
@@ -1749,6 +1749,14 @@ pub struct SceneRenderer {
     light_probe_rows: Vec<[f32; 4]>,
     /// Next probe real-time relighting recaptures.
     light_probe_cursor: usize,
+    /// Buffers of each GPU particle emitter drawn last frame.
+    gpu_particles: HashMap<
+        bevy_ecs::entity::Entity,
+        super::gpu_particles::GpuParticleState,
+    >,
+    gpu_particle_pipeline: Option<Arc<ComputePipeline>>,
+    /// `RenderWorld::elapsed_seconds` of the last frame, for particle steps.
+    particle_clock: f32,
     /// Renderer `capture_faces` reuses while the format and size match.
     capturer: Option<(Format, u32, Box<SceneRenderer>)>,
     /// Baked lightmaps; see `lightmap` for the layout.
@@ -2182,6 +2190,9 @@ impl SceneRenderer {
             light_probe_rows: Vec::new(),
             light_probe_cursor: 0,
             capturer: None,
+            gpu_particles: HashMap::new(),
+            gpu_particle_pipeline: None,
+            particle_clock: 0.0,
             lightmaps,
             lightmap_key: 0,
             tonemap_set,
@@ -2843,6 +2854,7 @@ impl SceneRenderer {
                 .chain(render_world.color_lut.map(|(texture, _)| texture))
                 .collect(),
         )?;
+        let particle_steps = self.prepare_gpu_particles(render_world)?;
 
         let carry = self.prepared_physics.as_mut().unwrap().carry.take();
         let physics = self.prepared_physics.as_ref().unwrap();
@@ -4240,6 +4252,7 @@ impl SceneRenderer {
             }
             Ok(())
         };
+        self.record_gpu_particles(&mut commands, &particle_steps)?;
         if let Some((_, _, set)) = cull_sets.first() {
             passes.begin(&mut commands, FramePass::Culling)?;
             let phase = if occlusion {
@@ -4809,6 +4822,47 @@ impl SceneRenderer {
                         .draw(6, count, 0, first)
                         .map_err(|error| SceneRenderError(error.to_string()))?;
                 }
+            }
+        }
+        for batch in &render_world.gpu_particles {
+            let Some(state) = self.gpu_particles.get(&batch.entity) else {
+                continue;
+            };
+            let additive =
+                batch.blend == crate::runtime::ParticleBlend::Additive;
+            let pipeline =
+                active.particle_pipelines[usize::from(additive)].clone();
+            commands
+                .set_viewport(0, [scene_viewport.clone()].into_iter().collect())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .set_scissor(0, [scene_scissor].into_iter().collect())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .bind_vertex_buffers(0, state.billboards.clone())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .bind_pipeline_graphics(pipeline.clone())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .push_constants(
+                    pipeline.layout().clone(),
+                    0,
+                    particle_vertex_shader::Particles {
+                        view_projection: camera.view_projection,
+                        eye: camera.eye,
+                        right: [
+                            camera_right[0],
+                            camera_right[1],
+                            camera_right[2],
+                            0.0,
+                        ],
+                        up: [camera_up[0], camera_up[1], camera_up[2], 0.0],
+                        params: [batch.sprite as u32, 0, 0, 0],
+                    },
+                )
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            count_work(&recorded, 1, 0, u64::from(state.slots()) * 2);
+            unsafe {
+                commands
+                    .draw(6, state.slots(), 0, 0)
+                    .map_err(|error| SceneRenderError(error.to_string()))?;
             }
         }
         // Debug views show raw shader output, so they skip the curve.
@@ -5528,6 +5582,134 @@ impl SceneRenderer {
                 ambient_cube(probe, size).map(|[r, g, b]| [r, g, b, 0.0])
             })
             .collect())
+    }
+
+    /// Prepares one compute step of every GPU particle emitter, creating
+    /// buffers for new emitters and dropping those of vanished ones.
+    // ponytail: steps by frame time, so particles freeze while
+    // `elapsed_seconds` does (an editor scene that is stopped).
+    fn prepare_gpu_particles(
+        &mut self,
+        render_world: &RenderWorld,
+    ) -> Result<Vec<GpuParticleStep>, SceneRenderError> {
+        use super::gpu_particles::{new_spawns, shader, GpuParticleState};
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        let batches = &render_world.gpu_particles;
+        self.gpu_particles.retain(|entity, _| {
+            batches.iter().any(|batch| batch.entity == *entity)
+        });
+        let dt = (render_world.elapsed_seconds - self.particle_clock)
+            .clamp(0.0, 0.1);
+        self.particle_clock = render_world.elapsed_seconds;
+        let mut steps = Vec::new();
+        if batches.is_empty() {
+            return Ok(steps);
+        }
+        let pipeline = match &self.gpu_particle_pipeline {
+            Some(pipeline) => pipeline.clone(),
+            None => {
+                let pipeline = create_compute_pipeline(
+                    &self.queue,
+                    shader::load(self.queue.device().clone()),
+                )?;
+                self.gpu_particle_pipeline = Some(pipeline.clone());
+                pipeline
+            }
+        };
+        for batch in batches {
+            let state = match self.gpu_particles.entry(batch.entity) {
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if entry.get().slots() == batch.max_particles =>
+                {
+                    entry.into_mut()
+                }
+                entry => {
+                    let state = GpuParticleState::new(
+                        &self.memory_allocator,
+                        batch.max_particles,
+                    )?;
+                    match entry {
+                        std::collections::hash_map::Entry::Occupied(
+                            mut entry,
+                        ) => {
+                            entry.insert(state);
+                            entry.into_mut()
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(state)
+                        }
+                    }
+                }
+            };
+            let slots = state.slots();
+            let (first, count) =
+                new_spawns(state.spawned, batch.spawned, slots);
+            state.spawned = batch.spawned;
+            let settings = self.frame_contexts[self.frame_index]
+                .transient
+                .allocate_slice::<[f32; 4]>(batch.rows.len() as u64)
+                .map_err(|e| error(&e))?;
+            settings
+                .write()
+                .map_err(|e| error(&e))?
+                .copy_from_slice(&batch.rows);
+            self.counters.upload_bytes += settings.size();
+            let set = DescriptorSet::new(
+                self.descriptor_allocator.clone(),
+                pipeline.layout().set_layouts()[0].clone(),
+                [
+                    WriteDescriptorSet::buffer(0, state.particles.clone()),
+                    WriteDescriptorSet::buffer(1, state.billboards.clone()),
+                    WriteDescriptorSet::buffer(2, settings),
+                ],
+                [],
+            )
+            .map_err(|e| error(&e))?;
+            steps.push((
+                set,
+                shader::Step {
+                    spawn: [first as u32, count, slots, batch.shape],
+                    seed: [
+                        batch.stream as u32,
+                        (batch.stream >> 32) as u32,
+                        0,
+                        0,
+                    ],
+                    time: [dt, 0.0, 0.0, 0.0],
+                },
+                slots.div_ceil(64),
+            ));
+        }
+        Ok(steps)
+    }
+
+    /// Records the steps `prepare_gpu_particles` returned.
+    fn record_gpu_particles(
+        &self,
+        commands: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        steps: &[GpuParticleStep],
+    ) -> Result<(), SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        let Some(pipeline) = &self.gpu_particle_pipeline else {
+            return Ok(());
+        };
+        for (set, step, groups) in steps {
+            commands
+                .bind_pipeline_compute(pipeline.clone())
+                .map_err(|e| error(&e))?
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    pipeline.layout().clone(),
+                    0,
+                    set.clone(),
+                )
+                .map_err(|e| error(&e))?
+                .push_constants(pipeline.layout().clone(), 0, *step)
+                .map_err(|e| error(&e))?;
+            unsafe { commands.dispatch([*groups, 1, 1]) }
+                .map_err(|e| error(&e))?;
+        }
+        Ok(())
     }
 
     /// Lays out and bakes `render_world.lightmaps` into `lightmaps`, one
@@ -9266,6 +9448,11 @@ fn create_particle_pipeline(
     )
     .map_err(|error| SceneRenderError(error.to_string()))
 }
+
+/// One GPU particle emitter's compute step: descriptor set, push
+/// constants and workgroups.
+type GpuParticleStep =
+    (Arc<DescriptorSet>, super::gpu_particles::shader::Step, u32);
 
 /// One instanced particle draw: additive, sprite, first instance, count.
 type ParticleDraw = (bool, u32, u32, u32);
@@ -19885,6 +20072,76 @@ mod tests {
             "additive adds green: {r} {g} {b}"
         );
         assert_eq!(pixel(16, 2), [0, 0, 0], "background stays clear");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_particles_spawn_move_and_die_on_the_gpu() {
+        use crate::runtime::{
+            gpu_particle_batch, ColorKey, ParticleEmitter, ParticleSimulation,
+            ParticleSprite, ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // One red square particle starts still at x = -0.5; a strong wind
+        // pushes it along +x and it dies after 0.15 s.
+        let emitter = ParticleEmitter {
+            simulation: ParticleSimulation::Gpu,
+            max_particles: 4,
+            speed: [0.0, 0.0],
+            size: [0.5, 0.5],
+            lifetime: [0.15, 0.15],
+            wind: [100.0, 0.0, 0.0],
+            fade_in: 0.0,
+            fade_out: 0.0,
+            color_over_life: vec![ColorKey {
+                t: 0.0,
+                color: [1.0, 0.0, 0.0, 1.0],
+            }],
+            sprite: ParticleSprite::Square,
+            ..ParticleEmitter::default()
+        };
+        let global = crate::runtime::GlobalTransform {
+            matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                .into(),
+        };
+        let system = ParticleSystem {
+            spawned: 1,
+            ..ParticleSystem::default()
+        };
+        let entity = bevy_ecs::entity::Entity::from_raw_u32(1).unwrap();
+        // The orthographic test camera sees 2 units across 32 pixels.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        scene.render_world.gpu_particles = vec![gpu_particle_batch(
+            entity,
+            &emitter,
+            &system,
+            Some(&global),
+            None,
+        )];
+        let mut frame = |elapsed: f32| {
+            scene.render_world.elapsed_seconds = elapsed;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            let red = |x: usize| pixels[(16 * 32 + x) * 4 + 2];
+            let count = pixels.chunks(4).filter(|p| p[2] > 128).count();
+            (red(8), red(24), count)
+        };
+        assert_eq!(frame(0.0), (255, 0, 64), "spawned 8 pixels square");
+        // 0.1 s of 100 m/s² wind: 10 m/s, so 1 m along +x.
+        assert_eq!(frame(0.1), (0, 255, 64), "moved by the wind");
+        assert_eq!(frame(0.2), (0, 0, 0), "dead past its lifetime");
     }
 
     #[test]
