@@ -15,16 +15,17 @@ use crate::runtime::{
     CameraShake, ColorGrading, ColorLut, CombineMode, Connection, Connections,
     Counter, CullingMode, DepthOfField, DeterminismMode, Dialogue,
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
-    FluidBlock, FluidSolver, Fog, ForceField, GravityVolume, GroundSurface,
-    Health, Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
-    JointKind, JointMotor, JointSpring, LightCookie, LootEntry, LootTable,
-    MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial, PhysicsSettings,
-    PhysicsSyncMode, Pickup, PlatformerController, PlayerController, Polygon2d,
-    PostVolume, QualityProfile, RandomSeed, ReflectionProbe, RenderBounds,
-    RenderSettings, ReverbZone, SceneBackground, SceneInstance, ShadowQuality,
-    SkyLight, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, TileKind, TileMap, ToneMapper, ToneMapping,
-    Tween, TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
+    FluidBlock, FluidSolver, Fog, ForceField, Fracture, GravityVolume,
+    GroundSurface, Health, Heightfield, HudAnchor, HudElement, InputAction,
+    Joint, JointAxis, JointKind, JointMotor, JointSpring, LightCookie,
+    LootEntry, LootTable, MeshSurfaces, MotionBlur, ObjectState,
+    PhysicsMaterial, PhysicsSettings, PhysicsSyncMode, Pickup,
+    PlatformerController, PlayerController, Polygon2d, PostVolume,
+    QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
+    ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
+    SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash, StateAction,
+    StateTransition, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
+    TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -782,6 +783,14 @@ crate::reflect! {
         points: Vec<[f32; 2]> { unit: "m", doc: "outline in the object's XY plane; counterclockwise, convex for a Polygon collider" },
         depth: f32 { unit: "m", min: 0.001, doc: "thickness along Z, centred on the object" },
         closed: bool { doc: "the chain joins its last point back to the first" },
+    }
+}
+
+crate::reflect! {
+    struct Fracture {
+        pieces: u32 { min: 0.0, max: 256.0, doc: "Voronoi cells to cut the mesh into; 0 or 1 makes no Voronoi cuts" },
+        seed: u64 { doc: "picks where the Voronoi cells lie" },
+        slices: Vec<[f32; 4]> { doc: "planes [x, y, z, d] in the object's frame that cut every piece where [x, y, z] · p = d" },
     }
 }
 

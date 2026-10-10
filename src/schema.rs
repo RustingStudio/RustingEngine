@@ -1050,6 +1050,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"points": [[-1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], "depth": 1.0, "closed": true}),
     },
     ComponentSection {
+        key: "rusting.fracture",
+        summary: "How the object's mesh breaks: pieces Voronoi cells around points picked by seed, then every piece cut by each of slices (planes [x, y, z, d] in the object's frame, cutting where [x, y, z] · p = d). The mesh counts as convex, so pieces fill its convex shape; every piece is convex and suits a ConvexMesh collider. Fracture::fracture(mesh) gives the pieces and the connectivity graph of pieces that share a face. At most 256 pieces.",
+        gpu: NO_GPU,
+        example: || json!({"pieces": 8, "seed": 1, "slices": [[0.0, 1.0, 0.0, 0.0]]}),
+    },
+    ComponentSection {
         key: "rusting.heightfield",
         summary: "A grid of ground heights for a collider with shape \"Heightfield\" on the same object (static only, like TriangleMesh). heights[row][column] in metres; rows run along +Z and columns along +X, spacing metres apart, centred on the object and scaled by its transform. Game code can draw the same surface with Heightfield::mesh(). cells[row][column] (one row and column fewer than heights) picks an entry of surfaces for that cell, a patch such as ice or mud with its own friction, restitution and material name (sound_cue with_material matches it); missing cells and indices past the end use the collider's own values and physics_material.",
         gpu: NO_GPU,

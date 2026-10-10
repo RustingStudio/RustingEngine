@@ -2288,7 +2288,8 @@ Depends on: Milestones 5, 8, and 10.
 
 ### Fracture and destruction
 
-- [ ] Pre-fractured assets authored in the editor (Voronoi and slicing) with connectivity graphs.
+- [x] Pre-fractured assets authored in the editor (Voronoi and slicing) with connectivity graphs.
+  Evidence: `rusting.fracture` (`Fracture`: Voronoi `pieces` around points from the `seed` stream, then `slices` planes) is a reflected component the inspector edits and scenes save; `Fracture::fracture(mesh)` returns convex pieces (fit for `ConvexMesh`) and the links of pieces sharing a face, capped at 256 pieces. Tests in `runtime::fracture`: two slices quarter a box into 4 pieces of volume 2 with only the 4 face links; 12 Voronoi cells plus a slice fill a triangular prism to 0.5 m³ within 1e-3 as one connected graph; the same seed gives the same pieces and another seed differs; a huge piece count stays capped. The source counts as convex; the visual preview is the Milestone 12 "Fracture authoring preview" item. Full check: CPU lib 879 ok, gpu-tests run 996 ok.
 - [ ] Runtime fracture from impact energy and stress, deterministic under the seeded tick RNG.
 - [ ] Debris lifetime, budget, sleeping, and merge policies. Never drop bodies arbitrarily at the cap.
 - [ ] Destruction events consumable by audio, particles, navigation, and gameplay.

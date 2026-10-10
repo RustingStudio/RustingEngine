@@ -17,6 +17,7 @@ mod events;
 mod flip;
 pub mod fluid;
 pub mod fluid_surface;
+pub mod fracture;
 mod game_feel;
 pub mod gpu_cloth;
 mod granular;
@@ -84,6 +85,7 @@ pub use fluid::{
     capture_fluids, restore_fluids, Fluid, FluidBlock, FluidParticle,
     FluidSettings, FluidSolver, FluidSurface, FluidVolume,
 };
+pub use fracture::{Fracture, FracturedMesh, MAX_FRACTURE_PIECES};
 pub use game_feel::*;
 pub use hierarchy::{propagate_transforms, HierarchyDiagnostics};
 pub use hybrid_physics::*;
