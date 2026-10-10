@@ -39,6 +39,29 @@ pub struct FluidSettings {
     pub viscosity: f32,
     /// Axis-aligned container as (min, max) corners.
     pub bounds: ([f32; 3], [f32; 3]),
+    /// Which solver steps the particles.
+    pub solver: FluidSolver,
+}
+
+/// The solver a fluid runs on.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FluidSolver {
+    /// Position based fluid: stiff and splashy, for small volumes of a few
+    /// thousand particles.
+    #[default]
+    Particles,
+    /// FLIP on a grid over the container: no neighbor search, so it carries
+    /// large water volumes; softer, and it slowly loses volume.
+    Grid,
 }
 
 impl Default for FluidSettings {
@@ -51,6 +74,7 @@ impl Default for FluidSettings {
             relaxation: 10.0,
             viscosity: 0.01,
             bounds: ([-1.0; 3], [1.0; 3]),
+            solver: FluidSolver::Particles,
         }
     }
 }
@@ -192,6 +216,9 @@ impl Fluid {
     pub fn step(&mut self, settings: &FluidSettings, dt: f32) {
         if dt <= 0.0 {
             return;
+        }
+        if settings.solver == FluidSolver::Grid {
+            return super::flip::step(self, settings, dt);
         }
         let count = self.positions.len();
         let h = settings.radius();
@@ -399,6 +426,8 @@ pub struct FluidBlock {
     pub iterations: u32,
     /// XSPH viscosity in 0..1.
     pub viscosity: f32,
+    /// Particles for small splashy volumes, Grid for large water volumes.
+    pub solver: FluidSolver,
     /// Draw the fluid as a water surface.
     pub visible: bool,
     /// Also draw each particle as a sphere (for debugging the solver).
@@ -415,6 +444,7 @@ impl Default for FluidBlock {
             container_half_extents: [0.5, 0.5, 0.5],
             iterations: 4,
             viscosity: 0.01,
+            solver: FluidSolver::Particles,
             visible: true,
             show_particles: false,
         }
@@ -449,6 +479,7 @@ fn volume_for_block(
         spacing: block.spacing.max(0.01),
         iterations: block.iterations,
         viscosity: block.viscosity,
+        solver: block.solver,
         bounds: (
             std::array::from_fn(|axis| center[axis] - half[axis]),
             std::array::from_fn(|axis| center[axis] + half[axis]),

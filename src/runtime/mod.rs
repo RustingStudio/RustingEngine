@@ -14,6 +14,7 @@ mod cpu_physics;
 mod determinism;
 mod effect_presets;
 mod events;
+mod flip;
 pub mod fluid;
 pub mod fluid_surface;
 mod game_feel;
@@ -80,7 +81,7 @@ pub use effect_presets::*;
 pub use events::EventQueue;
 pub use fluid::{
     capture_fluids, restore_fluids, Fluid, FluidBlock, FluidParticle,
-    FluidSettings, FluidSurface, FluidVolume,
+    FluidSettings, FluidSolver, FluidSurface, FluidVolume,
 };
 pub use game_feel::*;
 pub use hierarchy::{propagate_transforms, HierarchyDiagnostics};

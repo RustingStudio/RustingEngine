@@ -15,8 +15,8 @@ use crate::runtime::{
     CameraShake, ColorGrading, ColorLut, CombineMode, Connection, Connections,
     Counter, CullingMode, DepthOfField, DeterminismMode, Dialogue,
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
-    FluidBlock, Fog, ForceField, GravityVolume, GroundSurface, Health,
-    Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
+    FluidBlock, FluidSolver, Fog, ForceField, GravityVolume, GroundSurface,
+    Health, Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
     JointKind, JointMotor, JointSpring, LightCookie, LootEntry, LootTable,
     MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial, PhysicsSettings,
     PhysicsSyncMode, Pickup, PlatformerController, PlayerController, Polygon2d,
@@ -676,6 +676,10 @@ crate::reflect! {
 }
 
 crate::reflect! {
+    enum FluidSolver { Particles, Grid }
+}
+
+crate::reflect! {
     struct FluidBlock {
         spacing: f32 { unit: "m", min: 0.02, doc: "rest spacing of particles" },
         count_x: u32 { unit: "particles" },
@@ -686,6 +690,7 @@ crate::reflect! {
         },
         iterations: u32 { unit: "passes", min: 1.0, max: 16.0 },
         viscosity: f32 { unit: "factor", min: 0.0, max: 1.0 },
+        solver: FluidSolver { doc: "Particles for small splashy volumes, Grid (FLIP) for large water" },
         visible: bool { doc: "draw the fluid as a water surface" },
         show_particles: bool { doc: "also draw one sphere per particle" },
     }

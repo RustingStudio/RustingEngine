@@ -5987,15 +5987,32 @@ fn fluids_snapshot_and_restore_to_the_same_future() {
 
 #[test]
 fn a_light_ball_floats_in_a_fluid_and_a_heavy_one_sinks() {
-    let rest_height = |mass: f32| {
+    let rest_height = |mass: f32, solver: FluidSolver| {
         let mut app = App::new();
         cpu_ground(app.world_mut());
         let settings = FluidSettings {
             bounds: ([-0.5, 0.0, -0.5], [0.5, 2.0, 0.5]),
+            solver,
+            // The grid's cells (twice the spacing) must be smaller than the
+            // ball, or the hole it leaves in the water stays open.
+            spacing: match solver {
+                FluidSolver::Particles => 0.1,
+                FluidSolver::Grid => 0.05,
+            },
             ..FluidSettings::default()
         };
-        let fluid =
-            Fluid::block([-0.4, 0.0, -0.4], [9, 5, 9], settings.spacing);
+        // Water at 1000 kg per cubic meter for either spacing.
+        let settings = FluidSettings {
+            particle_mass: 1000.0 * settings.spacing.powi(3),
+            ..settings
+        };
+        // The same 0.9 by 0.5 by 0.9 m block either way.
+        let per_meter = (1.0 / settings.spacing).round() as u32;
+        let fluid = Fluid::block(
+            [-0.4, 0.0, -0.4],
+            [9 * per_meter / 10, 5 * per_meter / 10, 9 * per_meter / 10],
+            settings.spacing,
+        );
         app.world_mut().spawn(FluidVolume::new(settings, fluid));
         let ball = cpu_body(
             app.world_mut(),
@@ -6007,10 +6024,16 @@ fn a_light_ball_floats_in_a_fluid_and_a_heavy_one_sinks() {
         run_fixed_steps(&mut app, 240);
         app.world().get::<Transform>(ball).unwrap().position[1]
     };
-    let light = rest_height(7.0);
-    let heavy = rest_height(50.0);
-    assert!(heavy < 0.3, "heavy ball rests at {heavy}");
-    assert!(light > heavy + 0.05, "light {light} vs heavy {heavy}");
+    // The grid solver floats it the same way.
+    for solver in [FluidSolver::Particles, FluidSolver::Grid] {
+        let light = rest_height(7.0, solver);
+        let heavy = rest_height(50.0, solver);
+        assert!(heavy < 0.3, "{solver:?}: heavy ball rests at {heavy}");
+        assert!(
+            light > heavy + 0.05,
+            "{solver:?}: light {light} vs heavy {heavy}"
+        );
+    }
 }
 
 #[test]
@@ -6115,6 +6138,7 @@ fn fluid_blocks_round_trip_through_scenes_and_become_volumes() {
         count_y: 2,
         count_z: 4,
         viscosity: 0.2,
+        solver: FluidSolver::Grid,
         visible: false,
         ..FluidBlock::default()
     };
@@ -6133,6 +6157,7 @@ fn fluid_blocks_round_trip_through_scenes_and_become_volumes() {
     let volume = query.single(loaded.world()).unwrap();
     assert_eq!(volume.fluid.positions.len(), 24);
     assert_eq!(volume.settings.bounds.0[1], 1.5);
+    assert_eq!(volume.settings.solver, FluidSolver::Grid);
     let _ = entity;
 }
 
