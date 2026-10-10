@@ -233,6 +233,7 @@ each one's fields, defaults and an example:
 - `rusting.color_lut`: Color lookup table under assets/, applied after tone mapping and rusting.color_grading: an image strip of N squares of N x N pixels side by side (256 x 16 or 1024 x 32).
 - `rusting.light_cookie`: On an object with a spot_light: projects an image under assets/ through the light's outer cone, like a slide in a projector (window frames, leaves, a logo).
 - `rusting.reflection_probe`: Box of half size extents around the object's position.
+- `rusting.light_probe_grid`: Grid of resolution light probes spread through a world-aligned box of half size extents around the object.
 - `rusting.fog`: Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre.
 - `rusting.procedural_sky`: Daylight sky computed from the sun (the shadow-casting directional light, else the first one): blue overhead, pale at the horizon, orange at sunset, dark at night, with a sun disc of sun_size degrees.
 - `rusting.fog_volume`: A box of uniform fog of half size extents around the object, turned and scaled with it: mist in a valley, smoke in a room.

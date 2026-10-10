@@ -844,6 +844,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"extents": [5.0, 3.0, 5.0], "intensity": 1.0}),
     },
     ComponentSection {
+        key: "rusting.light_probe_grid",
+        summary: "Grid of resolution light probes spread through a world-aligned box of half size extents around the object. Each probe records the light arriving from six directions; surfaces inside the box take their ambient light from the nearest probes in place of the sky or environment, so an enclosed room stays dark and a bright wall tints its neighbours. Baked when added or changed; at most 64 probes, the first grid in entity order.",
+        gpu: "each probe renders the scene six times at 16x16 when baked; eight probe lookups per lit pixel inside the box",
+        example: || json!({"extents": [5.0, 3.0, 5.0], "resolution": [3, 2, 3], "intensity": 1.0}),
+    },
+    ComponentSection {
         key: "rusting.fog",
         summary: "Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre. Brighter toward the sun by sun_scatter; sky_affect fades the background too. light_shafts lets the sun's shadow map darken that glow, showing shafts behind shadow casters. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
         gpu: "a few instructions per pixel, plus one full-screen sky pass when sky_affect > 0; light_shafts > 0 adds 16 shadow-map taps per fogged pixel",

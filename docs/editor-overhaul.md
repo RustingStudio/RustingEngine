@@ -412,3 +412,10 @@ record mode and the rest-pose preview. Later:
   BMP and TGA, so a Radiance `.hdr` sky has to be copied under `assets/` by
   hand. Accept `.hdr` there (no thumbnail needed at first) and offer it in
   the Environment Map texture picker.
+
+## Deferred: light probe grids
+
+- A selected `rusting.light_probe_grid` shows no box or probe dots in the
+  viewport. Reuse the reflection probe's face handles for `extents`, draw a
+  dot at each probe position, and add a "Rebake" button (the grid rebakes
+  only when a field changes).

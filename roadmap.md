@@ -2396,6 +2396,27 @@ Depends on: Milestones 3 and 4.
   occlusion culling (fails with the refraction path turned off: 255 255
   255); `transitions_list_every_layout_change_between_passes`.
 - [ ] Baked lightmaps with a GPU lightmapper and light probes for dynamic objects.
+  Partial (light probes): `rusting.light_probe_grid` (extents, resolution,
+  intensity) spreads up to 64 probes (1..=8 per axis) wall to wall through a
+  world-aligned box. When the grid is added or changes, the shared
+  `capture_faces` helper (also used by reflection probes) renders six
+  16x16 R32G32B32A32 faces per probe with a temporary renderer; they are
+  read back and `ambient_cube` integrates them on the CPU into irradiance
+  over pi toward each axis. Set 2 binding 11 holds the cubes; the fragment
+  shader's `probe_light` blends the eight nearest probes trilinearly,
+  weights the six sides by the squared normal, and replaces the sky,
+  environment and ambient diffuse light inside the box (fading in over the
+  outer tenth). Limits: static bake (moving objects and lights do not
+  update it), every surface uses probes since there are no lightmaps yet,
+  probes inside geometry read black, captured light clamps at 1, no editor
+  gizmo (deferred in `docs/editor-overhaul.md`). Evidence: GPU test
+  `light_probes_light_a_wall_with_the_red_slab_behind_the_camera` (a white
+  wall turns red from a probe that sees an unlit red slab behind the camera,
+  stays gray with the grid elsewhere or removed); it failed with the probe
+  weight zeroed (255 255 255) and with the +Z/-Z sides swapped (202 202
+  202). Unit tests `ambient_cubes_integrate_the_light_from_each_side` and
+  `light_probe_grids_clamp_and_spread_wall_to_wall`. Lightmaps are not
+  started.
 - [ ] One real-time GI technique (probe-based DDGI or voxel/SDF GI) with a quality-profile fallback to ambient probes.
 - [x] Sky system: procedural physical sky, HDRI skies, and sky-derived ambient/specular.
   Partial: `EnvironmentMap { texture, intensity }` (`rusting.environment_map`)

@@ -147,6 +147,9 @@ pub struct RenderWorld {
     /// World position and settings of each
     /// [`ReflectionProbe`](super::ReflectionProbe), in entity order.
     pub reflection_probes: Vec<([f32; 3], super::ReflectionProbe)>,
+    /// World position and settings of the first
+    /// [`LightProbeGrid`](super::LightProbeGrid) in entity order.
+    pub light_probe_grid: Option<([f32; 3], super::LightProbeGrid)>,
     pub tone_mapping: Option<ToneMapping>,
     pub fog: Option<super::Fog>,
     pub procedural_sky: Option<super::ProceduralSky>,
@@ -324,6 +327,14 @@ pub fn extract_render_world(world: &mut World) {
             .map(|(_, center, probe)| (center, probe))
             .collect()
     };
+    let light_probe_grid = world
+        .query::<(Entity, &GlobalTransform, &super::LightProbeGrid)>()
+        .iter(world)
+        .min_by_key(|(entity, ..)| entity.index())
+        .map(|(_, transform, grid)| {
+            let [x, y, z, _] = transform.matrix[3];
+            ([x, y, z], *grid)
+        });
     let fog_volumes = {
         let mut query =
             world.query::<(Entity, &GlobalTransform, &super::FogVolume)>();
@@ -560,6 +571,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.particles = particles;
     render_world.environment = environment;
     render_world.reflection_probes = reflection_probes;
+    render_world.light_probe_grid = light_probe_grid;
     if render_world.directional_lights != directional_lights
         || render_world.point_lights != point_lights
         || render_world.spot_lights != spot_lights

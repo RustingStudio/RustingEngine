@@ -1314,6 +1314,35 @@ impl Default for ReflectionProbe {
     }
 }
 
+/// Grid of light probes filling a world-aligned box of half size `extents`
+/// around the object: each probe records the light arriving from six
+/// directions, and surfaces inside the box take their ambient light from
+/// the nearest probes instead of the sky or environment, so a dark room
+/// stays dark and a red wall tints what stands next to it. The first one in
+/// entity order is used.
+// ponytail: baked when the grid is added or changes, not every frame, so
+// moving objects and lights do not update it.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LightProbeGrid {
+    /// Half size of the box along each world axis.
+    pub extents: [f32; 3],
+    /// Probes along each axis, spread from wall to wall. The renderer
+    /// clamps each to 1..=8 and the total to 64.
+    pub resolution: [u32; 3],
+    pub intensity: f32,
+}
+
+impl Default for LightProbeGrid {
+    fn default() -> Self {
+        Self {
+            extents: [5.0; 3],
+            resolution: [3; 3],
+            intensity: 1.0,
+        }
+    }
+}
+
 /// Exponential height fog: the scene fades into `color` with distance, and
 /// the fog thins out above `height`. Looking toward the sun brightens it.
 /// The one on the entity with the lowest ID is used.

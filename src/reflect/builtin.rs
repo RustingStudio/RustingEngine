@@ -17,15 +17,15 @@ use crate::runtime::{
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
     FluidBlock, Fog, FogVolume, ForceField, GravityVolume, GroundSurface,
     Health, Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
-    JointKind, JointMotor, JointSpring, LightCookie, LootEntry, LootTable,
-    MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial, PhysicsSettings,
-    PhysicsSyncMode, Pickup, PlatformerController, PlayerController, Polygon2d,
-    PostVolume, ProceduralSky, QualityProfile, RandomSeed, ReflectionProbe,
-    RenderBounds, RenderSettings, ReverbZone, SceneBackground, SceneInstance,
-    ShadowQuality, SkyLight, SlideSound, SoftBlock, SoundCue, SoundId,
-    SpawnGrid, Squash, StateAction, StateTransition, TileKind, TileMap,
-    ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle,
-    WaterBody, Wheel,
+    JointKind, JointMotor, JointSpring, LightCookie, LightProbeGrid, LootEntry,
+    LootTable, MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial,
+    PhysicsSettings, PhysicsSyncMode, Pickup, PlatformerController,
+    PlayerController, Polygon2d, PostVolume, ProceduralSky, QualityProfile,
+    RandomSeed, ReflectionProbe, RenderBounds, RenderSettings, ReverbZone,
+    SceneBackground, SceneInstance, ShadowQuality, SkyLight, SlideSound,
+    SoftBlock, SoundCue, SoundId, SpawnGrid, Squash, StateAction,
+    StateTransition, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
+    TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -1076,6 +1076,20 @@ crate::reflect! {
         extents: [f32; 3] {
             unit: "m", min: 0.0,
             doc: "half size of the box along each world axis",
+        },
+        intensity: f32 { unit: "factor", min: 0.0 },
+    }
+}
+
+crate::reflect! {
+    struct LightProbeGrid {
+        extents: [f32; 3] {
+            unit: "m", min: 0.0,
+            doc: "half size of the box along each world axis",
+        },
+        resolution: [u32; 3] {
+            unit: "probes", min: 1.0, max: 8.0,
+            doc: "probes along each axis, at most 64 in all",
         },
         intensity: f32 { unit: "factor", min: 0.0 },
     }

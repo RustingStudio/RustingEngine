@@ -500,6 +500,13 @@ const MAX_DECALS: usize = 16;
 const MAX_DECAL_IMAGES: usize = 4;
 /// Side length in texels of each captured probe face.
 const PROBE_FACE_SIZE: u32 = 128;
+/// Most light probes a grid bakes; the fragment shader indexes up to this.
+const MAX_LIGHT_PROBES: usize = 64;
+/// Side length in texels of each face a light probe bakes from.
+const LIGHT_PROBE_FACE_SIZE: u32 = 16;
+/// Rows of the light probe buffer before the probes' ambient cubes: grid
+/// center and probe count, half size and intensity, resolution.
+const LIGHT_PROBE_HEADER: usize = 3;
 /// View direction and up vector of each probe face, in layer order. The
 /// fragment shader's `PROBE_FORWARD` and `PROBE_UP` match.
 const PROBE_FACES: [([f32; 3], [f32; 3]); 6] = [
@@ -1726,6 +1733,11 @@ pub struct SceneRenderer {
     probe_maps: Arc<ImageView>,
     /// Probes `probe_maps` was captured for.
     probe_keys: Vec<([f32; 3], ReflectionProbe)>,
+    /// Header rows, then six rows of irradiance over pi per light probe
+    /// (+X, -X, +Y, -Y, +Z, -Z); set 2 binding 11.
+    light_probes: Subbuffer<[[f32; 4]]>,
+    /// Grid `light_probes` was baked for.
+    light_probe_key: Option<([f32; 3], crate::runtime::LightProbeGrid)>,
     /// Reads `hdr` as the input attachment of the tone-mapping subpass,
     /// and the bloom glow.
     tonemap_set: Arc<DescriptorSet>,
@@ -1923,6 +1935,10 @@ impl SceneRenderer {
         let scene_color =
             create_scene_color(&memory_allocator, initial_extent)?;
         let probe_maps = create_probe_maps(&memory_allocator, 1, 1)?;
+        let light_probes = create_light_probe_buffer(
+            &memory_allocator,
+            vec![[0.0; 4]; LIGHT_PROBE_HEADER + 6],
+        )?;
         let scene_color_sampler = Sampler::new(
             queue.device().clone(),
             SamplerCreateInfo {
@@ -2142,6 +2158,8 @@ impl SceneRenderer {
             scene_color_sampler,
             probe_maps,
             probe_keys: Vec::new(),
+            light_probes,
+            light_probe_key: None,
             tonemap_set,
             post_pipelines,
             bloom_chain,
@@ -2649,6 +2667,9 @@ impl SceneRenderer {
             .min(MAX_REFLECTION_PROBES)];
         if self.probe_keys != probes {
             self.capture_probes(probes, render_world, assets)?;
+        }
+        if self.light_probe_key != render_world.light_probe_grid {
+            self.bake_light_probes(render_world, assets)?;
         }
         self.counters = RenderCounters::default();
         let preparation_start = std::time::Instant::now();
@@ -3418,6 +3439,7 @@ impl SceneRenderer {
                     WriteDescriptorSet::image_view_sampler(6, view, sampler)
                 },
                 WriteDescriptorSet::buffer(7, light_clusters),
+                WriteDescriptorSet::buffer(11, self.light_probes.clone()),
                 WriteDescriptorSet::image_view_sampler_array(8, 0, {
                     let cookies = self
                         .prepared_lights
@@ -5271,10 +5293,7 @@ impl SceneRenderer {
     }
 
     /// Renders the six faces of each probe from its center into a new
-    /// `probe_maps`. A temporary renderer draws them, so this renderer's
-    /// caches, GPU physics and occlusion history stay untouched.
-    // ponytail: the temporary renderer builds every pipeline again, so a
-    // probe moved every frame stutters; keep one around if probes animate.
+    /// `probe_maps`.
     // Faces are tone mapped with Linear, so captured light clamps at 1.
     fn capture_probes(
         &mut self,
@@ -5294,78 +5313,14 @@ impl SceneRenderer {
             6 * probes.len() as u32,
             size,
         )?;
-        let mut capturer = SceneRenderer::new(
-            self.queue.clone(),
-            self.memory_allocator.clone(),
+        let centers = probes.iter().map(|(center, _)| *center);
+        let faces = self.capture_faces(
+            centers,
+            size,
             HDR_COLOR_FORMAT,
-            [size; 2],
+            render_world,
+            assets,
         )?;
-        let mut world = render_world.clone();
-        world.reflection_probes.clear();
-        world.physics_enabled = false;
-        world.physics_tick = 0;
-        world.gpu_physics_commands.clear();
-        world.gpu_physics_command_ticks.clear();
-        world.tone_mapping = None;
-        // The scene adds its own bloom over the reflection, and occlusion
-        // at the probe's viewpoint would not match the reflected surface.
-        // Fog stays: it is part of what the surroundings look like.
-        world.bloom = None;
-        world.auto_exposure = None;
-        world.ambient_occlusion = None;
-        world.depth_of_field = None;
-        world.motion_blur = None;
-        // Each face would blend in the face before it.
-        if world.antialiasing == Antialiasing::Taa {
-            world.antialiasing = Antialiasing::Off;
-        }
-        // Occlusion would test each face against the previous face's depth.
-        world.culling = CullingMode::Frustum;
-        let device = self.queue.device().clone();
-        // Faces render into their own images: vulkano cannot track a
-        // framebuffer view of one layer of a mipmapped array.
-        let mut faces = Vec::new();
-        for (center, _) in probes {
-            for &basis in &PROBE_FACES {
-                world.active_camera = Some(crate::runtime::ExtractedCamera {
-                    entity: bevy_ecs::entity::Entity::PLACEHOLDER,
-                    transform: probe_face_transform(*center, basis),
-                    projection: Projection::Perspective {
-                        vertical_fov_radians: std::f32::consts::FRAC_PI_2,
-                        near: 0.05,
-                        far: 1_000.0,
-                    },
-                    priority: 0,
-                });
-                let face = Image::new(
-                    self.memory_allocator.clone(),
-                    ImageCreateInfo {
-                        format: HDR_COLOR_FORMAT,
-                        extent: [size, size, 1],
-                        usage: ImageUsage::COLOR_ATTACHMENT
-                            | ImageUsage::TRANSFER_SRC,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo::default(),
-                )
-                .map_err(|e| error(&e))?;
-                capturer
-                    .render(
-                        vulkano::sync::now(device.clone()).boxed(),
-                        ImageView::new_default(face.clone())
-                            .map_err(|e| error(&e))?,
-                        [size; 2],
-                        SceneRenderOptions::game([size; 2]),
-                        &world,
-                        assets,
-                    )?
-                    .then_signal_fence_and_flush()
-                    .map_err(|e| error(&e))?
-                    .wait(None)
-                    .map_err(|e| error(&e))?;
-                faces.push(face);
-            }
-        }
         let mut commands = AutoCommandBufferBuilder::primary(
             self.command_allocator.clone(),
             self.queue.queue_family_index(),
@@ -5391,7 +5346,193 @@ impl SceneRenderer {
                 .map_err(|e| error(&e))?;
         }
         record_mip_chain(&mut commands, maps.image())?;
-        vulkano::sync::now(device)
+        self.submit_and_wait(commands)?;
+        self.probe_maps = maps;
+        Ok(())
+    }
+
+    /// Bakes `render_world.light_probe_grid` into `light_probes`: six faces
+    /// per probe, read back and reduced to an ambient cube on the CPU.
+    fn bake_light_probes(
+        &mut self,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<(), SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        // Set first, so a failed bake is not retried every frame.
+        self.light_probe_key = render_world.light_probe_grid;
+        let Some((center, grid)) = render_world.light_probe_grid else {
+            self.light_probes = create_light_probe_buffer(
+                &self.memory_allocator,
+                vec![[0.0; 4]; LIGHT_PROBE_HEADER + 6],
+            )?;
+            return Ok(());
+        };
+        let resolution = light_probe_resolution(grid.resolution);
+        let positions = light_probe_positions(center, grid.extents, resolution);
+        let size = LIGHT_PROBE_FACE_SIZE;
+        // 32-bit floats, so the CPU reads the texels directly.
+        let faces = self.capture_faces(
+            positions.iter().copied(),
+            size,
+            Format::R32G32B32A32_SFLOAT,
+            render_world,
+            assets,
+        )?;
+        let texels = (size * size) as usize;
+        let readback = Buffer::new_slice::<[f32; 4]>(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            (texels * faces.len()) as u64,
+        )
+        .map_err(|e| error(&e))?;
+        let mut commands = AutoCommandBufferBuilder::primary(
+            self.command_allocator.clone(),
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .map_err(|e| error(&e))?;
+        for (index, face) in faces.into_iter().enumerate() {
+            let start = (index * texels) as u64;
+            commands
+                .copy_image_to_buffer(
+                    vulkano::command_buffer::CopyImageToBufferInfo::image_buffer(
+                        face,
+                        readback.clone().slice(start..start + texels as u64),
+                    ),
+                )
+                .map_err(|e| error(&e))?;
+        }
+        self.submit_and_wait(commands)?;
+        let texels = readback.read().map_err(|e| error(&e))?;
+        let [rx, ry, rz] = resolution;
+        let mut rows = vec![
+            [center[0], center[1], center[2], positions.len() as f32],
+            [
+                grid.extents[0],
+                grid.extents[1],
+                grid.extents[2],
+                grid.intensity,
+            ],
+            [rx as f32, ry as f32, rz as f32, 0.0],
+        ];
+        for probe in texels.chunks(6 * (size * size) as usize) {
+            rows.extend(
+                ambient_cube(probe, size).map(|[r, g, b]| [r, g, b, 0.0]),
+            );
+        }
+        self.light_probes =
+            create_light_probe_buffer(&self.memory_allocator, rows)?;
+        Ok(())
+    }
+
+    /// Renders six 90-degree faces from each of `centers`, in
+    /// `PROBE_FACES` order, into new `size` square images of `format`. A
+    /// temporary renderer draws them, so this renderer's caches, GPU physics
+    /// and occlusion history stay untouched. Probes, effects and history
+    /// that would not match a static capture are turned off.
+    // ponytail: the temporary renderer builds every pipeline again, so a
+    // probe moved every frame stutters; keep one around if probes animate.
+    fn capture_faces(
+        &self,
+        centers: impl IntoIterator<Item = [f32; 3]>,
+        size: u32,
+        format: Format,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<Vec<Arc<Image>>, SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        let mut capturer = SceneRenderer::new(
+            self.queue.clone(),
+            self.memory_allocator.clone(),
+            format,
+            [size; 2],
+        )?;
+        let mut world = render_world.clone();
+        world.reflection_probes.clear();
+        world.light_probe_grid = None;
+        world.physics_enabled = false;
+        world.physics_tick = 0;
+        world.gpu_physics_commands.clear();
+        world.gpu_physics_command_ticks.clear();
+        world.tone_mapping = None;
+        // The scene adds its own bloom over the reflection, and occlusion
+        // at the probe's viewpoint would not match the reflected surface.
+        // Fog stays: it is part of what the surroundings look like.
+        world.bloom = None;
+        world.auto_exposure = None;
+        world.ambient_occlusion = None;
+        world.depth_of_field = None;
+        world.motion_blur = None;
+        // Each face would blend in the face before it.
+        if world.antialiasing == Antialiasing::Taa {
+            world.antialiasing = Antialiasing::Off;
+        }
+        // Occlusion would test each face against the previous face's depth.
+        world.culling = CullingMode::Frustum;
+        let device = self.queue.device().clone();
+        // Faces render into their own images: vulkano cannot track a
+        // framebuffer view of one layer of a mipmapped array.
+        let mut faces = Vec::new();
+        for center in centers {
+            for &basis in &PROBE_FACES {
+                world.active_camera = Some(crate::runtime::ExtractedCamera {
+                    entity: bevy_ecs::entity::Entity::PLACEHOLDER,
+                    transform: probe_face_transform(center, basis),
+                    projection: Projection::Perspective {
+                        vertical_fov_radians: std::f32::consts::FRAC_PI_2,
+                        near: 0.05,
+                        far: 1_000.0,
+                    },
+                    priority: 0,
+                });
+                let face = Image::new(
+                    self.memory_allocator.clone(),
+                    ImageCreateInfo {
+                        format,
+                        extent: [size, size, 1],
+                        usage: ImageUsage::COLOR_ATTACHMENT
+                            | ImageUsage::TRANSFER_SRC,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo::default(),
+                )
+                .map_err(|e| error(&e))?;
+                capturer
+                    .render(
+                        vulkano::sync::now(device.clone()).boxed(),
+                        ImageView::new_default(face.clone())
+                            .map_err(|e| error(&e))?,
+                        [size; 2],
+                        SceneRenderOptions::game([size; 2]),
+                        &world,
+                        assets,
+                    )?
+                    .then_signal_fence_and_flush()
+                    .map_err(|e| error(&e))?
+                    .wait(None)
+                    .map_err(|e| error(&e))?;
+                faces.push(face);
+            }
+        }
+        Ok(faces)
+    }
+
+    /// Submits `commands` on the queue and blocks until they finish.
+    fn submit_and_wait(
+        &self,
+        commands: AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    ) -> Result<(), SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        vulkano::sync::now(self.queue.device().clone())
             .then_execute(
                 self.queue.clone(),
                 commands.build().map_err(|e| error(&e))?,
@@ -5400,9 +5541,7 @@ impl SceneRenderer {
             .then_signal_fence_and_flush()
             .map_err(|e| error(&e))?
             .wait(None)
-            .map_err(|e| error(&e))?;
-        self.probe_maps = maps;
-        Ok(())
+            .map_err(|e| error(&e))
     }
 
     fn prepare_visible_meshes(
@@ -7792,6 +7931,103 @@ fn create_probe_maps(
     .map_err(|error| SceneRenderError(error.to_string()))
 }
 
+/// Storage buffer holding the light probe rows.
+fn create_light_probe_buffer(
+    allocator: &Arc<StandardMemoryAllocator>,
+    rows: Vec<[f32; 4]>,
+) -> Result<Subbuffer<[[f32; 4]]>, SceneRenderError> {
+    Buffer::from_iter(
+        allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::STORAGE_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        rows,
+    )
+    .map_err(|error| SceneRenderError(error.to_string()))
+}
+
+/// Probes per axis: each clamped to 1..=8, then the largest axis shrunk
+/// until there are at most `MAX_LIGHT_PROBES`.
+fn light_probe_resolution(resolution: [u32; 3]) -> [u32; 3] {
+    let mut resolution = resolution.map(|count| count.clamp(1, 8));
+    while resolution.iter().product::<u32>() as usize > MAX_LIGHT_PROBES {
+        let largest = (0..3).max_by_key(|&axis| resolution[axis]).unwrap_or(0);
+        resolution[largest] -= 1;
+    }
+    resolution
+}
+
+/// World position of each probe, x fastest, then y, then z; the fragment
+/// shader's `probe_light` indexes the same way. One probe on an axis sits
+/// at the center, more spread from wall to wall.
+fn light_probe_positions(
+    center: [f32; 3],
+    extents: [f32; 3],
+    resolution: [u32; 3],
+) -> Vec<[f32; 3]> {
+    let along = |axis: usize, index: u32| {
+        if resolution[axis] == 1 {
+            center[axis]
+        } else {
+            center[axis] - extents[axis]
+                + 2.0 * extents[axis] * index as f32
+                    / (resolution[axis] - 1) as f32
+        }
+    };
+    let mut positions = Vec::new();
+    for z in 0..resolution[2] {
+        for y in 0..resolution[1] {
+            for x in 0..resolution[0] {
+                positions.push([along(0, x), along(1, y), along(2, z)]);
+            }
+        }
+    }
+    positions
+}
+
+/// Irradiance over pi toward +X, -X, +Y, -Y, +Z and -Z from the six
+/// `size` square faces of one probe in `PROBE_FACES` order (rgba texels,
+/// row 0 at the top of each face).
+fn ambient_cube(texels: &[[f32; 4]], size: u32) -> [[f32; 3]; 6] {
+    let axes = PROBE_FACES.map(|(forward, _)| Vector3::from(forward));
+    let mut sums = [Vector3::zeros(); 6];
+    let face_texels = (size * size) as usize;
+    for (face, &(forward, up)) in PROBE_FACES.iter().enumerate() {
+        let forward = Vector3::from(forward);
+        let up = Vector3::from(up);
+        let right = forward.cross(&up);
+        for (index, texel) in texels[face * face_texels..][..face_texels]
+            .iter()
+            .enumerate()
+        {
+            let column = (index as u32 % size) as f32 + 0.5;
+            let row = (index as u32 / size) as f32 + 0.5;
+            let x = 2.0 * column / size as f32 - 1.0;
+            let y = 2.0 * row / size as f32 - 1.0;
+            let direction = forward + right * x - up * y;
+            let length = direction.norm();
+            // Solid angle of a texel on the unit cube face.
+            let solid_angle =
+                (2.0 / size as f32).powi(2) / (length * length * length);
+            let radiance = Vector3::new(texel[0], texel[1], texel[2])
+                .map(|channel| if channel.is_finite() { channel } else { 0.0 });
+            for (axis, sum) in axes.iter().zip(&mut sums) {
+                let cosine = direction.dot(axis) / length;
+                if cosine > 0.0 {
+                    *sum += radiance * cosine * solid_angle;
+                }
+            }
+        }
+    }
+    sums.map(|sum| (sum / std::f32::consts::PI).into())
+}
+
 /// Camera transform at `center` looking along `forward`, the camera's -Z.
 fn probe_face_transform(
     center: [f32; 3],
@@ -9827,6 +10063,13 @@ vec3 cookie_at(int slot, vec2 uv) {
 // Light bounced off nearby surfaces per target pixel when
 // shadow.ambient_occlusion.z is 1.
 layout(set = 2, binding = 10) uniform sampler2D indirect_light;
+// Light probe grid: center and probe count (0 for none), half size and
+// intensity, probes per axis, then six rows of irradiance over pi per probe
+// (+X, -X, +Y, -Y, +Z, -Z), x fastest, then y, then z.
+layout(set = 2, binding = 11) readonly buffer LightProbes {
+    vec4 header[3];
+    vec4 cubes[];
+} light_probes;
 // Decal images; decal_axes[i].w picks one. Matches MAX_DECAL_IMAGES.
 layout(set = 2, binding = 9) uniform sampler2D decal_images[4];
 vec4 decal_at(int slot, vec2 uv) {
@@ -9929,6 +10172,41 @@ vec3 surroundings(vec3 position, vec3 direction, float lod, float rough) {
         sum += vec4(light * weight, weight);
     }
     return sum.w > 0.0 ? mix(sky, sum.rgb / sum.w, min(sum.w, 1.0)) : sky;
+}
+// Diffuse light at `position` toward `normal` from the light probe grid,
+// blended trilinearly between the eight nearest probes, with its weight in
+// w: 0 outside the grid, fading in over the outer tenth of the box.
+vec4 probe_light(vec3 position, vec3 normal) {
+    if (light_probes.header[0].w < 0.5) {
+        return vec4(0.0);
+    }
+    vec3 extents = max(light_probes.header[1].xyz, vec3(1e-4));
+    vec3 local = position - light_probes.header[0].xyz;
+    vec3 inside = extents - abs(local);
+    float margin = min(inside.x, min(inside.y, inside.z));
+    if (margin <= 0.0) {
+        return vec4(0.0);
+    }
+    ivec3 count = ivec3(light_probes.header[2].xyz);
+    vec3 cell = (local / extents * 0.5 + 0.5) * vec3(count - 1);
+    ivec3 low = clamp(ivec3(floor(cell)), ivec3(0), max(count - 2, ivec3(0)));
+    vec3 t = clamp(cell - vec3(low), 0.0, 1.0);
+    vec3 n2 = normal * normal;
+    ivec3 face = ivec3(normal.x < 0.0 ? 1 : 0, normal.y < 0.0 ? 3 : 2,
+        normal.z < 0.0 ? 5 : 4);
+    vec3 sum = vec3(0.0);
+    for (int corner = 0; corner < 8; ++corner) {
+        ivec3 step_to = ivec3(corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
+        ivec3 probe = min(low + step_to, count - 1);
+        vec3 w = mix(1.0 - t, t, vec3(step_to));
+        int base = 6 * ((probe.z * count.y + probe.y) * count.x + probe.x);
+        sum += w.x * w.y * w.z * (n2.x * light_probes.cubes[base + face.x].rgb
+            + n2.y * light_probes.cubes[base + face.y].rgb
+            + n2.z * light_probes.cubes[base + face.z].rgb);
+    }
+    float weight = clamp(
+        margin / (0.1 * min(extents.x, min(extents.y, extents.z))), 0.0, 1.0);
+    return vec4(sum * light_probes.header[1].w, weight);
 }
 // Target pixel of a point in normalized device coordinates.
 vec2 screen_pixel(vec2 ndc) {
@@ -10162,9 +10440,11 @@ void main() {
         return;
     }
     reflection = mix(reflection, traced.rgb, traced.a);
-    vec3 result = (surroundings(
-            v_world_position, normal, max(last_mip - 1.0, 0.0), 1.0)
-            * diffuse_color * (1.0 - env_fresnel)
+    vec3 ambient = surroundings(
+        v_world_position, normal, max(last_mip - 1.0, 0.0), 1.0);
+    vec4 probed = probe_light(v_world_position, normal);
+    ambient = mix(ambient, probed.rgb, probed.w);
+    vec3 result = (ambient * diffuse_color * (1.0 - env_fresnel)
         + reflection * env_fresnel)
         * occlusion;
     if (PASS != 1u && shadow.ambient_occlusion.z > 0.5) {
@@ -11660,6 +11940,49 @@ mod tests {
         sort_back_to_front(&mut blended, [0.0; 3], [0.0, 0.0, -1.0]);
         assert_eq!(blended[0].position[2], -5.0, "farthest drawn first");
         assert_eq!(blended[1].position[2], -1.0);
+    }
+
+    #[test]
+    fn ambient_cubes_integrate_the_light_from_each_side() {
+        let size = 8;
+        let face = (size * size) as usize;
+        // Uniform radiance: every side receives irradiance pi.
+        let cube = ambient_cube(&vec![[0.5, 1.0, 2.0, 1.0]; 6 * face], size);
+        for [r, g, b] in cube {
+            assert!((r - 0.5).abs() < 0.02, "{r}");
+            assert!((g - 1.0).abs() < 0.02 && (b - 2.0).abs() < 0.04);
+        }
+        // Light only through the +Y face (index 2): +Y gets most, -Y none,
+        // the four sides an equal share.
+        let mut texels = vec![[0.0; 4]; 6 * face];
+        texels[2 * face..3 * face].fill([1.0; 4]);
+        let cube = ambient_cube(&texels, size).map(|[r, ..]| r);
+        assert!(cube[2] > 0.5 && cube[3] == 0.0, "{cube:?}");
+        for side in [0, 1, 4, 5] {
+            assert!((cube[side] - cube[0]).abs() < 1e-4);
+            assert!(cube[side] > 0.0 && cube[side] < cube[2] / 2.0);
+        }
+    }
+
+    #[test]
+    fn light_probe_grids_clamp_and_spread_wall_to_wall() {
+        assert_eq!(light_probe_resolution([0, 3, 99]), [1, 3, 8]);
+        let clamped = light_probe_resolution([8, 8, 8]);
+        assert!(clamped.iter().product::<u32>() as usize <= MAX_LIGHT_PROBES);
+        assert_eq!(clamped, [4, 4, 4]);
+        let positions =
+            light_probe_positions([1.0, 2.0, 3.0], [2.0, 1.0, 1.0], [3, 1, 2]);
+        assert_eq!(
+            positions,
+            [
+                [-1.0, 2.0, 2.0],
+                [1.0, 2.0, 2.0],
+                [3.0, 2.0, 2.0],
+                [-1.0, 2.0, 4.0],
+                [1.0, 2.0, 4.0],
+                [3.0, 2.0, 4.0],
+            ]
+        );
     }
 
     /// Full-screen slabs at the given depths seen by an orthographic camera
@@ -18574,6 +18897,60 @@ mod tests {
             "the -X floor reflects the red ceiling: {left:?}"
         );
         assert!(right[0] < 150, "the +X floor does not: {right:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn light_probes_light_a_wall_with_the_red_slab_behind_the_camera() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A white wall faces the camera; a wide unlit red slab hangs behind
+        // the camera, out of view. Only a probe in front of the wall sees it.
+        let mut scene = SlabScene::new(&[
+            (0.0, MaterialAsset::default()),
+            (
+                8.0,
+                MaterialAsset {
+                    model: crate::assets::MaterialModel::Unlit,
+                    base_color: [1.0, 0.0, 0.0, 1.0],
+                    ..MaterialAsset::default()
+                },
+            ),
+        ]);
+        scene.render_world.renderables[1].transform.matrix =
+            (Matrix4::new_translation(&Vector3::new(0.0, 0.0, 8.0))
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    40.0, 40.0, 0.1,
+                )))
+            .into();
+        let mut wall = |center: [f32; 3]| {
+            scene.render_world.light_probe_grid = Some((
+                center,
+                crate::runtime::LightProbeGrid {
+                    extents: [3.0; 3],
+                    resolution: [1, 1, 1],
+                    intensity: 1.0,
+                },
+            ));
+            render_pixel(&mut scene, [4, 4])
+        };
+        let outside = wall([0.0, 0.0, 20.0]);
+        assert!(
+            outside[0] > 40 && outside[0].abs_diff(outside[1]) < 8,
+            "gray from the ambient light outside the grid: {outside:?}"
+        );
+        let inside = wall([0.0, 0.0, 2.0]);
+        assert!(
+            inside[0] > 40 && inside[1] < inside[0] / 3,
+            "red from the probe: {inside:?}"
+        );
+        scene.render_world.light_probe_grid = None;
+        assert_eq!(render_pixel(&mut scene, [4, 4]), outside, "no grid");
     }
 
     #[test]
