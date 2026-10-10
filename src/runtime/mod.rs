@@ -85,7 +85,9 @@ pub use fluid::{
     capture_fluids, restore_fluids, Fluid, FluidBlock, FluidParticle,
     FluidSettings, FluidSolver, FluidSurface, FluidVolume,
 };
-pub use fracture::{Fracture, FracturedMesh, MAX_FRACTURE_PIECES};
+pub use fracture::{
+    Debris, DebrisBudget, Fracture, FracturedMesh, MAX_FRACTURE_PIECES,
+};
 pub use game_feel::*;
 pub use hierarchy::{propagate_transforms, HierarchyDiagnostics};
 pub use hybrid_physics::*;
@@ -288,6 +290,7 @@ impl Default for App {
                     rope::build_ropes,
                     cpu_physics::step_cpu_physics,
                     fracture::break_fractures,
+                    fracture::manage_debris,
                 )
                     .chain(),
                 player::player_move,

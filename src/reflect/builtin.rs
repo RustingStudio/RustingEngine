@@ -792,6 +792,8 @@ crate::reflect! {
         seed: u64 { doc: "picks where the Voronoi cells lie" },
         slices: Vec<[f32; 4]> { doc: "planes [x, y, z, d] in the object's frame that cut every piece where [x, y, z] · p = d" },
         break_energy: f32 { unit: "J", min: 0.0, doc: "impact energy within one fixed tick that breaks the object during play; 0 never breaks it" },
+        debris_lifetime: f32 { unit: "s", min: 0.0, doc: "seconds a piece stays once it sleeps; 0 keeps pieces" },
+        merge_debris: bool { doc: "once every piece of a break sleeps, they merge into one static body" },
     }
 }
 

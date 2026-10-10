@@ -14,6 +14,15 @@
 //! the energy beyond `break_energy` scattering the pieces away from the
 //! hardest hit.
 //!
+//! The pieces are [`Debris`], and [`manage_debris`] keeps them cheap. Only
+//! sleeping debris is ever removed or merged, so nothing vanishes in
+//! flight: a piece asleep for its fracture's `debris_lifetime` despawns,
+//! and with `merge_debris` the pieces of one break, once all asleep, become
+//! one static triangle-mesh body. At the [`DebrisBudget`] a new break first
+//! removes the longest-sleeping debris to make room; if too little debris
+//! sleeps, the object stays whole this tick rather than dropping moving
+//! pieces.
+//!
 //! Determinism: Voronoi seeds come from [`RandomSeed`] streams of the
 //! fracture's own seed, cells are cut in index order, objects break in
 //! `SceneId` order, and the scatter is drawn from the scene's
@@ -21,9 +30,10 @@
 //! give the same bits.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use bevy_ecs::entity::Entity;
-use bevy_ecs::prelude::{Component, World};
+use bevy_ecs::prelude::{Component, Has, Resource, World};
 use nalgebra::Vector3;
 
 use super::cpu_physics::next_spawn_order;
@@ -31,7 +41,7 @@ use crate::assets::{AssetServer, MeshAsset, MeshVertex};
 use crate::runtime::{
     sim_math, Collider, ColliderShape, CollisionLayers, FrameTime,
     MeshRenderer, PhysicsBody, PhysicsWorld, RandomSeed, RigidBody,
-    RigidBodyKind, SceneId,
+    RigidBodyKind, SceneId, Sleeping, SpawnOrder,
 };
 use crate::Transform;
 
@@ -56,6 +66,32 @@ pub struct Fracture {
     /// Impact energy in joules that breaks the object during play within
     /// one fixed tick; 0 never breaks it.
     pub break_energy: f32,
+    /// Seconds a piece stays once it sleeps; 0 keeps pieces.
+    pub debris_lifetime: f32,
+    /// Once every piece of a break sleeps, they merge into one static body.
+    pub merge_debris: bool,
+}
+
+/// Most [`Debris`] bodies alive at once; 0 is no cap.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DebrisBudget(pub u32);
+
+impl Default for DebrisBudget {
+    fn default() -> Self {
+        Self(512)
+    }
+}
+
+/// A body made by a break.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct Debris {
+    /// The [`SpawnOrder`] of the break's first piece, shared by all its
+    /// pieces.
+    pub group: u64,
+    pub lifetime: f32,
+    pub merge: bool,
+    /// The fixed tick it fell asleep on; `None` while it moves.
+    pub asleep_since: Option<u64>,
 }
 
 impl Default for Fracture {
@@ -65,6 +101,8 @@ impl Default for Fracture {
             seed: 1,
             slices: Vec::new(),
             break_energy: 0.0,
+            debris_lifetime: 0.0,
+            merge_debris: false,
         }
     }
 }
@@ -261,9 +299,13 @@ fn shatter(
     let pieces: Vec<(MeshAsset, V, f32)> =
         broken.pieces.into_iter().map(centred).collect();
     let total: f32 = pieces.iter().map(|(.., volume)| volume).sum();
+    if !make_room(world, pieces.len()) {
+        return;
+    }
     let excess = (impact.energy - fracture.break_energy).max(0.0);
     let scatter = (excess / body.mass.max(1e-6)).sqrt();
     world.despawn(entity);
+    let mut group = None;
     for (k, (mesh, center, volume)) in pieces.into_iter().enumerate() {
         let offset = turn * center.component_mul(&scale);
         let position = V::from(transform.position) + offset;
@@ -276,6 +318,7 @@ fn shatter(
             None => return,
         };
         let order = next_spawn_order(world);
+        let group = *group.get_or_insert(order.0);
         let mut piece = world.spawn((
             Transform {
                 position: position.into(),
@@ -296,10 +339,193 @@ fn shatter(
                 gravity_scale: body.gravity_scale,
             },
             order,
+            Debris {
+                group,
+                lifetime: fracture.debris_lifetime,
+                merge: fracture.merge_debris,
+                asleep_since: None,
+            },
         ));
         if let Some(layers) = layers {
             piece.insert(layers);
         }
+    }
+}
+
+/// Removes the longest-sleeping debris until `count` more fit the budget.
+/// False, removing nothing, when too little debris sleeps.
+fn make_room(world: &mut World, count: usize) -> bool {
+    let budget = world
+        .get_resource::<DebrisBudget>()
+        .copied()
+        .unwrap_or_default()
+        .0 as usize;
+    if budget == 0 {
+        return true;
+    }
+    let mut debris: Vec<_> = world
+        .query::<(Entity, &Debris, Option<&SpawnOrder>)>()
+        .iter(world)
+        .map(|(entity, debris, order)| {
+            (debris.asleep_since, order.map(|o| o.0), entity)
+        })
+        .collect();
+    let over = (debris.len() + count).saturating_sub(budget);
+    if over == 0 {
+        return true;
+    }
+    debris.retain(|(asleep, ..)| asleep.is_some());
+    if debris.len() < over || count > budget {
+        return false;
+    }
+    debris.sort_unstable_by_key(|&(asleep, order, entity)| {
+        (asleep, order, entity.to_bits())
+    });
+    for &(.., entity) in &debris[..over] {
+        remove_debris(world, entity);
+    }
+    true
+}
+
+/// Despawns a debris body and frees its own mesh.
+fn remove_debris(world: &mut World, entity: Entity) {
+    if let Some(renderer) = world.get::<MeshRenderer>(entity).copied() {
+        if let Some(mut assets) = world.get_resource_mut::<AssetServer>() {
+            let _ = assets.meshes.remove(renderer.mesh);
+        }
+    }
+    world.despawn(entity);
+}
+
+/// Per fixed step, after breaks: notes when debris falls asleep, removes
+/// debris asleep past its lifetime, and merges settled breaks.
+pub(super) fn manage_debris(world: &mut World) {
+    let (tick, step) = world
+        .get_resource::<FrameTime>()
+        .map_or((0, Duration::ZERO), |time| {
+            (time.fixed_tick, time.fixed_delta)
+        });
+    let mut pieces: Vec<_> = world
+        .query::<(
+            Entity,
+            &mut Debris,
+            Has<Sleeping>,
+            Option<&RigidBody>,
+            Option<&SpawnOrder>,
+        )>()
+        .iter_mut(world)
+        .map(|(entity, mut debris, sleeping, body, order)| {
+            let still = sleeping
+                || body.is_some_and(|b| b.kind != RigidBodyKind::Dynamic);
+            if !still {
+                debris.asleep_since = None;
+            } else if debris.asleep_since.is_none() {
+                debris.asleep_since = Some(tick);
+            }
+            (order.map(|o| o.0), entity.to_bits(), entity, *debris)
+        })
+        .collect();
+    pieces.sort_unstable_by_key(|&(order, bits, ..)| (order, bits));
+    let step = step.as_secs_f32();
+    // Each break's still pieces, or `None` once one of them moves.
+    let mut groups = BTreeMap::<u64, Option<Vec<Entity>>>::new();
+    for &(.., entity, debris) in &pieces {
+        let Some(since) = debris.asleep_since else {
+            groups.insert(debris.group, None);
+            continue;
+        };
+        let asleep = tick.saturating_sub(since) as f32 * step;
+        if debris.lifetime > 0.0 && asleep >= debris.lifetime {
+            remove_debris(world, entity);
+            continue;
+        }
+        if debris.merge {
+            if let Some(members) =
+                groups.entry(debris.group).or_insert(Some(Vec::new()))
+            {
+                members.push(entity);
+            }
+        }
+    }
+    for members in groups.into_values().flatten() {
+        if members.len() > 1 {
+            merge(world, &members);
+        }
+    }
+}
+
+/// Replaces sleeping pieces with one fixed triangle-mesh body in world
+/// space, taking the first piece's look, collider and spawn order.
+fn merge(world: &mut World, members: &[Entity]) {
+    let mut mesh = MeshAsset::default();
+    let mut mass = 0.0;
+    for &entity in members {
+        let (Some(transform), Some(renderer)) = (
+            world.get::<Transform>(entity).copied(),
+            world.get::<MeshRenderer>(entity).copied(),
+        ) else {
+            continue;
+        };
+        let Some(piece) = world
+            .get_resource::<AssetServer>()
+            .and_then(|assets| assets.meshes.get(renderer.mesh))
+        else {
+            continue;
+        };
+        let [roll, pitch, yaw] = transform.rotation;
+        let turn = sim_math::rotation_from_euler(roll, pitch, yaw);
+        let scale = V::from(transform.scale);
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.extend(piece.vertices.iter().map(|vertex| {
+            let normal = turn * V::from(vertex.normal).component_div(&scale);
+            MeshVertex {
+                position: (V::from(transform.position)
+                    + turn * V::from(vertex.position).component_mul(&scale))
+                .into(),
+                normal: normal.try_normalize(1e-12).unwrap_or(normal).into(),
+                ..*vertex
+            }
+        }));
+        mesh.indices.extend(piece.indices.iter().map(|&i| base + i));
+        mass += world.get::<RigidBody>(entity).map_or(0.0, |body| body.mass);
+    }
+    let first = members[0];
+    let (Some(renderer), Some(order), Some(debris)) = (
+        world.get::<MeshRenderer>(first).copied(),
+        world.get::<SpawnOrder>(first).copied(),
+        world.get::<Debris>(first).copied(),
+    ) else {
+        return;
+    };
+    let collider = world.get::<Collider>(first).copied().unwrap_or_default();
+    let layers = world.get::<CollisionLayers>(first).copied();
+    let Some(mesh) = world
+        .get_resource_mut::<AssetServer>()
+        .map(|mut assets| assets.meshes.insert(mesh))
+    else {
+        return;
+    };
+    for &entity in members {
+        remove_debris(world, entity);
+    }
+    let mut merged = world.spawn((
+        Transform::default(),
+        MeshRenderer { mesh, ..renderer },
+        Collider {
+            shape: ColliderShape::TriangleMesh,
+            ..collider
+        },
+        PhysicsBody::default(),
+        RigidBody {
+            kind: RigidBodyKind::Fixed,
+            mass,
+            ..RigidBody::default()
+        },
+        order,
+        debris,
+    ));
+    if let Some(layers) = layers {
+        merged.insert(layers);
     }
 }
 
@@ -684,19 +910,11 @@ mod tests {
         assert_ne!(at(3), at(4));
     }
 
-    /// Drops a 10 kg crate that breaks at 100 J from `height` metres onto
-    /// fixed ground for 1 s; returns its bodies' positions and masses.
-    fn drop_crate(height: f32) -> Vec<([f32; 3], f32)> {
-        use crate::runtime::App;
-        let mut app = App::new();
+    /// A fixed 10 m ground slab, top at y = 0.
+    fn ground() -> crate::runtime::App {
+        let mut app = crate::runtime::App::new();
         app.add_plugin(crate::assets::AssetPlugin).unwrap();
-        let world = app.world_mut();
-        let (mesh, material) = {
-            let mut assets = world.resource_mut::<AssetServer>();
-            let material = assets.fallback_material;
-            (assets.meshes.insert(box_mesh([0.5; 3])), material)
-        };
-        world.spawn((
+        app.world_mut().spawn((
             Transform::new([0.0, -0.5, 0.0]),
             PhysicsBody::default(),
             RigidBody {
@@ -710,8 +928,25 @@ mod tests {
                 ..Collider::default()
             },
         ));
+        app
+    }
+
+    /// A 10 kg crate breaking into 6 pieces above 100 J, its bottom
+    /// `height` above the ground at `x`.
+    fn add_crate(
+        app: &mut crate::runtime::App,
+        x: f32,
+        height: f32,
+        fracture: Fracture,
+    ) {
+        let world = app.world_mut();
+        let (mesh, material) = {
+            let mut assets = world.resource_mut::<AssetServer>();
+            let material = assets.fallback_material;
+            (assets.meshes.insert(box_mesh([0.5; 3])), material)
+        };
         world.spawn((
-            Transform::new([0.0, 0.5 + height, 0.0]),
+            Transform::new([x, 0.5 + height, 0.0]),
             PhysicsBody::default(),
             RigidBody {
                 mass: 10.0,
@@ -730,13 +965,20 @@ mod tests {
             Fracture {
                 pieces: 6,
                 break_energy: 100.0,
-                ..Fracture::default()
+                ..fracture
             },
         ));
-        for _ in 0..60 {
+    }
+
+    fn run(app: &mut crate::runtime::App, ticks: u32) {
+        for _ in 0..ticks {
             app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
                 .unwrap();
         }
+    }
+
+    /// Positions and masses of the dynamic bodies, by x.
+    fn dynamic(app: &mut crate::runtime::App) -> Vec<([f32; 3], f32)> {
         let world = app.world_mut();
         let mut bodies: Vec<_> = world
             .query::<(&Transform, &RigidBody)>()
@@ -746,6 +988,104 @@ mod tests {
             .collect();
         bodies.sort_by(|a, b| a.0[0].total_cmp(&b.0[0]));
         bodies
+    }
+
+    /// Drops a 10 kg crate that breaks at 100 J from `height` metres onto
+    /// fixed ground for 1 s; returns its bodies' positions and masses.
+    fn drop_crate(height: f32) -> Vec<([f32; 3], f32)> {
+        let mut app = ground();
+        add_crate(&mut app, 0.0, height, Fracture::default());
+        run(&mut app, 60);
+        dynamic(&mut app)
+    }
+
+    fn debris_count(app: &mut crate::runtime::App) -> usize {
+        let world = app.world_mut();
+        world.query::<&Debris>().iter(world).count()
+    }
+
+    #[test]
+    fn sleeping_debris_leaves_after_its_lifetime() {
+        let mut app = ground();
+        add_crate(
+            &mut app,
+            0.0,
+            3.0,
+            Fracture {
+                debris_lifetime: 1.0,
+                ..Fracture::default()
+            },
+        );
+        let meshes = app.world_mut().resource::<AssetServer>().meshes.len();
+        run(&mut app, 60);
+        assert_eq!(debris_count(&mut app), 6);
+        run(&mut app, 600);
+        assert_eq!(debris_count(&mut app), 0);
+        assert!(dynamic(&mut app).is_empty());
+        // Every piece mesh was freed with its body.
+        let world = app.world_mut();
+        assert_eq!(world.resource::<AssetServer>().meshes.len(), meshes);
+    }
+
+    #[test]
+    fn a_settled_break_merges_into_one_static_body() {
+        let mut app = ground();
+        add_crate(
+            &mut app,
+            0.0,
+            3.0,
+            Fracture {
+                merge_debris: true,
+                ..Fracture::default()
+            },
+        );
+        run(&mut app, 600);
+        assert!(dynamic(&mut app).is_empty());
+        let world = app.world_mut();
+        let merged: Vec<_> = world
+            .query::<(&Debris, &RigidBody, &Collider, &MeshRenderer)>()
+            .iter(world)
+            .map(|(_, body, collider, renderer)| (*body, *collider, *renderer))
+            .collect();
+        assert_eq!(merged.len(), 1);
+        let (body, collider, renderer) = merged[0];
+        assert_eq!(body.kind, RigidBodyKind::Fixed);
+        assert_eq!(collider.shape, ColliderShape::TriangleMesh);
+        assert!((body.mass - 10.0).abs() < 1e-3, "{} kg", body.mass);
+        let assets = world.resource::<AssetServer>();
+        let mesh = assets.meshes.get(renderer.mesh).unwrap();
+        // The pieces kept their volume and stayed on the ground.
+        assert!((volume(mesh) - 1.0).abs() < 1e-2, "{}", volume(mesh));
+        assert!(mesh.vertices.iter().all(|v| v.position[1] > -0.1));
+    }
+
+    #[test]
+    fn at_the_budget_a_break_waits_for_sleeping_debris() {
+        // Two crates land on one tick, but only one break fits.
+        let mut app = ground();
+        app.world_mut().insert_resource(DebrisBudget(8));
+        add_crate(&mut app, -2.0, 3.0, Fracture::default());
+        add_crate(&mut app, 2.0, 3.0, Fracture::default());
+        run(&mut app, 60);
+        assert_eq!(debris_count(&mut app), 6);
+        assert_eq!(dynamic(&mut app).len(), 7, "the second crate stays whole");
+
+        // Once the pieces sleep, a later break replaces the oldest of them.
+        let mut app = ground();
+        app.world_mut().insert_resource(DebrisBudget(8));
+        add_crate(&mut app, -2.0, 3.0, Fracture::default());
+        run(&mut app, 300);
+        let world = app.world_mut();
+        let asleep = world
+            .query::<&Debris>()
+            .iter(world)
+            .filter(|debris| debris.asleep_since.is_some())
+            .count();
+        assert_eq!(asleep, 6);
+        add_crate(&mut app, 2.0, 3.0, Fracture::default());
+        run(&mut app, 60);
+        assert_eq!(debris_count(&mut app), 8);
+        assert!(!dynamic(&mut app).iter().any(|(_, mass)| *mass == 10.0));
     }
 
     #[test]
