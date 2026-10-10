@@ -3673,7 +3673,17 @@ The networking model depends on the Milestone 8 result. Bit-identical determinis
   never returns into it.
   `net::predict::tests::smoothing_fades_a_correction_without_touching_the_simulation`.
   `docs/networking.md` "Predicting the player's own object".
-- [ ] Detect desync by periodic state-hash comparison, report it, and recover through full resynchronization.
+- [x] Detect desync by periodic state-hash comparison, report it, and recover through full resynchronization.
+  Evidence 2026-10-10 (lane tools): `Replication::checksum` hashes (FNV-1a
+  of the JSON) the latest snapshot or sent delta state;
+  `Replica::verify` hashes the client's own replicated objects the same
+  way and returns `Check::{Match, Desync, Stale}`; `Replica::resync` asks
+  the host, whose `accept` returns `FromClient::Resync` and makes the next
+  snapshot whole. Whole snapshots and `full()` now replace the client's
+  replicated objects (diffed against its world, so stray objects are
+  despawned). `net::replicate::tests::a_desync_is_detected_and_repaired_by_a_resync`
+  breaks a client in delta and snapshot mode and repairs it.
+  `docs/networking.md` "Detecting and repairing a desync".
 - [ ] Support spectator clients that receive state and send no input.
 
 ### Exit gate

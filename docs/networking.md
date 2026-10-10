@@ -339,7 +339,7 @@ match replica.apply(world, from, &bytes) {
 
   Fields without a step travel at full `f64` precision.
 - Objects are matched by their scene id; ones the client lacks are
-  spawned. To update an object both sides loaded from the same scene in
+  spawned (with a `Transform` only if the host sends one). To update an object both sides loaded from the same scene in
   place, mark it `Replicated` on the client too.
 - A replica takes messages only from the host, only for the components
   its `Replication` lists, and only for objects marked `Replicated`, and
@@ -388,6 +388,46 @@ if let Some(ack) = replica.ack() {
   snapshot the client never got is refused; the next one, built on the
   client's real acknowledgement, fixes it.
 - Use snapshots or deltas for a set of objects, not both.
+
+### Detecting and repairing a desync
+
+A client's copy can drift from the host's: a bug, a local script that
+moves a replicated object, a lost message. Compare state hashes now and
+then, and resynchronize on a mismatch:
+
+```rust
+use rusting_engine::net::replicate::{Check, FromClient};
+
+// Host, about once a second, after the delta or snapshot it goes with:
+session.broadcast(&replication.checksum())?;
+// Host, for each client message:
+match replication.accept(from, &bytes) {
+    Some(Ok(FromClient::Resync)) => session.send(from, &replication.full())?, // deltas only
+    Some(Ok(FromClient::Ack)) | None => {}
+    Some(Err(reason)) => eprintln!("{reason}"),
+}
+
+// Client, for each message from the host:
+match replica.verify(world, from, &bytes) {
+    Some(Ok(Check::Desync)) => {
+        eprintln!("desync: resynchronizing");
+        session.send(HOST, &replica.resync())?;
+    }
+    Some(Ok(Check::Match | Check::Stale)) | None => {}
+    Some(Err(reason)) => eprintln!("{reason}"),
+}
+```
+
+- The hash covers every replicated component, quantized the same way
+  on both sides, of every object marked `Replicated`. An interpolated
+  client hashes `NetTransform`, not the drawn `Transform`.
+- With snapshots the hash names its snapshot; a client that has not
+  applied that one answers `Stale` and waits for the next hash. With
+  deltas, send the hash reliably right after the delta.
+- After a resync request the next snapshot for that client is whole.
+  A whole snapshot, and `full()`, replace the client's replicated
+  objects: changed values are set back, and replicated objects the host
+  does not have are despawned.
 
 ### Bandwidth per client
 
