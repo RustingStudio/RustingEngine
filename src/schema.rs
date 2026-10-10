@@ -821,9 +821,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.environment_map",
-        summary: "Equirectangular (2:1) sky image under assets/ that surfaces reflect and are lit by, replacing the sky_light hemisphere. Rough surfaces see it blurred. The first one found is used.",
-        gpu: NO_GPU,
-        example: || json!({"texture": "sky.png", "intensity": 1.0}),
+        summary: "Equirectangular (2:1) sky image under assets/ that surfaces reflect and are lit by, replacing the sky_light hemisphere. Rough surfaces see it blurred. A Radiance .hdr image keeps light brighter than white, like the sun; PNG and JPEG top out at intensity. background true also draws it behind the scene. The first one found is used.",
+        gpu: "with background, one full-screen sky pass",
+        example: || json!({"texture": "sky.hdr", "intensity": 1.0, "background": true}),
     },
     ComponentSection {
         key: "rusting.color_lut",

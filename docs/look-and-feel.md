@@ -213,6 +213,16 @@ map; a `rusting.environment_map` still wins for lighting when both are set.
    "sun_size": 1.0}}}
 ```
 
+For a photographed sky, put an equirectangular (2:1) Radiance `.hdr` image
+under `assets/` and use it as a `rusting.environment_map` with
+`"background": true`. Unlike PNG or JPEG, `.hdr` keeps the sun and bright
+clouds brighter than white, so reflections and lighting keep their punch:
+
+```json
+{"name": "Sky", "components": {"rusting.environment_map":
+  {"texture": "skies/field.hdr", "intensity": 1.0, "background": true}}}
+```
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,

@@ -405,3 +405,10 @@ record mode and the rest-pose preview. Later:
   paths shown as warnings, instead of the raw matrix list.
 - Pose mode: rotate joints with the gizmo while the Timeline is in Record,
   without selecting each joint in the Scene tree first.
+
+## Deferred: HDR skies
+
+- The Assets panel, its import dialog and `asset_import` list only PNG, JPEG,
+  BMP and TGA, so a Radiance `.hdr` sky has to be copied under `assets/` by
+  hand. Accept `.hdr` there (no thumbnail needed at first) and offer it in
+  the Environment Map texture picker.

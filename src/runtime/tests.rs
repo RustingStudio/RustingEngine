@@ -832,12 +832,13 @@ fn environment_maps_resolve_their_texture_and_reach_the_render_world() {
     app.spawn(EnvironmentMap {
         texture: "sky.png".into(),
         intensity: 2.0,
+        background: true,
         ..EnvironmentMap::default()
     });
     app.update(Duration::ZERO).unwrap();
     assert_eq!(
         app.world().resource::<RenderWorld>().environment,
-        Some((texture, 2.0))
+        Some((texture, 2.0, true))
     );
 }
 

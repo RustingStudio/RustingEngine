@@ -12,6 +12,8 @@ use std::time::{Duration, Instant, SystemTime};
 use bevy_ecs::prelude::{Local, Res, ResMut, Resource};
 use serde::{Deserialize, Serialize};
 
+mod radiance;
+
 use crate::runtime::{
     App, AppError, Camera, DirectionalLight, MeshRenderer, Name, Plugin,
     PointLight, ScheduleStage, SpotLight,
@@ -697,6 +699,24 @@ fn decode_texture_file(path: &Path) -> Result<TextureAsset, AssetError> {
     {
         return decode_cooked(path);
     }
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("hdr"))
+    {
+        let load_error = |message: String| AssetError::Load {
+            path: path.to_owned(),
+            message,
+        };
+        let bytes = std::fs::read(path)
+            .map_err(|error| load_error(error.to_string()))?;
+        let (size, texels) = radiance::decode(&bytes).map_err(load_error)?;
+        return Ok(TextureAsset {
+            size,
+            rgba8: texels,
+            color_space: TextureColorSpace::Hdr,
+            sampler: TextureSampler::default(),
+        });
+    }
     let image = image::open(path).map_err(|error| AssetError::Load {
         path: path.to_owned(),
         message: error.to_string(),
@@ -1147,6 +1167,9 @@ impl PrimitiveShape {
 pub enum TextureColorSpace {
     Srgb,
     Linear,
+    /// Linear half floats, from `.hdr` files: `rgba8` holds 8 bytes per
+    /// texel, each channel a little-endian `f16`.
+    Hdr,
 }
 
 #[derive(
@@ -1527,6 +1550,7 @@ impl AssetServer {
         let suffix = match color_space {
             TextureColorSpace::Srgb => "srgb",
             TextureColorSpace::Linear => "linear",
+            TextureColorSpace::Hdr => "hdr",
         };
         let gltf_sampler = texture.sampler();
         // ponytail: one image used with two samplers is stored twice; split

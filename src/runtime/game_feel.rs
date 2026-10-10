@@ -1263,16 +1263,18 @@ impl Default for ProceduralSky {
 
 /// Equirectangular (2:1) sky image that surfaces reflect and that lights
 /// them from every side, replacing the [`SkyLight`](super::SkyLight)
-/// hemisphere. Rough surfaces sample blurrier mip levels. The one on the
+/// hemisphere. Rough surfaces sample blurrier mip levels. A Radiance `.hdr`
+/// image keeps light brighter than white, such as the sun. With
+/// `background`, the image is also drawn behind the scene. The one on the
 /// entity with the lowest ID is used.
-// ponytail: 8-bit images only, so reflections top out at `intensity`; add
-// `.hdr` loading with the sky system milestone.
 #[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EnvironmentMap {
     /// Image path relative to the project's `assets` folder.
     pub texture: std::path::PathBuf,
     pub intensity: f32,
+    /// Draws the image behind the scene, in place of the clear color.
+    pub background: bool,
     /// The loaded `texture`, set by the engine.
     #[serde(skip)]
     pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
@@ -1283,6 +1285,7 @@ impl Default for EnvironmentMap {
         Self {
             texture: std::path::PathBuf::new(),
             intensity: 1.0,
+            background: false,
             handle: None,
         }
     }

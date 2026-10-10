@@ -2397,7 +2397,7 @@ Depends on: Milestones 3 and 4.
   255); `transitions_list_every_layout_change_between_passes`.
 - [ ] Baked lightmaps with a GPU lightmapper and light probes for dynamic objects.
 - [ ] One real-time GI technique (probe-based DDGI or voxel/SDF GI) with a quality-profile fallback to ambient probes.
-- [ ] Sky system: procedural physical sky, HDRI skies, and sky-derived ambient/specular.
+- [x] Sky system: procedural physical sky, HDRI skies, and sky-derived ambient/specular.
   Partial: `EnvironmentMap { texture, intensity }` (`rusting.environment_map`)
   loads an equirectangular image and replaces the `SkyLight` hemisphere as the
   ambient source. Diffuse samples the second-smallest mip along the normal;
@@ -2427,6 +2427,21 @@ Depends on: Milestones 3 and 4.
   it failed with the sky pass gated off (black background) and with the bake
   not bound (slab unchanged). Unit test
   `the_sun_is_the_shadowed_light_and_sets_the_sky_brightness`.
+  HDRI: textures loaded from Radiance `.hdr` files (own RGBE decoder in
+  `src/assets/radiance.rs`, flat and run-length scanlines) upload as
+  `R16G16B16A16_SFLOAT` (`TextureColorSpace::Hdr`), so environment light
+  keeps values above 1. `EnvironmentMap.background` draws the map behind the
+  scene in the sky pass, under the fog. Done with known ceilings: box-filtered
+  mips instead of GGX prefiltering, single-scattering sky with no night sky,
+  old-style run-length `.hdr` files rejected, and the editor's asset import
+  does not list `.hdr` yet (deferred in `docs/editor-overhaul.md`).
+  Evidence: GPU test
+  `hdr_environment_maps_draw_behind_the_scene_brighter_than_white` (no
+  background without the flag; a 0.25 red texel shows mid red, a 4.0 texel
+  clips to full red and still shows mid red at intensity 1/16); it failed
+  with the background flag ignored and with the lookup turned half a circle.
+  Unit tests `radiance_files_decode_flat_and_run_length_scanlines` and
+  `half_floats_round_and_clamp`.
 
 ### Screen-space and post effects
 

@@ -556,7 +556,8 @@ struct ShadowUpload {
     /// Color in rgb and density in w of each fog volume.
     fog_volume_colors: [[f32; 4]; MAX_FOG_VOLUMES],
     /// The procedural sky, as `sky::sky_params` lays it out; all zero
-    /// without one.
+    /// without one. `sky[2].w` is 2 when the environment map is drawn as
+    /// the background instead.
     sky: [[f32; 4]; 3],
 }
 
@@ -2730,7 +2731,7 @@ impl SceneRenderer {
             assets,
             render_world
                 .environment
-                .map(|(texture, _)| texture)
+                .map(|(texture, ..)| texture)
                 .into_iter()
                 .chain(light_cookies(render_world))
                 .chain(render_world.color_lut.map(|(texture, _)| texture))
@@ -3082,11 +3083,12 @@ impl SceneRenderer {
             .map(|sky| sky_params(&sky, &render_world.directional_lights));
         let environment = render_world
             .environment
-            .and_then(|(texture, intensity)| {
+            .and_then(|(texture, intensity, background)| {
                 let prepared = self.prepared_textures.get(&texture.key())?;
                 Some((
                     (prepared.view.clone()?, prepared.sampler.clone()),
                     intensity,
+                    background && lit,
                 ))
             })
             .map(Ok)
@@ -3104,9 +3106,16 @@ impl SceneRenderer {
                         Err(error) => return Some(Err(error)),
                     },
                 };
-                Some(Ok(((bake.view.clone(), bake.sampler.clone()), 1.0)))
+                Some(Ok((
+                    (bake.view.clone(), bake.sampler.clone()),
+                    1.0,
+                    false,
+                )))
             })
             .transpose()?;
+        let environment_background = environment
+            .as_ref()
+            .is_some_and(|(.., background)| *background);
         let shadow_upload = self.frame_contexts[self.frame_index]
             .transient
             .allocate_sized::<ShadowUpload>()
@@ -3119,7 +3128,7 @@ impl SceneRenderer {
                 environment: {
                     let mut row = environment.as_ref().map_or(
                         [0.0; 4],
-                        |((view, _), intensity)| {
+                        |((view, _), intensity, _)| {
                             let last_mip = view.image().mip_levels() - 1;
                             [1.0, *intensity, last_mip as f32, 0.0]
                         },
@@ -3237,7 +3246,13 @@ impl SceneRenderer {
                         [r.max(0.0), g.max(0.0), b.max(0.0), volume.density]
                     })
                 }),
-                sky: sky.unwrap_or_default(),
+                sky: {
+                    let mut rows = sky.unwrap_or_default();
+                    if environment_background {
+                        rows[2][3] = 2.0;
+                    }
+                    rows
+                },
             };
         let cluster_list = build_light_clusters(
             &self.prepared_lights.as_ref().unwrap().local,
@@ -3268,7 +3283,7 @@ impl SceneRenderer {
                 {
                     let (view, sampler) = environment.map_or_else(
                         || self.white_texture.clone(),
-                        |(texture, _)| texture,
+                        |(texture, ..)| texture,
                     );
                     WriteDescriptorSet::image_view_sampler(2, view, sampler)
                 },
@@ -4426,6 +4441,7 @@ impl SceneRenderer {
         if fog.is_some_and(|fog| fog.sky_affect > 0.0)
             || !fog_volumes.is_empty()
             || sky.is_some()
+            || environment_background
         {
             // Same layout as the scene pipelines, so their sets and camera
             // stay bound.
@@ -7327,12 +7343,17 @@ fn create_texture(
     pending: &mut Vec<PendingTextureUpload>,
 ) -> Result<Arc<ImageView>, SceneRenderError> {
     let [width, height] = texture.size;
+    let (format, texel_bytes) = match texture.color_space {
+        TextureColorSpace::Srgb => (Format::R8G8B8A8_SRGB, 4),
+        TextureColorSpace::Linear => (Format::R8G8B8A8_UNORM, 4),
+        TextureColorSpace::Hdr => (Format::R16G16B16A16_SFLOAT, 8),
+    };
     if width == 0
         || height == 0
-        || texture.rgba8.len() != width as usize * height as usize * 4
+        || texture.rgba8.len() != width as usize * height as usize * texel_bytes
     {
         return Err(SceneRenderError(format!(
-            "texture of {width}x{height} has {} bytes of RGBA8 data",
+            "texture of {width}x{height} has {} bytes of {format:?} data",
             texture.rgba8.len()
         )));
     }
@@ -7353,10 +7374,7 @@ fn create_texture(
     let image = Image::new(
         memory_allocator.clone(),
         ImageCreateInfo {
-            format: match texture.color_space {
-                TextureColorSpace::Srgb => Format::R8G8B8A8_SRGB,
-                TextureColorSpace::Linear => Format::R8G8B8A8_UNORM,
-            },
+            format,
             extent: [width, height, 1],
             mip_levels: 32 - width.max(height).leading_zeros(),
             // Transfer source for the mip chain blits.
@@ -10735,6 +10753,7 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 fog_volume_colors[8];
     vec4 sky[3];
 } shadow;
+layout(set = 2, binding = 2) uniform sampler2D environment_map;
 #include "fog.glsl"
 #include "sky.glsl"
 void main() {
@@ -10743,9 +10762,20 @@ void main() {
         f_color = fog;
         return;
     }
-    // The procedural sky replaces the background under the fog.
+    // The sky replaces the background under the fog.
     vec3 start = fog_unproject(v_ndc, 0.0);
     vec3 direction = normalize(fog_unproject(v_ndc, 0.5) - start);
+    if (shadow.sky[2].w > 1.5) {
+        // The environment map, laid out as the scene shader reads it.
+        vec2 uv = vec2(
+            atan(direction.z, direction.x) / 6.2831853 + 0.5,
+            acos(clamp(direction.y, -1.0, 1.0)) / 3.14159265
+        );
+        vec3 map = textureLod(environment_map, uv, 0.0).rgb
+            * shadow.environment.y;
+        f_color = vec4(fog.rgb + fog.a * map, 0.0);
+        return;
+    }
     vec3 sun = shadow.sky[0].xyz;
     vec3 sun_color = shadow.sky[1].rgb;
     float haze = shadow.sky[1].w;
@@ -17923,6 +17953,57 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn hdr_environment_maps_draw_behind_the_scene_brighter_than_white() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Half-float texels: the left half (around -Z) red at `level`, the
+        // right half blue at 1.
+        let hdr = |scene: &mut SlabScene, level: u16| {
+            let [width, height] = [64, 32];
+            let rgba8 = (0..height)
+                .flat_map(|_| 0..width)
+                .flat_map(|column| {
+                    if column < 32 {
+                        [level, 0, 0, 0x3c00]
+                    } else {
+                        [0, 0, 0x3c00, 0x3c00]
+                    }
+                })
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            scene.assets.textures.insert(TextureAsset {
+                size: [width, height],
+                rgba8,
+                color_space: TextureColorSpace::Hdr,
+                sampler: TextureSampler::default(),
+            })
+        };
+        // The camera looks down -Z at the empty background.
+        let mut scene = SlabScene::new(&[]);
+        let dim = hdr(&mut scene, 0x3400); // 0.25
+        scene.render_world.environment = Some((dim, 1.0, false));
+        assert_eq!(render_pixel(&mut scene, [4, 4]), [0, 0, 0]);
+        scene.render_world.environment = Some((dim, 1.0, true));
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(r > 40 && r < 200 && g < 10 && b < 10, "dim: {r} {g} {b}");
+        // 4.0 survives the upload: the background clips to full red.
+        let bright = hdr(&mut scene, 0x4400);
+        scene.render_world.environment = Some((bright, 1.0, true));
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(r > 250 && g < 10 && b < 10, "bright: {r} {g} {b}");
+        // With an intensity of 1/16 it lands under the dim one.
+        scene.render_world.environment = Some((bright, 1.0 / 16.0, true));
+        let [r, ..] = render_pixel(&mut scene, [4, 4]);
+        assert!(r > 40 && r < 200, "scaled: {r}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn clear_glass_shows_what_is_behind_it_and_reflects_the_environment() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
@@ -17952,6 +18033,7 @@ mod tests {
         scene.render_world.environment = Some((
             environment_texture(&mut scene, |column, _| column >= 32),
             1.0,
+            false,
         ));
         let before = scene.now();
         scene
@@ -17998,6 +18080,7 @@ mod tests {
         scene.render_world.environment = Some((
             environment_texture(&mut scene, |column, _| column >= 32),
             1.0,
+            false,
         ));
         let before = scene.now();
         scene
@@ -18245,8 +18328,11 @@ mod tests {
                 .into();
         scene.render_world.ambient_light = None;
         // Upper half red (sky), lower half blue (ground).
-        scene.render_world.environment =
-            Some((environment_texture(&mut scene, |_, row| row < 16), 1.0));
+        scene.render_world.environment = Some((
+            environment_texture(&mut scene, |_, row| row < 16),
+            1.0,
+            false,
+        ));
         let look_from = |scene: &mut SlabScene, side: Vector3<f32>| {
             let camera = scene.render_world.active_camera.as_mut().unwrap();
             camera.transform.matrix = (Matrix4::new_translation(&(side * 5.0))

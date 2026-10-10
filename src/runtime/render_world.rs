@@ -137,10 +137,13 @@ pub struct RenderWorld {
     pub spot_lights: Vec<ExtractedSpotLight>,
     pub ambient_light: Option<AmbientLight>,
     pub sky_light: Option<SkyLight>,
-    /// Loaded texture and intensity of the scene's first loaded
-    /// [`EnvironmentMap`](super::EnvironmentMap).
-    pub environment:
-        Option<(crate::assets::Handle<crate::assets::TextureAsset>, f32)>,
+    /// Loaded texture, intensity and background flag of the scene's first
+    /// loaded [`EnvironmentMap`](super::EnvironmentMap).
+    pub environment: Option<(
+        crate::assets::Handle<crate::assets::TextureAsset>,
+        f32,
+        bool,
+    )>,
     /// World position and settings of each
     /// [`ReflectionProbe`](super::ReflectionProbe), in entity order.
     pub reflection_probes: Vec<([f32; 3], super::ReflectionProbe)>,
@@ -288,10 +291,17 @@ pub fn extract_render_world(world: &mut World) {
         query
             .iter(world)
             .filter_map(|(entity, map)| {
-                Some((entity.index(), map.handle?, map.intensity))
+                Some((
+                    entity.index(),
+                    map.handle?,
+                    map.intensity,
+                    map.background,
+                ))
             })
             .min_by_key(|(entity, ..)| *entity)
-            .map(|(_, handle, intensity)| (handle, intensity))
+            .map(|(_, handle, intensity, background)| {
+                (handle, intensity, background)
+            })
     };
     let reflection_probes = {
         let mut query =

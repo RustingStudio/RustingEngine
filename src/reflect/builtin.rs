@@ -1042,9 +1042,10 @@ crate::reflect! {
     struct EnvironmentMap {
         texture: PathBuf {
             unit: "asset path",
-            doc: "equirectangular (2:1) image that surfaces reflect",
+            doc: "equirectangular (2:1) image that surfaces reflect; .hdr keeps bright light",
         },
         intensity: f32 { unit: "factor", min: 0.0 },
+        background: bool { doc: "also draw the image behind the scene" },
         #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
     }
 }
