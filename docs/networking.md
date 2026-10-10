@@ -679,6 +679,36 @@ for event in host.poll() {
 }
 ```
 
+## HTTP requests
+
+`net::http` talks to web services and downloads files over plain HTTP/1.1,
+using only the standard library.
+
+- `http::get(url)`, `http::post(url, content_type, body)` and
+  `http::request(method, url, headers, body)` block until the whole
+  response is in and return its `status`, `headers` (names in lower case)
+  and `body`. Any status is a response, so check `status`. Bodies over
+  `MAX_BODY` (64 MiB) fail.
+- `http::download(url, path)` streams the body into a file. It writes
+  `<path>.part` and renames it only when the body is whole, so a failed
+  download never leaves a cut-off file. Any status but 2xx fails.
+- `http::fetch(method, url, headers, body)` runs `request` on its own
+  thread. Poll the returned `PendingHttp` once a frame, so a slow server
+  never stalls the game:
+
+```rust
+use rusting_engine::net::http;
+
+let mut scores = http::fetch("GET", "http://scores.example.com/top", &[], &[]);
+// Each frame:
+if let Some(result) = scores.poll() {
+    let top = result?.text();
+}
+```
+
+Redirects to another `http://` URL are followed, up to five. A connect or
+a wait for the next bytes gives up after 30 seconds.
+
 ## Limits
 
 - Reliable messages ride TCP, so a lost packet delays the messages behind
@@ -697,6 +727,9 @@ for event in host.poll() {
 - One player who connects and then sends nothing does not hold up anyone
   else's join; each handshake runs on its own thread and must finish
   within 5 seconds. The relay counts an IPv6 /64 as one address.
+- `net::http` has no TLS, so `https://` URLs fail with
+  `ErrorKind::Unsupported`. Most public services need HTTPS; reach them
+  through a proxy you run, or wait for TLS support.
 - Passwords and relay tokens must fit in a 64 KiB handshake.
 - The wire protocol has a version (`PROTOCOL_VERSION`); a host or relay
   refuses clients built with another one.

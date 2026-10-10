@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub mod clock;
+pub mod http;
 pub mod input;
 pub mod interpolate;
 pub mod limit;
