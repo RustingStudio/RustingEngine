@@ -28,6 +28,9 @@ const DRIFT: f32 = 0.3;
 /// settings.
 const SWEEPS_PER_ITERATION: u32 = 15;
 
+/// Most cells a grid holds, whatever the box and spacing ask.
+const MAX_CELLS: usize = 1 << 21;
+
 /// The grid over the container: cells of twice the particle spacing, so a
 /// settled cell holds about eight particles.
 struct Grid {
@@ -38,15 +41,37 @@ struct Grid {
 
 impl Grid {
     fn new(settings: &FluidSettings) -> Self {
-        let size = 2.0 * settings.spacing;
         let (min, max) = settings.bounds;
-        Self {
-            min,
-            size,
-            cells: std::array::from_fn(|axis| {
-                (((max[axis] - min[axis]) / size).ceil() as usize).max(1)
-            }),
+        // Scene data sets the box and the spacing; past MAX_CELLS the cells
+        // grow instead, so a huge box cannot allocate without bound.
+        let extent: [f64; 3] = std::array::from_fn(|axis| {
+            let side = f64::from(max[axis]) - f64::from(min[axis]);
+            if side.is_finite() {
+                side.max(0.0)
+            } else {
+                0.0
+            }
+        });
+        let mut size = f64::from(2.0 * settings.spacing).max(1e-3);
+        let volume = extent.iter().map(|side| side / size).product::<f64>();
+        if volume > MAX_CELLS as f64 {
+            size *= (volume / MAX_CELLS as f64).cbrt();
         }
+        let cells = std::array::from_fn(|axis| {
+            ((extent[axis] / size).ceil() as usize).clamp(1, MAX_CELLS)
+        });
+        let mut grid = Self {
+            min,
+            size: size as f32,
+            cells,
+        };
+        // Rounding up each axis can still pass the cap; shrink the largest.
+        while grid.cells.iter().product::<usize>() > MAX_CELLS {
+            let largest =
+                (0..3).max_by_key(|&axis| grid.cells[axis]).unwrap_or(0);
+            grid.cells[largest] -= 1;
+        }
+        grid
     }
 
     /// Size of the face array holding velocity component `axis`.
@@ -290,6 +315,28 @@ mod tests {
             / fluid.positions.len() as f32;
         assert!((0.06..0.12).contains(&mean), "mean height {mean}");
         assert!(speed < 1.5, "still moving at {speed} m/s");
+    }
+
+    #[test]
+    fn a_huge_box_gets_a_coarser_grid_not_a_huge_one() {
+        for bounds in [
+            ([-1e4, -1e4, -1e4], [1e4, 1e4, 1e4]),
+            ([f32::NEG_INFINITY, 0.0, 0.0], [f32::INFINITY, 1.0, 1.0]),
+        ] {
+            let grid = super::Grid::new(&FluidSettings {
+                bounds,
+                ..settings()
+            });
+            assert!(grid.cells.iter().product::<usize>() <= super::MAX_CELLS);
+            assert!(grid.cells.iter().all(|&n| n >= 1));
+        }
+        let mut fluid = column();
+        let huge = FluidSettings {
+            bounds: ([-1e4, 0.0, -1e4], [1e4, 1e4, 1e4]),
+            ..settings()
+        };
+        fluid.step(&huge, 1.0 / 60.0);
+        assert!(fluid.positions.iter().flatten().all(|x| x.is_finite()));
     }
 
     #[test]
