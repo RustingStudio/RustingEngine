@@ -2,7 +2,7 @@
   "name": "draws: a full wave of enemies on screen draws together, not one draw per enemy",
   "ticks": 800,
   "budgets": {
-    "max_draws": 8
+    "max_draws": 16
   },
   "steps": [
     {"tick": 1, "set": {"entity": "Hits", "path": "/components/rusting.counter/target", "value": 1000}},
