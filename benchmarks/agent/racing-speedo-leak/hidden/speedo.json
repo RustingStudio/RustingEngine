@@ -1,0 +1,40 @@
+{
+  "name": "speedometer: driving keeps a flat number of live entities while the speedometer still averages the last 30 frames",
+  "ticks": 600,
+  "budgets": {
+    "max_entities": 80
+  },
+  "steps": [
+    {
+      "tick": 0,
+      "set": {
+        "entity": "Car",
+        "path": "/transform/position",
+        "value": [
+          0.0,
+          0.3,
+          4.0
+        ]
+      }
+    },
+    {
+      "tick": 0,
+      "press": "up"
+    },
+    {
+      "tick": 20,
+      "expect": {
+        "counter": "shown_speed",
+        "equals": 170,
+        "tolerance": 5
+      }
+    },
+    {
+      "tick": 100,
+      "expect": {
+        "counter": "shown_speed",
+        "equals": 500
+      }
+    }
+  ]
+}
