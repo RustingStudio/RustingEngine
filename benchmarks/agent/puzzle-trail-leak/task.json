@@ -1,0 +1,34 @@
+{
+  "kind": "performance",
+  "template": "puzzle",
+  "request": "Players say this box-pushing puzzle gets heavier the longer they play a level: after a few hundred moves the scene holds far more objects than it shows and saved games keep growing. Find the cause and fix it without changing how the game plays or how the footprint trail behind the player looks.",
+  "seed": [
+    {
+      "file": "scenes/main.rscene",
+      "find": "  \"entities\": [\n",
+      "replace": "  \"entities\": [\n    {\n      \"id\": \"1d7f5a3c-6e24-4b9a-b081-3c5e9f2a7d46\",\n      \"parent\": null,\n      \"name\": \"Step Template\",\n      \"classes\": [],\n      \"visible\": false,\n      \"transform\": {\n        \"position\": [0.0, -20.0, 0.0],\n        \"rotation\": [0.0, 0.0, 0.0],\n        \"scale\": [0.3, 0.02, 0.3]\n      },\n      \"mesh_renderer\": {\n        \"mesh\": {\"BuiltinPrimitive\": \"Cube\"},\n        \"material\": {\"Inline\": {\"name\": \"\", \"model\": \"Pbr\", \"alpha_mode\": \"Opaque\", \"base_color\": [0.35, 0.45, 0.7, 1.0], \"emissive\": [0.0, 0.0, 0.0], \"metallic\": 0.0, \"roughness\": 0.9, \"transmission\": 0.0, \"ior\": 1.5, \"thickness\": 0.0, \"uv_scale\": [1.0, 1.0], \"uv_offset\": [0.0, 0.0], \"flat_shading\": false, \"base_color_texture\": null, \"normal_texture\": null, \"metallic_roughness_texture\": null, \"occlusion_texture\": null, \"emissive_texture\": null}},\n        \"cast_shadows\": false,\n        \"receive_shadows\": true\n      }\n    },\n"
+    },
+    {
+      "file": "src/main.rs",
+      "find": "fn cell(position: [f32; 3]) -> (i32, i32) {\n",
+      "replace": "/// How many footprints the trail behind the player shows.\nconst TRAIL: i32 = 8;\n\nfn cell(position: [f32; 3]) -> (i32, i32) {\n"
+    },
+    {
+      "file": "src/main.rs",
+      "find": "        next.1 as f32,\n    ]);\n    let goals",
+      "replace": "        next.1 as f32,\n    ]);\n    // Footprints mark the last TRAIL cells the player left.\n    let step = scene.add_to_counter(\"steps\", 1);\n    let print = format!(\"Step {step}\");\n    scene.spawn_copy(\"Step Template\", &print, [x as f32, 0.02, z as f32]);\n    scene.set_visible(&print, true);\n    if step > TRAIL {\n        scene.set_visible(&format!(\"Step {}\", step - TRAIL), false);\n    }\n    let goals"
+    }
+  ],
+  "remove": [],
+  "reference": [
+    {
+      "file": "src/main.rs",
+      "find": "        scene.set_visible(&format!(\"Step {}\", step - TRAIL), false);\n",
+      "replace": "        scene.despawn(&format!(\"Step {}\", step - TRAIL));\n"
+    }
+  ],
+  "hidden": [
+    "../../../src/templates/puzzle_solve.json",
+    "hidden/trail.json"
+  ]
+}
