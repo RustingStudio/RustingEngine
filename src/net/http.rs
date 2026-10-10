@@ -16,7 +16,8 @@
 //!
 //! Only `http://` URLs work: there is no TLS, so an `https://` URL fails
 //! with [`io::ErrorKind::Unsupported`]. Redirects to another `http://` URL
-//! are followed, up to [`MAX_REDIRECTS`].
+//! are followed, up to [`MAX_REDIRECTS`]; headers you pass go only to the
+//! first URL's host, not to a redirect that leaves it.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -175,6 +176,13 @@ struct Url {
 }
 
 fn parse_url(url: &str) -> io::Result<Url> {
+    // A space or line break would end the request line early and let the
+    // rest of the URL (or a redirect's Location) write its own headers.
+    if url.contains(|c: char| c.is_control() || c.is_whitespace()) {
+        return Err(invalid(format!(
+            "{url:?}: spaces and control characters must be %-encoded"
+        )));
+    }
     let rest = match url.split_once("://") {
         Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => rest,
         Some((scheme, _)) if scheme.eq_ignore_ascii_case("https") => {
@@ -229,21 +237,37 @@ fn send(
     sink: &mut dyn Write,
     limit: Option<u64>,
 ) -> io::Result<(u16, Vec<(String, String)>)> {
+    let token = |text: &str| {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+    };
+    if !token(method) {
+        return Err(invalid(format!("`{method}` is not an HTTP method")));
+    }
     for (name, value) in headers {
-        if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
-            return Err(invalid(format!("header `{name}` has a line break")));
+        if !token(name) || value.contains(['\r', '\n']) {
+            return Err(invalid(format!(
+                "header `{name}` is not a name or has a line break"
+            )));
         }
     }
+    let first_host = parse_url(url)?.host;
     let (mut method, mut url, mut body) =
         (method.to_owned(), url.to_owned(), body);
+    // The caller's headers (an Authorization token, say) go only to the
+    // host they were meant for, never on to wherever a redirect points.
+    let mut same_host = true;
     for _ in 0..=MAX_REDIRECTS {
         let target = parse_url(&url)?;
+        same_host &= target.host.eq_ignore_ascii_case(&first_host);
         let mut stream = connect(&target.address)?;
         let mut head = format!(
             "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: rusting-engine\r\nConnection: close\r\n",
             target.path, target.host
         );
-        for (name, value) in headers {
+        for (name, value) in headers.iter().filter(|_| same_host) {
             head.push_str(&format!("{name}: {value}\r\n"));
         }
         if !body.is_empty()
@@ -473,6 +497,32 @@ mod tests {
     }
 
     #[test]
+    fn caller_headers_stay_with_the_first_host_across_redirects() {
+        let (elsewhere, other) = serve(vec![
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        ]);
+        let (address, first) = serve(vec![
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /again\r\n\r\n".to_vec(),
+            format!("HTTP/1.1 308 Permanent Redirect\r\nLocation: http://{elsewhere}/x\r\n\r\n")
+                .into_bytes(),
+        ]);
+        let secret = [("Authorization", "Bearer secret")];
+        let response =
+            request("PUT", &format!("http://{address}/"), &secret, b"data")
+                .unwrap();
+        assert_eq!(response.status, 200);
+
+        let first = first.join().unwrap();
+        assert!(first
+            .iter()
+            .all(|r| r.contains("Authorization: Bearer secret\r\n")));
+        let other = other.join().unwrap();
+        assert!(other[0].starts_with("PUT /x HTTP/1.1\r\n"), "{}", other[0]);
+        assert!(!other[0].contains("secret"), "{}", other[0]);
+        assert!(other[0].ends_with("\r\n\r\ndata"), "a 308 resends the body");
+    }
+
+    #[test]
     fn downloads_land_whole_or_not_at_all_and_fetch_runs_off_thread() {
         let (address, server) = serve(vec![
             b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nPNG!".to_vec(),
@@ -530,6 +580,23 @@ mod tests {
             &[],
         );
         assert_eq!(injected.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+
+        for bad in ["http://h/a b", "http://h/a\r\nEvil: 1", "http://h/\u{7f}"]
+        {
+            assert_eq!(
+                get(bad).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{bad:?}"
+            );
+        }
+        for method in ["", "GET /x HTTP/1.1\r\n", "G T"] {
+            let error =
+                request(method, "http://127.0.0.1:9/", &[], &[]).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{method:?}");
+        }
+        let colon =
+            request("GET", "http://127.0.0.1:9/", &[("X: y\r\nZ", "1")], &[]);
+        assert_eq!(colon.unwrap_err().kind(), io::ErrorKind::InvalidInput);
 
         let url = parse_url("http://[::1]/p").unwrap();
         assert_eq!(

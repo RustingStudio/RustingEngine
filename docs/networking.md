@@ -706,8 +706,11 @@ if let Some(result) = scores.poll() {
 }
 ```
 
-Redirects to another `http://` URL are followed, up to five. A connect or
-a wait for the next bytes gives up after 30 seconds.
+Redirects to another `http://` URL are followed, up to five. Headers you
+pass, such as an `Authorization` token, go only to the first URL's host and
+are left off once a redirect points anywhere else. A URL with a space or a
+control character fails; %-encode them. A connect or a wait for the next
+bytes gives up after 30 seconds.
 
 ## Limits
 
