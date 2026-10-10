@@ -534,7 +534,8 @@ struct ShadowUpload {
     /// Fog height, height falloff, sun scatter and sky affect.
     fog_shape: [f32; 4],
     /// x is 1 when binding 6 holds this frame's ambient occlusion; y is 1
-    /// for single-tap hard shadows.
+    /// for single-tap hard shadows; z is 1 when binding 10 holds indirect
+    /// light.
     ambient_occlusion: [f32; 4],
     /// Light-space transform of each cascade of the shadowed light, or of
     /// each cube face of a point light.
@@ -1736,6 +1737,9 @@ pub struct SceneRenderer {
     exposure: ExposureMeter,
     /// Rebuilt with `depth`.
     occlusion: OcclusionTargets,
+    /// View projection of the frame `scene_color` holds, while it holds
+    /// one; indirect light reprojects into it.
+    scene_color_view_projection: Option<Matrix4<f32>>,
     /// Depth-only opaque pass into `depth` that ambient occlusion traces;
     /// shares the main pipeline layout.
     depth_prepass_pipeline: Arc<GraphicsPipeline>,
@@ -2143,6 +2147,7 @@ impl SceneRenderer {
             bloom_chain,
             exposure,
             occlusion,
+            scene_color_view_projection: None,
             depth_prepass_pipeline,
             depth_prepass_framebuffer,
             depth_extent: initial_extent,
@@ -3038,7 +3043,7 @@ impl SceneRenderer {
         );
         let lit = options.debug_view == SceneDebugView::Lit;
         // ponytail: refraction still needs the copy even with reflections off.
-        let split = lit && (refraction || (reflections && glossy));
+        let mut split = lit && (refraction || (reflections && glossy));
         // Atmosphere belongs to the lit look; debug views show raw shading.
         let effects = options.effects;
         let fog = render_world
@@ -3126,6 +3131,20 @@ impl SceneRenderer {
                     && occlusion.radius > 0.0
                     && occlusion.intensity > 0.0
             });
+        // Indirect light gathers from last frame's opaque copy, so these
+        // frames make one; High only.
+        let indirect_light = ambient_occlusion
+            .map(|occlusion| occlusion.indirect.max(0.0))
+            .filter(|&strength| {
+                strength > 0.0 && quality == QualityProfile::High
+            });
+        split |= indirect_light.is_some();
+        // The copy made this frame, if any, is the one next frame reads.
+        let previous_view_projection =
+            indirect_light.and(self.scene_color_view_projection);
+        if split {
+            self.scene_color_view_projection = Some(clip);
+        }
         let sky = render_world
             .procedural_sky
             .filter(|_| lit)
@@ -3234,7 +3253,7 @@ impl SceneRenderer {
                 ambient_occlusion: [
                     f32::from(u8::from(ambient_occlusion.is_some())),
                     f32::from(u8::from(render_world.hard_shadows)),
-                    0.0,
+                    f32::from(u8::from(previous_view_projection.is_some())),
                     0.0,
                 ],
                 cascades: std::array::from_fn(|index| {
@@ -3419,6 +3438,18 @@ impl SceneRenderer {
                             .unwrap_or_else(|| self.white_texture.clone())
                     })
                 }),
+                {
+                    let (view, sampler) = if previous_view_projection.is_some()
+                    {
+                        (
+                            self.occlusion.indirect.clone(),
+                            self.post_pipelines.nearest.clone(),
+                        )
+                    } else {
+                        self.white_texture.clone()
+                    };
+                    WriteDescriptorSet::image_view_sampler(10, view, sampler)
+                },
                 WriteDescriptorSet::image_view_sampler_array(
                     9,
                     0,
@@ -3472,9 +3503,14 @@ impl SceneRenderer {
                         settings: [
                             settings.radius,
                             settings.intensity,
-                            0.0,
+                            previous_view_projection
+                                .and(indirect_light)
+                                .unwrap_or(0.0),
                             0.0,
                         ],
+                        previous_view_projection: previous_view_projection
+                            .unwrap_or_else(Matrix4::identity)
+                            .into(),
                     };
                 Ok::<_, SceneRenderError>(upload)
             })
@@ -4417,6 +4453,7 @@ impl SceneRenderer {
                 &self.descriptor_allocator,
                 &self.post_pipelines,
                 &self.depth,
+                (self.scene_color.clone(), self.scene_color_sampler.clone()),
                 params,
             )?;
             count_work(&recorded, 0, dispatches, 0);
@@ -6846,6 +6883,7 @@ impl SceneRenderer {
             )?;
             self.occlusion =
                 OcclusionTargets::new(&self.memory_allocator, extent)?;
+            self.scene_color_view_projection = None;
             self.depth_prepass_framebuffer = create_depth_prepass_framebuffer(
                 &self.depth_prepass_pipeline,
                 &self.depth,
@@ -9786,6 +9824,9 @@ vec3 cookie_at(int slot, vec2 uv) {
     if (slot == 2) return texture(cookies[2], uv).rgb;
     return texture(cookies[3], uv).rgb;
 }
+// Light bounced off nearby surfaces per target pixel when
+// shadow.ambient_occlusion.z is 1.
+layout(set = 2, binding = 10) uniform sampler2D indirect_light;
 // Decal images; decal_axes[i].w picks one. Matches MAX_DECAL_IMAGES.
 layout(set = 2, binding = 9) uniform sampler2D decal_images[4];
 vec4 decal_at(int slot, vec2 uv) {
@@ -10126,6 +10167,10 @@ void main() {
             * diffuse_color * (1.0 - env_fresnel)
         + reflection * env_fresnel)
         * occlusion;
+    if (PASS != 1u && shadow.ambient_occlusion.z > 0.5) {
+        result += texelFetch(indirect_light, ivec2(gl_FragCoord.xy), 0).rgb
+            * diffuse_color * (1.0 - env_fresnel);
+    }
     // Directional lights (the first light_info.w) light every pixel; point
     // and spot lights come from this pixel's cluster.
     vec2 cell = (gl_FragCoord.xy - shadow.viewport.xy) / shadow.viewport.zw;
@@ -12165,6 +12210,66 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn indirect_light_bleeds_a_bright_surface_onto_its_neighbour() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A white wall, and a glowing red slab 0.3 m in front of its left
+        // half.
+        let mut scene = SlabScene::with_extent(
+            &[
+                (0.0, MaterialAsset::default()),
+                (
+                    0.3,
+                    MaterialAsset {
+                        model: MaterialModel::Unlit,
+                        base_color: [4.0, 0.0, 0.0, 1.0],
+                        ..MaterialAsset::default()
+                    },
+                ),
+            ],
+            [32, 32],
+        );
+        scene.render_world.renderables[1].transform.matrix =
+            (Matrix4::new_translation(&Vector3::new(-2.0, 0.0, 0.3))
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    4.0, 4.0, 0.1,
+                )))
+            .into();
+        scene.render_world.quality = QualityProfile::High;
+        // No ambient light, so the wall shows only what bounces onto it.
+        scene.render_world.ambient_light = None;
+        let near = [17, 16];
+        // The first frame makes the copy the second gathers from.
+        let redness = |scene: &mut SlabScene, indirect| {
+            scene.render_world.ambient_occlusion =
+                Some(crate::runtime::AmbientOcclusion {
+                    radius: 1.0,
+                    intensity: 1.0,
+                    indirect,
+                });
+            render_pixel(scene, near);
+            let [r, g, _] = render_pixel(scene, near);
+            i32::from(r) - i32::from(g)
+        };
+        let plain = redness(&mut scene, 0.0);
+        let bled = redness(&mut scene, 2.0);
+        assert!(bled > plain + 20, "red {plain} -> {bled}");
+        assert!(scene
+            .renderer
+            .last_frame_passes()
+            .contains(&FramePass::SceneColor));
+        // Balanced keeps the occlusion but not the indirect light.
+        scene.render_world.quality = QualityProfile::Balanced;
+        assert!(redness(&mut scene, 2.0) <= plain + 2);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn ambient_occlusion_darkens_surfaces_next_to_occluders() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
@@ -12196,6 +12301,7 @@ mod tests {
             Some(crate::runtime::AmbientOcclusion {
                 radius: 0.5,
                 intensity: 1.0,
+                indirect: 0.0,
             });
         let [near, far] = [
             render_pixel(&mut scene, near),
@@ -12270,6 +12376,7 @@ mod tests {
                         Some(crate::runtime::AmbientOcclusion {
                             radius: 0.5,
                             intensity: 1.0,
+                            indirect: 1.0,
                         });
                     // Occlusion culling needs a frame to fill its history.
                     for _ in 0..2 {

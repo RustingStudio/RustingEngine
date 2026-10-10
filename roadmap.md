@@ -2445,7 +2445,8 @@ Depends on: Milestones 3 and 4.
 
 ### Screen-space and post effects
 
-- [ ] SSAO, SSR, and screen-space indirect lighting, each independently toggled by quality profile.
+- [x] SSAO, SSR, and screen-space indirect lighting, each independently toggled by quality profile.
+  Done: SSR off on `Eco`, SSAO off on `Eco`, indirect light on `High` only.
   Partial (SSR): frames with a PBR batch under roughness 0.5
   (`SSR_MAX_ROUGHNESS`) split like refraction frames. The `SceneColor` pass
   also copies opaque depth into depth pyramid mip 0; the `Transparent` pass
@@ -2474,8 +2475,22 @@ Depends on: Milestones 3 and 4.
   box darker than open floor, unchanged with the component removed) and
   `atmosphere_effects_combine_with_every_scene_path` (frustum and
   occlusion culling, MSAA off and 4x, opaque and glossy); pass table
-  `transitions_list_every_layout_change_between_passes`. Screen-space
-  indirect lighting is not started.
+  `transitions_list_every_layout_change_between_passes`.
+  Indirect light: `rusting.ambient_occlusion.indirect` above 0 turns it on,
+  `High` profile only. Those frames make the `SceneColor` copy; the next
+  frame's `AmbientOcclusion` trace reprojects each occluding sample into that
+  copy with last frame's view projection and averages the colors it sees
+  (cosine-weighted samples, so the mean is irradiance over pi). The blur
+  filters it with the same depth weights into an RGBA16F target that set 2
+  binding 10 adds to the diffuse term. Limits: one frame of lag, the first
+  frame after a resize has none, only on-screen occluders inside the radius
+  bounce light, single bounce. Evidence: GPU test
+  `indirect_light_bleeds_a_bright_surface_onto_its_neighbour` (a dark wall
+  turns red beside a glowing red slab on `High`, stays dark at strength 0
+  and on `Balanced`); it failed (red 0 -> 0) with the binding 10 add gated
+  off and with the reprojection matrix zeroed. Pass table tests
+  `every_read_follows_a_write_of_the_same_resource` and
+  `transitions_list_every_layout_change_between_passes`.
 - [x] Bloom/glow, depth of field, motion blur, auto-exposure, color grading LUTs, vignette, and chromatic aberration.
   Partial (bloom): `rusting.bloom` (intensity, threshold, spread). After the
   transparent pass, the `Bloom` compute pass prefilters the HDR target to

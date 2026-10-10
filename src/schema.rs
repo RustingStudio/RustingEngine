@@ -899,9 +899,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.ambient_occlusion",
-        summary: "Screen-space ambient occlusion: darkens ambient, sky and environment light in creases within radius metres. Off on the Eco quality profile. The first one found is used.",
-        gpu: "a depth prepass plus two full-screen compute passes",
-        example: || json!({"radius": 1.0, "intensity": 1.0}),
+        summary: "Screen-space ambient occlusion: darkens ambient, sky and environment light in creases within radius metres. Off on the Eco quality profile. indirect above 0 also adds light bounced off surfaces within radius (a red wall tints the floor beside it), gathered from the previous frame; High quality profile only. The first one found is used.",
+        gpu: "a depth prepass plus two full-screen compute passes; indirect adds a copy of the opaque scene each frame",
+        example: || json!({"radius": 1.0, "intensity": 1.0, "indirect": 0.0}),
     },
     ComponentSection {
         key: "rusting.background",

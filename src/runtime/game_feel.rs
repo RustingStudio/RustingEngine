@@ -1674,6 +1674,10 @@ pub struct AmbientOcclusion {
     pub radius: f32,
     /// Exponent on the occlusion. Above 1 darkens creases more.
     pub intensity: f32,
+    /// Strength of light bounced off nearby surfaces within `radius`
+    /// (screen-space indirect light): a red wall tints the floor beside
+    /// it. 0 turns it off; it runs on the High quality profile only.
+    pub indirect: f32,
 }
 
 impl Default for AmbientOcclusion {
@@ -1681,6 +1685,7 @@ impl Default for AmbientOcclusion {
         Self {
             radius: 1.0,
             intensity: 1.0,
+            indirect: 0.0,
         }
     }
 }

@@ -1325,6 +1325,10 @@ crate::reflect! {
             unit: "exponent", min: 0.0, max: 8.0,
             doc: "above 1 darkens creases more",
         },
+        indirect: f32 {
+            unit: "factor", min: 0.0, max: 4.0,
+            doc: "light bounced off nearby surfaces; 0 off, High profile only",
+        },
     }
 }
 
