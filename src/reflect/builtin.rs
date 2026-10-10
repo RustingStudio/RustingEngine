@@ -15,8 +15,8 @@ use crate::runtime::{
     CameraShake, ColorGrading, ColorLut, CombineMode, Connection, Connections,
     Counter, CullingMode, DepthOfField, DeterminismMode, Dialogue,
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
-    FluidBlock, Fog, ForceField, GravityVolume, GroundSurface, Health,
-    Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
+    FluidBlock, Fog, FogVolume, ForceField, GravityVolume, GroundSurface,
+    Health, Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
     JointKind, JointMotor, JointSpring, LightCookie, LootEntry, LootTable,
     MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial, PhysicsSettings,
     PhysicsSyncMode, Pickup, PlatformerController, PlayerController, Polygon2d,
@@ -1177,6 +1177,23 @@ crate::reflect! {
         distortion: f32 {
             unit: "factor", min: 0.0, max: 1.0,
             doc: "tube bulge and row wobble over time",
+        },
+    }
+}
+
+crate::reflect! {
+    struct FogVolume {
+        color: [f32; 3] {
+            unit: "linear rgb", min: 0.0,
+            doc: "color the box fades into",
+        },
+        density: f32 {
+            unit: "1/m", min: 0.0,
+            doc: "extinction per metre inside the box",
+        },
+        extents: [f32; 3] {
+            unit: "m", min: 0.0,
+            doc: "half size of the box in the object's local axes",
         },
     }
 }

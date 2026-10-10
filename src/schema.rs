@@ -850,6 +850,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"color": [0.55, 0.65, 0.75], "density": 0.02, "height": 0.0, "height_falloff": 0.1, "sun_scatter": 0.3, "sky_affect": 1.0, "light_shafts": 0.0}),
     },
     ComponentSection {
+        key: "rusting.fog_volume",
+        summary: "A box of uniform fog of half size extents around the object, turned and scaled with it: mist in a valley, smoke in a room. It fades what lies behind it into color by density per metre and stacks in front of rusting.fog. The renderer uses the first eight in entity order.",
+        gpu: "a box test per volume per fogged pixel, plus the full-screen sky pass",
+        example: || json!({"color": [0.6, 0.6, 0.65], "density": 0.5, "extents": [2.0, 2.0, 2.0]}),
+    },
+    ComponentSection {
         key: "rusting.post_volume",
         summary: "Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside. Higher priority wins where volumes overlap. Fog and grading without a volume apply everywhere else; a hall with fog and a sickly grade and an office with a warm grade each get one.",
         gpu: NO_GPU,

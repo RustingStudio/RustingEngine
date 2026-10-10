@@ -1334,6 +1334,31 @@ impl Fog {
     }
 }
 
+/// Uniform fog filling a box of half size `extents` around the object,
+/// turned and scaled with it: mist in a valley, smoke in a room. Volumes
+/// stack in front of `rusting.fog`; the renderer uses the first eight in
+/// entity order.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FogVolume {
+    /// Linear RGB color the box fades into.
+    pub color: [f32; 3],
+    /// Extinction per metre inside the box. 1 hides things 3 m deep.
+    pub density: f32,
+    /// Half size of the box in the object's local axes, in metres.
+    pub extents: [f32; 3],
+}
+
+impl Default for FogVolume {
+    fn default() -> Self {
+        Self {
+            color: [0.6, 0.6, 0.65],
+            density: 0.5,
+            extents: [2.0, 2.0, 2.0],
+        }
+    }
+}
+
 /// Makes this object's `rusting.fog` and `rusting.color_grading` apply only
 /// around it: fully while the active camera is inside the box of half size
 /// `extents` around the object's position (world axes), fading out over

@@ -181,6 +181,22 @@ feeds look like old tape and the room stays clean:
     "vignette": 0.4, "noise_band": 0.3, "distortion": 0.3, "saturation": 0.6}}
 ```
 
+### Light shafts and fog volumes
+
+With a sun that casts shadows, `light_shafts` on `rusting.fog` (0..1) keeps
+the glow toward the sun dark where shadow casters block it, so beams show
+between trees and through windows. Set `sun_scatter` above 0 for the glow.
+
+A `rusting.fog_volume` fills a box around its object with uniform fog that
+the camera sees from outside too: mist in a valley, smoke in one room. The
+box turns and scales with the object; up to eight are drawn:
+
+```json
+{"name": "Valley Mist", "transform": {"position": [0, 1, 0]},
+ "components": {"rusting.fog_volume": {"color": [0.7, 0.75, 0.8],
+   "density": 0.3, "extents": [20, 1, 20]}}}
+```
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,

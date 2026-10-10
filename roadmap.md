@@ -2578,7 +2578,7 @@ Depends on: Milestones 3 and 4.
   cannot tell Catmull-Rom from bilinear in the center tap, because
   sharpening dominates. Full check: fmt, clippy x3 clean; workspace tests
   821 passed; gpu-tests 934 passed.
-- [ ] Volumetric fog with light scattering and fog volumes.
+- [x] Volumetric fog with light scattering and fog volumes.
   Partial (height fog): `rusting.fog` (color, density, height,
   height_falloff, sun_scatter, sky_affect). `src/shaders/fog.glsl`
   integrates exponential height fog along the camera ray in closed form,
@@ -2597,9 +2597,23 @@ Depends on: Milestones 3 and 4.
   GPU test `light_shafts_keep_fog_in_a_casters_shadow_dark` (fog in a
   slab's shadow looking into the sun: 255 with shafts off, under 30 with
   shafts on, bright again when the sun casts no shadows); dropping the
-  visibility factor or replacing the shadow tap with 1.0 fails it. Not
-  started: froxel volumetrics (the march runs per shaded pixel), local fog
-  volumes. Spot and point light shafts are not covered.
+  visibility factor or replacing the shadow tap with 1.0 fails it.
+  Fog volumes: `rusting.fog_volume` (color, density, extents) fills an
+  oriented box (object transform times half size) with uniform fog. Up to
+  8 volumes, in entity order, go to the main pass as world-to-box
+  matrices; `fog_volumes()` in `fog.glsl` clips each camera segment to
+  each box and composites them in front of the height fog, on surfaces
+  and in the sky pass (which now also runs when only volumes exist). The
+  editor's fog switch and debug views turn them off. Evidence: GPU test
+  `fog_volumes_fill_only_their_turned_box` (a quarter-turned red box turns
+  the middle column red and leaves the edge column white, hides nothing
+  from behind the slab, reddens the sky in front of it and leaves the sky
+  beside it black); unit test `fog_volumes_carry_their_box_in_entity_order`.
+  Uploading the box matrix without inverting it, or skipping the sky pass
+  for volumes, fails the GPU test. Known limits: no froxel grid (the
+  march runs per shaded pixel); fog volumes are unlit (their color does
+  not react to lights or shadows); only the sun makes shafts, not spot or
+  point lights; volume edges are hard.
   Editor: the Scene view's viewport menu has Scene Effects toggles that
   leave fog, bloom or ambient occlusion out of the Scene view only (Play
   and games draw them all), and a selected Fog draws squares at its

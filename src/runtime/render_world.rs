@@ -146,6 +146,9 @@ pub struct RenderWorld {
     pub reflection_probes: Vec<([f32; 3], super::ReflectionProbe)>,
     pub tone_mapping: Option<ToneMapping>,
     pub fog: Option<super::Fog>,
+    /// Box-to-world matrix (transform times half size) and settings of
+    /// each [`FogVolume`](super::FogVolume), in entity order.
+    pub fog_volumes: Vec<([[f32; 4]; 4], super::FogVolume)>,
     pub bloom: Option<super::Bloom>,
     pub auto_exposure: Option<super::AutoExposure>,
     pub depth_of_field: Option<super::DepthOfField>,
@@ -304,6 +307,26 @@ pub fn extract_render_world(world: &mut World) {
         probes
             .into_iter()
             .map(|(_, center, probe)| (center, probe))
+            .collect()
+    };
+    let fog_volumes = {
+        let mut query =
+            world.query::<(Entity, &GlobalTransform, &super::FogVolume)>();
+        let mut volumes = query
+            .iter(world)
+            .map(|(entity, transform, volume)| {
+                let [x, y, z] = volume.extents;
+                let matrix = nalgebra::Matrix4::from(transform.matrix)
+                    * nalgebra::Matrix4::new_nonuniform_scaling(
+                        &nalgebra::Vector3::new(x, y, z),
+                    );
+                (entity.index(), matrix.into(), *volume)
+            })
+            .collect::<Vec<_>>();
+        volumes.sort_by_key(|(entity, ..)| *entity);
+        volumes
+            .into_iter()
+            .map(|(_, matrix, volume)| (matrix, volume))
             .collect()
     };
     let tone_mapping = collect_first::<ToneMapping>(world);
@@ -484,6 +507,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.views = views;
     render_world.tone_mapping = tone_mapping;
     render_world.fog = fog;
+    render_world.fog_volumes = fog_volumes;
     render_world.bloom = bloom;
     render_world.auto_exposure = auto_exposure;
     render_world.depth_of_field = depth_of_field;
@@ -1242,6 +1266,33 @@ mod tests {
             (saturation - 1.0).abs() < 1e-6,
             "half way, got {saturation}"
         );
+    }
+
+    #[test]
+    fn fog_volumes_carry_their_box_in_entity_order() {
+        use crate::runtime::FogVolume;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let first = app.spawn((
+            Transform::new([1.0, 2.0, 3.0]),
+            FogVolume {
+                extents: [2.0, 1.0, 0.5],
+                ..FogVolume::default()
+            },
+        ));
+        app.spawn((Transform::default(), FogVolume::default()));
+        app.update(Duration::ZERO).unwrap();
+        let volumes = &app.world().resource::<RenderWorld>().fog_volumes;
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes[0].1.extents, [2.0, 1.0, 0.5]);
+        // The box corner (1, 1, 1) lands at position plus extents.
+        let corner = nalgebra::Matrix4::from(volumes[0].0)
+            * nalgebra::Vector4::new(1.0, 1.0, 1.0, 1.0);
+        assert_eq!(corner, nalgebra::Vector4::new(3.0, 3.0, 3.5, 1.0));
+        app.world_mut().despawn(first);
+        app.update(Duration::ZERO).unwrap();
+        let volumes = &app.world().resource::<RenderWorld>().fog_volumes;
+        assert_eq!(volumes.len(), 1);
     }
 
     #[test]

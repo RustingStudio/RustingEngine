@@ -490,6 +490,8 @@ const SSR_MAX_ROUGHNESS: f32 = 0.5;
 
 /// Most reflection probes a frame samples; later ones are ignored.
 const MAX_REFLECTION_PROBES: usize = 4;
+/// Fog volumes the main pass reads; `fog.glsl` declares the same count.
+const MAX_FOG_VOLUMES: usize = 8;
 /// Side length in texels of each captured probe face.
 const PROBE_FACE_SIZE: u32 = 128;
 /// View direction and up vector of each probe face, in layer order. The
@@ -545,8 +547,13 @@ struct ShadowUpload {
     cluster_view: [f32; 4],
     /// Cluster near plane in x and `ln(far / near)` in y.
     cluster_depth: [f32; 4],
-    /// x is how much shadows block the fog's glow toward the sun.
+    /// x is how much shadows block the fog's glow toward the sun; y counts
+    /// the fog volumes.
     fog_shafts: [f32; 4],
+    /// World-to-box matrix of each fog volume; the box spans -1..1.
+    fog_volumes: [[[f32; 4]; 4]; MAX_FOG_VOLUMES],
+    /// Color in rgb and density in w of each fog volume.
+    fog_volume_colors: [[f32; 4]; MAX_FOG_VOLUMES],
 }
 
 /// Side length in texels of the directional shadow map and the view
@@ -2981,6 +2988,12 @@ impl SceneRenderer {
         let fog = render_world
             .fog
             .filter(|fog| lit && effects.fog && fog.density > 0.0);
+        let fog_volumes: &[_] = if lit && effects.fog {
+            let volumes = &render_world.fog_volumes;
+            &volumes[..volumes.len().min(MAX_FOG_VOLUMES)]
+        } else {
+            &[]
+        };
         let bloom = render_world
             .bloom
             .filter(|bloom| lit && effects.bloom && bloom.intensity > 0.0);
@@ -3175,10 +3188,25 @@ impl SceneRenderer {
                 ],
                 fog_shafts: [
                     fog.map_or(0.0, |fog| fog.light_shafts.clamp(0.0, 1.0)),
-                    0.0,
+                    fog_volumes.len() as f32,
                     0.0,
                     0.0,
                 ],
+                fog_volumes: std::array::from_fn(|index| {
+                    fog_volumes
+                        .get(index)
+                        .and_then(|(matrix, _)| {
+                            Matrix4::from(*matrix).try_inverse()
+                        })
+                        .unwrap_or_else(Matrix4::identity)
+                        .into()
+                }),
+                fog_volume_colors: std::array::from_fn(|index| {
+                    fog_volumes.get(index).map_or([0.0; 4], |(_, volume)| {
+                        let [r, g, b] = volume.color;
+                        [r.max(0.0), g.max(0.0), b.max(0.0), volume.density]
+                    })
+                }),
             };
         let cluster_list = build_light_clusters(
             &self.prepared_lights.as_ref().unwrap().local,
@@ -4361,7 +4389,9 @@ impl SceneRenderer {
         passes.begin(&mut commands, scene_pass)?;
         let mut bound_texture =
             draw_batches(&mut commands, gpu_cull, &active.pipeline, None)?;
-        if fog.is_some_and(|fog| fog.sky_affect > 0.0) {
+        if fog.is_some_and(|fog| fog.sky_affect > 0.0)
+            || !fog_volumes.is_empty()
+        {
             // Same layout as the scene pipelines, so their sets and camera
             // stay bound.
             commands
@@ -9580,6 +9610,8 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 cluster_view;
     vec4 cluster_depth;
     vec4 fog_shafts;
+    mat4 fog_volumes[8];
+    vec4 fog_volume_colors[8];
 } shadow;
 layout(set = 2, binding = 2) uniform sampler2D environment_map;
 layout(set = 2, binding = 3) uniform sampler2D scene_color;
@@ -10664,6 +10696,8 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 cluster_view;
     vec4 cluster_depth;
     vec4 fog_shafts;
+    mat4 fog_volumes[8];
+    vec4 fog_volume_colors[8];
 } shadow;
 #include "fog.glsl"
 void main() {
@@ -11603,6 +11637,62 @@ mod tests {
             ..fog
         });
         assert_eq!(render_pixel(&mut sky, center), [0, 0, 0]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn fog_volumes_fill_only_their_turned_box() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A red box 8 m wide and 1 m tall, turned a quarter around Z, so
+        // it covers the middle columns of the view in front of the white
+        // slab at z = 0, and not the edge column.
+        let volume = |z: f32| {
+            let matrix = Matrix4::new_translation(&Vector3::new(0.0, 0.0, z))
+                * nalgebra::Rotation3::from_axis_angle(
+                    &Vector3::z_axis(),
+                    std::f32::consts::FRAC_PI_2,
+                )
+                .to_homogeneous()
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(4.0, 0.5, 1.5));
+            (
+                matrix.into(),
+                crate::runtime::FogVolume {
+                    color: [1.0, 0.0, 0.0],
+                    density: 4.0,
+                    extents: [4.0, 0.5, 1.5],
+                },
+            )
+        };
+        let mut scene = SlabScene::new(&[(0.0, MaterialAsset::default())]);
+        scene.render_world.fog_volumes = vec![volume(2.5)];
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(r > 150 && g < 30 && b < 30, "inside: {r} {g} {b}");
+        let [r, g, b] = render_pixel(&mut scene, [0, 4]);
+        assert!(r > 100 && g > 100 && b > 100, "beside: {r} {g} {b}");
+        // Behind the slab it hides nothing.
+        scene.render_world.fog_volumes = vec![volume(-2.5)];
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(g > 100 && b > 100, "behind: {r} {g} {b}");
+        // The editor's fog switch turns volumes off too.
+        scene.render_world.fog_volumes = vec![volume(2.5)];
+        scene.effects.fog = false;
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(g > 100 && b > 100, "fog switched off: {r} {g} {b}");
+
+        let mut sky = SlabScene::new(&[]);
+        sky.render_world.fog_volumes = vec![volume(2.5)];
+        let [r, g, b] = render_pixel(&mut sky, [4, 4]);
+        assert!(
+            r > 150 && g < 30 && b < 30,
+            "in front of the sky: {r} {g} {b}"
+        );
+        assert_eq!(render_pixel(&mut sky, [0, 4]), [0, 0, 0]);
     }
 
     #[test]
