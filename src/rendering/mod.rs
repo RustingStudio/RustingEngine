@@ -14,6 +14,7 @@ pub mod egui_painter;
 pub mod frame_pacer;
 pub mod frame_passes;
 pub mod gpu_cloth;
+mod lightmap;
 mod post_effects;
 pub mod readback;
 pub mod render_scale;

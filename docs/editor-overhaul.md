@@ -419,3 +419,9 @@ record mode and the rest-pose preview. Later:
   viewport. Reuse the reflection probe's face handles for `extents`, draw a
   dot at each probe position, and add a "Rebake" button (the grid rebakes
   only when a field changes).
+
+## Deferred: lightmaps
+
+- `rusting.lightmap` rebakes only when an object, mesh, material or light
+  changes. Add a "Rebake lightmaps" button and a texel density preview
+  (checker overlay sized by `resolution`) on selected lightmapped objects.

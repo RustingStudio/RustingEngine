@@ -17,15 +17,15 @@ use crate::runtime::{
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
     FluidBlock, Fog, FogVolume, ForceField, GravityVolume, GroundSurface,
     Health, Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
-    JointKind, JointMotor, JointSpring, LightCookie, LightProbeGrid, LootEntry,
-    LootTable, MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial,
-    PhysicsSettings, PhysicsSyncMode, Pickup, PlatformerController,
-    PlayerController, Polygon2d, PostVolume, ProceduralSky, QualityProfile,
-    RandomSeed, ReflectionProbe, RenderBounds, RenderSettings, ReverbZone,
-    SceneBackground, SceneInstance, ShadowQuality, SkyLight, SlideSound,
-    SoftBlock, SoundCue, SoundId, SpawnGrid, Squash, StateAction,
-    StateTransition, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
-    TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
+    JointKind, JointMotor, JointSpring, LightCookie, LightProbeGrid, Lightmap,
+    LootEntry, LootTable, MeshSurfaces, MotionBlur, ObjectState,
+    PhysicsMaterial, PhysicsSettings, PhysicsSyncMode, Pickup,
+    PlatformerController, PlayerController, Polygon2d, PostVolume,
+    ProceduralSky, QualityProfile, RandomSeed, ReflectionProbe, RenderBounds,
+    RenderSettings, ReverbZone, SceneBackground, SceneInstance, ShadowQuality,
+    SkyLight, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
+    StateAction, StateTransition, TileKind, TileMap, ToneMapper, ToneMapping,
+    Tween, TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -1092,6 +1092,15 @@ crate::reflect! {
             doc: "probes along each axis, at most 64 in all",
         },
         intensity: f32 { unit: "factor", min: 0.0 },
+    }
+}
+
+crate::reflect! {
+    struct Lightmap {
+        resolution: u32 {
+            unit: "texels", min: 2.0, max: 64.0,
+            doc: "texels along each side of each of the six faces",
+        },
     }
 }
 

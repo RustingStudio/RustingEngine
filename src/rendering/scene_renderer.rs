@@ -477,7 +477,7 @@ struct RenderInstanceUpload {
     surface: [f32; 4],
     /// x: GPU physics index or `u32::MAX`; y: alpha mode (0 opaque, 1 mask,
     /// 2 blend); z: mask cutoff as `f32` bits; w: bit 0 casts shadows, bit 1
-    /// receives shadows.
+    /// receives shadows, bits 8 and up hold the lightmap slot plus one.
     physics: [u32; 4],
     /// x: transmission; y: index of refraction; z: thickness.
     transmission: [f32; 4],
@@ -1011,6 +1011,8 @@ struct PreparedRenderInstances {
     /// Mesh-space bounds for each instance that `bounds` culls.
     local_bounds: Vec<Option<RenderBounds>>,
     flashes: Vec<(bevy_ecs::entity::Entity, [f32; 4])>,
+    /// `RenderWorld::lightmaps` the slots in `physics.w` were packed for.
+    lightmaps: Vec<(bevy_ecs::entity::Entity, crate::runtime::Lightmap)>,
     physics_revision: u64,
     material_revisions: Vec<(Handle<MaterialAsset>, u64)>,
     instances: Subbuffer<[RenderInstanceUpload]>,
@@ -1738,6 +1740,10 @@ pub struct SceneRenderer {
     light_probes: Subbuffer<[[f32; 4]]>,
     /// Grid `light_probes` was baked for.
     light_probe_key: Option<([f32; 3], crate::runtime::LightProbeGrid)>,
+    /// Baked lightmaps; see `lightmap` for the layout.
+    lightmaps: Subbuffer<[[f32; 4]]>,
+    /// Hash of what `lightmaps` was baked from, 0 for nothing.
+    lightmap_key: u64,
     /// Reads `hdr` as the input attachment of the tone-mapping subpass,
     /// and the bloom glow.
     tonemap_set: Arc<DescriptorSet>,
@@ -1939,6 +1945,8 @@ impl SceneRenderer {
             &memory_allocator,
             vec![[0.0; 4]; LIGHT_PROBE_HEADER + 6],
         )?;
+        let lightmaps =
+            create_light_probe_buffer(&memory_allocator, vec![[0.0; 4]])?;
         let scene_color_sampler = Sampler::new(
             queue.device().clone(),
             SamplerCreateInfo {
@@ -2160,6 +2168,8 @@ impl SceneRenderer {
             probe_keys: Vec::new(),
             light_probes,
             light_probe_key: None,
+            lightmaps,
+            lightmap_key: 0,
             tonemap_set,
             post_pipelines,
             bloom_chain,
@@ -2698,6 +2708,10 @@ impl SceneRenderer {
         self.prepare_gpu_physics(render_world)?;
         self.prepare_lights(render_world)?;
         self.prepare_render_instances(render_world, assets)?;
+        let lightmap_key = lightmap_key(render_world, assets);
+        if self.lightmap_key != lightmap_key {
+            self.bake_lightmaps(lightmap_key, render_world, assets)?;
+        }
         let camera = options.camera.or(render_world.active_camera);
         let steady_clip = view_projection(camera, viewport.extent);
         let taa = options.debug_view == SceneDebugView::Lit
@@ -3440,6 +3454,7 @@ impl SceneRenderer {
                 },
                 WriteDescriptorSet::buffer(7, light_clusters),
                 WriteDescriptorSet::buffer(11, self.light_probes.clone()),
+                WriteDescriptorSet::buffer(12, self.lightmaps.clone()),
                 WriteDescriptorSet::image_view_sampler_array(8, 0, {
                     let cookies = self
                         .prepared_lights
@@ -5434,6 +5449,80 @@ impl SceneRenderer {
         Ok(())
     }
 
+    /// Lays out and bakes `render_world.lightmaps` into `lightmaps`, one
+    /// compute dispatch and submit per slot so no submit runs long.
+    fn bake_lightmaps(
+        &mut self,
+        key: u64,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<(), SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        // Set first, so a failed bake is not retried every frame.
+        self.lightmap_key = key;
+        let layout = super::lightmap::lightmap_layout(render_world, assets);
+        self.lightmaps =
+            create_light_probe_buffer(&self.memory_allocator, layout.rows)?;
+        let Some(lights) = self.prepared_lights.as_ref() else {
+            return Ok(());
+        };
+        if layout.slots.is_empty() {
+            return Ok(());
+        }
+        let triangle_count = (layout.triangles.len() / 4) as u32;
+        let triangles = create_light_probe_buffer(
+            &self.memory_allocator,
+            layout.triangles,
+        )?;
+        let pipeline = create_compute_pipeline(
+            &self.queue,
+            super::lightmap::bake_shader::load(self.queue.device().clone()),
+        )?;
+        let set = DescriptorSet::new(
+            self.descriptor_allocator.clone(),
+            pipeline.layout().set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, self.lightmaps.clone()),
+                WriteDescriptorSet::buffer(1, triangles),
+                WriteDescriptorSet::buffer(2, lights.buffer.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| error(&e))?;
+        for (slot, texels) in layout.slots {
+            let mut commands = AutoCommandBufferBuilder::primary(
+                self.command_allocator.clone(),
+                self.queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )
+            .map_err(|e| error(&e))?;
+            commands
+                .bind_pipeline_compute(pipeline.clone())
+                .map_err(|e| error(&e))?
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    pipeline.layout().clone(),
+                    0,
+                    set.clone(),
+                )
+                .map_err(|e| error(&e))?
+                .push_constants(
+                    pipeline.layout().clone(),
+                    0,
+                    super::lightmap::bake_shader::Bake {
+                        sky: lights.ambient,
+                        ground: lights.ground_ambient,
+                        info: [slot, lights.count, triangle_count, 0],
+                    },
+                )
+                .map_err(|e| error(&e))?;
+            unsafe { commands.dispatch([texels.div_ceil(64), 1, 1]) }
+                .map_err(|e| error(&e))?;
+            self.submit_and_wait(commands)?;
+        }
+        Ok(())
+    }
+
     /// Renders six 90-degree faces from each of `centers`, in
     /// `PROBE_FACES` order, into new `size` square images of `format`. A
     /// temporary renderer draws them, so this renderer's caches, GPU physics
@@ -6011,6 +6100,7 @@ impl SceneRenderer {
         screens.sort_unstable();
         let unchanged = |prepared: &PreparedRenderInstances| {
             prepared.flashes == render_world.flashes
+                && prepared.lightmaps == render_world.lightmaps
                 && prepared.lod_signature == lod_signature
                 && prepared.screens == screens
                 && prepared.physics_revision
@@ -6203,7 +6293,8 @@ impl SceneRenderer {
                     alpha_mode,
                     f32::to_bits(cutoff),
                     u32::from(renderable.cast_shadows)
-                        | u32::from(renderable.receive_shadows) << 1,
+                        | u32::from(renderable.receive_shadows) << 1
+                        | lightmap_slot(render_world, renderable.entity) << 8,
                 ],
                 transmission: material.map_or([0.0; 4], |material| {
                     [
@@ -6366,6 +6457,7 @@ impl SceneRenderer {
             sources,
             local_bounds,
             flashes: render_world.flashes.clone(),
+            lightmaps: render_world.lightmaps.clone(),
             physics_revision: render_world.gpu_physics_revision,
             material_revisions,
             refractive,
@@ -7950,6 +8042,68 @@ fn create_light_probe_buffer(
         rows,
     )
     .map_err(|error| SceneRenderError(error.to_string()))
+}
+
+/// Lightmap slot plus one of `entity`, 0 without one.
+fn lightmap_slot(
+    render_world: &RenderWorld,
+    entity: bevy_ecs::entity::Entity,
+) -> u32 {
+    render_world
+        .lightmaps
+        .binary_search_by_key(&entity, |(entity, _)| *entity)
+        .ok()
+        .filter(|&slot| slot < super::lightmap::MAX_LIGHTMAPS)
+        .map_or(0, |slot| slot as u32 + 1)
+}
+
+/// Hash of everything a lightmap bake reads: the lightmapped objects, their
+/// meshes and materials, and the lights. 0 when nothing is lightmapped.
+fn lightmap_key(render_world: &RenderWorld, assets: &AssetServer) -> u64 {
+    use std::hash::{Hash, Hasher};
+    if render_world.lightmaps.is_empty() {
+        return 0;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    render_world.lightmaps.len().hash(&mut hasher);
+    for renderable in &render_world.renderables {
+        let Some(slot) = render_world
+            .lightmaps
+            .binary_search_by_key(&renderable.entity, |(entity, _)| *entity)
+            .ok()
+        else {
+            continue;
+        };
+        slot.hash(&mut hasher);
+        render_world.lightmaps[slot].1.resolution.hash(&mut hasher);
+        renderable
+            .transform
+            .matrix
+            .as_flattened()
+            .iter()
+            .for_each(|value| {
+                value.to_bits().hash(&mut hasher);
+            });
+        renderable.mesh.key().hash(&mut hasher);
+        assets.meshes.revision(renderable.mesh).hash(&mut hasher);
+        renderable.material.key().hash(&mut hasher);
+        assets
+            .materials
+            .revision(renderable.material)
+            .hash(&mut hasher);
+    }
+    format!(
+        "{:?}",
+        (
+            &render_world.directional_lights,
+            &render_world.point_lights,
+            &render_world.spot_lights,
+            render_world.ambient_light,
+            render_world.sky_light,
+        )
+    )
+    .hash(&mut hasher);
+    hasher.finish().max(1)
 }
 
 /// Probes per axis: each clamped to 1..=8, then the largest axis shrunk
@@ -10070,6 +10224,10 @@ layout(set = 2, binding = 11) readonly buffer LightProbes {
     vec4 header[3];
     vec4 cubes[];
 } light_probes;
+// Baked lightmaps, laid out as `lightmap.rs` describes.
+layout(set = 2, binding = 12) readonly buffer Lightmaps {
+    vec4 data[];
+} lightmaps;
 // Decal images; decal_axes[i].w picks one. Matches MAX_DECAL_IMAGES.
 layout(set = 2, binding = 9) uniform sampler2D decal_images[4];
 vec4 decal_at(int slot, vec2 uv) {
@@ -10207,6 +10365,47 @@ vec4 probe_light(vec3 position, vec3 normal) {
     float weight = clamp(
         margin / (0.1 * min(extents.x, min(extents.y, extents.z))), 0.0, 1.0);
     return vec4(sum * light_probes.header[1].w, weight);
+}
+// Diffuse light baked into lightmap `slot` (plus one, 0 for none) at
+// `position` toward `normal`, with its weight in w. Each axis reads the
+// box face the normal points to, bilinearly, weighted by the squared
+// normal in the object's axes.
+vec4 lightmap_light(vec3 position, vec3 normal, uint slot) {
+    if (slot == 0u || float(slot) > lightmaps.data[0].x) {
+        return vec4(0.0);
+    }
+    uint header = 4u * slot - 3u;
+    vec4 info = lightmaps.data[header + 3u];
+    int res = int(info.x);
+    if (res == 0) {
+        return vec4(0.0);
+    }
+    vec3 local;
+    vec3 axes;
+    for (int a = 0; a < 3; ++a) {
+        vec4 row = lightmaps.data[header + uint(a)];
+        local[a] = dot(row, vec4(position, 1.0));
+        axes[a] = dot(normal, normalize(row.xyz));
+    }
+    vec3 sum = vec3(0.0);
+    for (int a = 0; a < 3; ++a) {
+        int face = 2 * a + (axes[a] >= 0.0 ? 0 : 1);
+        vec2 st = clamp(vec2(local[(a + 1) % 3], local[(a + 2) % 3]), 0.0,
+            1.0) * float(res) - 0.5;
+        ivec2 low = ivec2(floor(st));
+        vec2 f = st - vec2(low);
+        ivec2 a0 = clamp(low, 0, res - 1);
+        ivec2 a1 = clamp(low + 1, 0, res - 1);
+        int first = int(info.y) + face * res * res;
+        vec3 texel = mix(
+            mix(lightmaps.data[first + a0.y * res + a0.x].rgb,
+                lightmaps.data[first + a0.y * res + a1.x].rgb, f.x),
+            mix(lightmaps.data[first + a1.y * res + a0.x].rgb,
+                lightmaps.data[first + a1.y * res + a1.x].rgb, f.x),
+            f.y);
+        sum += axes[a] * axes[a] * texel;
+    }
+    return vec4(sum / max(dot(axes, axes), 1e-4), 1.0);
 }
 // Target pixel of a point in normalized device coordinates.
 vec2 screen_pixel(vec2 ndc) {
@@ -10444,6 +10643,8 @@ void main() {
         v_world_position, normal, max(last_mip - 1.0, 0.0), 1.0);
     vec4 probed = probe_light(v_world_position, normal);
     ambient = mix(ambient, probed.rgb, probed.w);
+    vec4 baked = lightmap_light(v_world_position, normal, v_alpha.z >> 8u);
+    ambient = mix(ambient, baked.rgb, baked.w);
     vec3 result = (ambient * diffuse_color * (1.0 - env_fresnel)
         + reflection * env_fresnel)
         * occlusion;
@@ -18951,6 +19152,87 @@ mod tests {
         );
         scene.render_world.light_probe_grid = None;
         assert_eq!(render_pixel(&mut scene, [4, 4]), outside, "no grid");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn lightmaps_bounce_a_sunlit_red_slab_onto_the_floor() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A white floor faces the camera with no ambient light. Behind the
+        // camera a wide red slab is lit from below by a sun shining up +z,
+        // which never reaches the floor's top. Only bounce light can.
+        let mut scene = SlabScene::new(&[
+            (0.0, MaterialAsset::default()),
+            (
+                8.0,
+                MaterialAsset {
+                    base_color: [1.0, 0.0, 0.0, 1.0],
+                    ..MaterialAsset::default()
+                },
+            ),
+        ]);
+        scene.render_world.renderables[1].transform.matrix =
+            (Matrix4::new_translation(&Vector3::new(0.0, 0.0, 8.0))
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    40.0, 40.0, 0.1,
+                )))
+            .into();
+        scene.render_world.ambient_light = Some(crate::runtime::AmbientLight {
+            color: [1.0; 3],
+            intensity: 0.0,
+        });
+        scene.render_world.directional_lights.push(
+            crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &Vector3::new(0.0, 0.01, 1.0).normalize(),
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: 2.0
+                        * crate::runtime::DirectionalLight::LUX_PER_UNIT,
+                    shadows: false,
+                },
+            },
+        );
+        let floor = scene.render_world.renderables[0].entity;
+        let slab = scene.render_world.renderables[1].entity;
+        let mut lit = |lightmapped: &[bevy_ecs::entity::Entity]| {
+            scene.render_world.lightmaps = lightmapped
+                .iter()
+                .map(|&entity| {
+                    (entity, crate::runtime::Lightmap { resolution: 4 })
+                })
+                .collect();
+            // In entity order, as extraction sorts them.
+            scene
+                .render_world
+                .lightmaps
+                .sort_by_key(|(entity, _)| *entity);
+            render_pixel(&mut scene, [4, 4])
+        };
+        let dark = lit(&[]);
+        assert!(dark[0] < 10, "no ambient or direct light: {dark:?}");
+        let bounced = lit(&[floor, slab]);
+        assert!(
+            bounced[0] > 60 && bounced[1] < bounced[0] / 4,
+            "red bounce light: {bounced:?}"
+        );
+        // An object without a lightmap neither receives nor casts bounce.
+        assert_eq!(lit(&[floor]), dark, "slab not lightmapped");
+        assert_eq!(lit(&[slab]), dark, "floor not lightmapped");
     }
 
     #[test]

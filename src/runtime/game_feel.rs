@@ -1343,6 +1343,27 @@ impl Default for LightProbeGrid {
     }
 }
 
+/// Bakes the light bouncing onto this object into a lightmap: six square
+/// faces of `resolution` texels wrapped around its mesh's box. Each texel
+/// sees the sky and the direct light reflected off other lightmapped
+/// objects, and replaces the sky, environment and probe light on the
+/// object's surface. Direct light stays real-time.
+// ponytail: box-projected, so concave meshes share texels between hidden
+// and visible faces; a UV2 unwrap would fix that. Baked when lightmapped
+// objects, their meshes or materials, or lights change.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Lightmap {
+    /// Texels along each side of each face, clamped to 2..=64.
+    pub resolution: u32,
+}
+
+impl Default for Lightmap {
+    fn default() -> Self {
+        Self { resolution: 16 }
+    }
+}
+
 /// Exponential height fog: the scene fades into `color` with distance, and
 /// the fog thins out above `height`. Looking toward the sun brightens it.
 /// The one on the entity with the lowest ID is used.

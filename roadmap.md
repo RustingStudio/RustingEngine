@@ -2395,8 +2395,8 @@ Depends on: Milestones 3 and 4.
   `transmissive_glass_tints_the_refracted_backdrop` under frustum and
   occlusion culling (fails with the refraction path turned off: 255 255
   255); `transitions_list_every_layout_change_between_passes`.
-- [ ] Baked lightmaps with a GPU lightmapper and light probes for dynamic objects.
-  Partial (light probes): `rusting.light_probe_grid` (extents, resolution,
+- [x] Baked lightmaps with a GPU lightmapper and light probes for dynamic objects.
+  Light probes: `rusting.light_probe_grid` (extents, resolution,
   intensity) spreads up to 64 probes (1..=8 per axis) wall to wall through a
   world-aligned box. When the grid is added or changes, the shared
   `capture_faces` helper (also used by reflection probes) renders six
@@ -2415,8 +2415,30 @@ Depends on: Milestones 3 and 4.
   stays gray with the grid elsewhere or removed); it failed with the probe
   weight zeroed (255 255 255) and with the +Z/-Z sides swapped (202 202
   202). Unit tests `ambient_cubes_integrate_the_light_from_each_side` and
-  `light_probe_grids_clamp_and_spread_wall_to_wall`. Lightmaps are not
-  started.
+  `light_probe_grids_clamp_and_spread_wall_to_wall`.
+  Lightmaps: `rusting.lightmap` (resolution 2..=64, default 16) wraps six
+  square faces of texels around the object's local mesh box (box
+  projection, no UV2). When a lightmapped object, its mesh or material, a
+  light, the ambient or the sky changes, `bake_lightmaps` runs the
+  `lightmap_bake.comp` compute shader once per slot: each texel is projected
+  onto the object's own triangles, then 64 cosine-weighted Hammersley rays
+  (rotated per texel) hit every lightmapped triangle; a hit adds albedo times
+  direct light (shadow rays to each light) plus emissive, a miss adds the
+  sky/ground hemisphere ambient. Set 2 binding 12 holds the texels; the
+  fragment shader blends the three faces the normal points at (squared
+  weights, bilinear) and the result replaces the ambient term after the
+  probe mix, so direct light stays real time. Limits: box projection shares
+  texels on concave meshes, brute force tracing capped at 16384 triangles
+  (no BVH), one bounce, the bake ignores the environment map and light
+  cookies, static bake (moving objects do not update it), no editor rebake
+  button (deferred in `docs/editor-overhaul.md`). Evidence: GPU test
+  `lightmaps_bounce_a_sunlit_red_slab_onto_the_floor` (a white floor under
+  a sunlit red slab, with ambient off, reads red only when both are
+  lightmapped, and stays dark with one of them or none); it failed with the
+  bake's `albedo * direct` zeroed ([0, 0, 0]). Unit test
+  `lightmaps_map_the_mesh_box_onto_the_unit_cube_and_skip_the_rest`. Full
+  check: fmt, clippy (default, `--no-default-features`, `gpu-tests`),
+  `cargo test --workspace` and the gpu-tests run (1000 lib tests) pass.
 - [ ] One real-time GI technique (probe-based DDGI or voxel/SDF GI) with a quality-profile fallback to ambient probes.
 - [x] Sky system: procedural physical sky, HDRI skies, and sky-derived ambient/specular.
   Partial: `EnvironmentMap { texture, intensity }` (`rusting.environment_map`)

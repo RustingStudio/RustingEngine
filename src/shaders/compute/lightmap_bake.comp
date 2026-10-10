@@ -1,0 +1,185 @@
+#version 450
+// Lightmap bake: one invocation per texel of one slot. The buffer layout
+// is described in src/rendering/lightmap.rs.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct Light {
+    vec4 position_kind;
+    vec4 direction_range;
+    vec4 color_intensity;
+    vec4 spot_angles;
+    vec4 cookie;
+};
+
+layout(set = 0, binding = 0) buffer Rows { vec4 data[]; } rows;
+layout(set = 0, binding = 1) readonly buffer Triangles {
+    vec4 data[];
+} triangles;
+layout(set = 0, binding = 2) readonly buffer Lights { Light data[]; } lights;
+
+layout(push_constant) uniform Bake {
+    // Sky color straight up and straight down, as the main pass's
+    // hemisphere ambient without an environment map.
+    vec4 sky;
+    vec4 ground;
+    // x: slot; y: light count; z: triangle count.
+    uvec4 info;
+} bake;
+
+const uint RAYS = 64u;
+const uint NONE = 0xffffffffu;
+const float PI = 3.14159265;
+const float BIAS = 1e-3;
+
+// Distance to the nearest triangle in [first, first + count) the ray from
+// `origin` along `dir` meets before `far`, and that triangle in `hit`.
+float nearest(vec3 origin, vec3 dir, float far, uint first, uint count,
+    out uint hit) {
+    hit = NONE;
+    float best = far;
+    for (uint i = first; i < first + count; ++i) {
+        vec3 a = triangles.data[4u * i].xyz;
+        vec3 e1 = triangles.data[4u * i + 1u].xyz - a;
+        vec3 e2 = triangles.data[4u * i + 2u].xyz - a;
+        vec3 p = cross(dir, e2);
+        float det = dot(e1, p);
+        if (abs(det) < 1e-12) {
+            continue;
+        }
+        float inv = 1.0 / det;
+        vec3 s = origin - a;
+        float u = dot(s, p) * inv;
+        if (u < 0.0 || u > 1.0) {
+            continue;
+        }
+        vec3 q = cross(s, e1);
+        float v = dot(dir, q) * inv;
+        if (v < 0.0 || u + v > 1.0) {
+            continue;
+        }
+        float t = dot(e2, q) * inv;
+        if (t > 1e-4 && t < best) {
+            best = t;
+            hit = i;
+        }
+    }
+    return best;
+}
+
+// The triangle's normal, turned to face against `dir`.
+vec3 facing(uint i, vec3 dir) {
+    vec3 a = triangles.data[4u * i].xyz;
+    vec3 n = normalize(cross(triangles.data[4u * i + 1u].xyz - a,
+        triangles.data[4u * i + 2u].xyz - a));
+    return dot(n, dir) > 0.0 ? -n : n;
+}
+
+// Direct light reaching `p` on a surface facing `n`, with shadow rays,
+// scaled like the main pass so a white surface reflects it unchanged.
+vec3 direct(vec3 p, vec3 n) {
+    vec3 sum = vec3(0.0);
+    for (uint l = 0u; l < bake.info.y; ++l) {
+        Light light = lights.data[l];
+        vec3 to_light;
+        float distance_to_light = 1e4;
+        float attenuation = 1.0;
+        if (light.position_kind.w < 0.5) {
+            to_light = normalize(-light.direction_range.xyz);
+        } else {
+            vec3 delta = light.position_kind.xyz - p;
+            distance_to_light = length(delta);
+            to_light = delta / max(distance_to_light, 1e-4);
+            float fade = clamp(
+                1.0 - distance_to_light / light.direction_range.w, 0.0, 1.0);
+            attenuation = fade * fade;
+            if (light.position_kind.w > 1.5) {
+                attenuation *= smoothstep(light.spot_angles.y,
+                    light.spot_angles.x,
+                    dot(-to_light, normalize(light.direction_range.xyz)));
+            }
+        }
+        float n_dot_l = dot(n, to_light);
+        if (n_dot_l <= 0.0 || attenuation <= 0.0) {
+            continue;
+        }
+        uint blocker;
+        nearest(p + n * BIAS, to_light, distance_to_light, 0u, bake.info.z,
+            blocker);
+        if (blocker == NONE) {
+            sum += light.color_intensity.rgb * light.color_intensity.w
+                * attenuation * n_dot_l;
+        }
+    }
+    return sum;
+}
+
+uint hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+void main() {
+    uint header = 1u + 4u * bake.info.x;
+    vec4 info = rows.data[header + 3u];
+    uint res = uint(info.x);
+    uint texel = gl_GlobalInvocationID.x;
+    if (texel >= 6u * res * res) {
+        return;
+    }
+    mat4 to_world = inverse(transpose(mat4(rows.data[header],
+        rows.data[header + 1u], rows.data[header + 2u],
+        vec4(0.0, 0.0, 0.0, 1.0))));
+    uint face = texel / (res * res);
+    int axis = int(face / 2u);
+    bool positive = face % 2u == 0u;
+    vec3 box;
+    box[axis] = positive ? 1.0 : 0.0;
+    box[(axis + 1) % 3] = (float(texel % res) + 0.5) / float(res);
+    box[(axis + 2) % 3] = (float(texel / res % res) + 0.5) / float(res);
+    // The surface under the texel: the first point of the object's own
+    // mesh met going into the box, else the box face itself.
+    vec3 outside = box;
+    vec3 inside = box;
+    outside[axis] = positive ? 1.01 : -0.01;
+    inside[axis] = positive ? -0.01 : 1.01;
+    vec3 from = (to_world * vec4(outside, 1.0)).xyz;
+    vec3 span = (to_world * vec4(inside, 1.0)).xyz - from;
+    vec3 dir = normalize(span);
+    uint own;
+    float t = nearest(from, dir, length(span), uint(info.z), uint(info.w),
+        own);
+    vec3 p = own == NONE ? (to_world * vec4(box, 1.0)).xyz : from + dir * t;
+    vec3 n = own == NONE ? -dir : facing(own, dir);
+    vec3 tangent = normalize(abs(n.y) < 0.99
+        ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+    vec3 bitangent = cross(n, tangent);
+    vec3 origin = p + n * BIAS;
+    // Cosine-weighted Hammersley directions, rotated per texel.
+    uint seed = hash(texel ^ hash(bake.info.x));
+    vec2 shift = vec2(hash(seed), hash(seed + 1u)) / 4294967296.0;
+    vec3 sum = vec3(0.0);
+    for (uint i = 0u; i < RAYS; ++i) {
+        vec2 xi = fract(vec2((float(i) + 0.5) / float(RAYS),
+            float(bitfieldReverse(i)) / 4294967296.0) + shift);
+        float r = sqrt(xi.x);
+        float phi = 2.0 * PI * xi.y;
+        vec3 d = normalize(tangent * (r * cos(phi))
+            + bitangent * (r * sin(phi)) + n * sqrt(1.0 - xi.x));
+        uint hit;
+        float distance_to_hit = nearest(origin, d, 1e4, 0u, bake.info.z, hit);
+        if (hit == NONE) {
+            sum += mix(bake.ground.rgb, bake.sky.rgb, d.y * 0.5 + 0.5);
+            continue;
+        }
+        vec3 albedo = vec3(triangles.data[4u * hit].w,
+            triangles.data[4u * hit + 1u].w, triangles.data[4u * hit + 2u].w);
+        vec3 q = origin + d * distance_to_hit;
+        sum += albedo * direct(q, facing(hit, d))
+            + triangles.data[4u * hit + 3u].rgb;
+    }
+    rows.data[uint(info.y) + texel] = vec4(sum / float(RAYS), 1.0);
+}

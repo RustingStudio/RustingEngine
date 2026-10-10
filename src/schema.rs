@@ -850,6 +850,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"extents": [5.0, 3.0, 5.0], "resolution": [3, 2, 3], "intensity": 1.0}),
     },
     ComponentSection {
+        key: "rusting.lightmap",
+        summary: "On an object with a mesh_renderer: bakes the light bouncing onto it into six square faces of resolution texels wrapped around its mesh's box. Each texel sees the sky and the direct light reflected off other lightmapped objects, so a floor beside a sunlit red wall turns red and a box darkens the floor under it. Replaces the sky, environment and light probe light on the object; direct light stays real-time. Suits walls, floors and other boxy or convex static meshes. Baked when lightmapped objects, their meshes or materials, or lights change.",
+        gpu: "a compute bake of 64 rays per texel against every lightmapped triangle; twelve buffer reads per lit pixel",
+        example: || json!({"resolution": 16}),
+    },
+    ComponentSection {
         key: "rusting.fog",
         summary: "Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre. Brighter toward the sun by sun_scatter; sky_affect fades the background too. light_shafts lets the sun's shadow map darken that glow, showing shafts behind shadow casters. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
         gpu: "a few instructions per pixel, plus one full-screen sky pass when sky_affect > 0; light_shafts > 0 adds 16 shadow-map taps per fogged pixel",

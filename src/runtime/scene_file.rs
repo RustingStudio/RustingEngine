@@ -1176,6 +1176,8 @@ pub const LIGHT_COOKIE_COMPONENT: &str = "rusting.light_cookie";
 pub const REFLECTION_PROBE_COMPONENT: &str = "rusting.reflection_probe";
 /// Registry name of the built-in light probe grid.
 pub const LIGHT_PROBE_GRID_COMPONENT: &str = "rusting.light_probe_grid";
+/// Registry name of the built-in baked lightmap.
+pub const LIGHTMAP_COMPONENT: &str = "rusting.lightmap";
 /// Registry name of the built-in height fog.
 pub const FOG_COMPONENT: &str = "rusting.fog";
 /// Registry name of the built-in bloom.
@@ -1355,6 +1357,9 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::LightProbeGrid>(LIGHT_PROBE_GRID_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Lightmap>(LIGHTMAP_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::Fog>(FOG_COMPONENT)
