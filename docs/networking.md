@@ -424,6 +424,9 @@ match replica.verify(world, from, &bytes) {
 - With snapshots the hash names its snapshot; a client that has not
   applied that one answers `Stale` and waits for the next hash. With
   deltas, send the hash reliably right after the delta.
+- Each checksum lets a client resynchronize once; `accept` refuses a
+  second request before the next checksum, so a client cannot make the
+  host send the whole state over and over.
 - After a resync request the next snapshot for that client is whole.
   A whole snapshot, and `full()`, replace the client's replicated
   objects: changed values are set back, and replicated objects the host

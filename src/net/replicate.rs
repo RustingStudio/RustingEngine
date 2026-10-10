@@ -89,6 +89,11 @@ pub struct Replication {
     /// Numbered snapshots, oldest first, and what each client acknowledged.
     history: VecDeque<(u64, State)>,
     acked: BTreeMap<PeerId, u64>,
+    /// Checksums sent, and the count when each client last resynced: a
+    /// client may resync once per checksum, so a few bytes of requests
+    /// cannot make the host send the whole state over and over.
+    checksums: u64,
+    resynced: BTreeMap<PeerId, u64>,
 }
 
 impl Replication {
@@ -157,8 +162,10 @@ impl Replication {
     /// A hash of the latest state, for [`Replica::verify`]: of the latest
     /// snapshot, or of what [`delta`](Self::delta) last sent when no
     /// snapshot was taken. Send it every second or so, the same way as
-    /// the state (reliably after a delta).
-    pub fn checksum(&self) -> Vec<u8> {
+    /// the state (reliably after a delta). Each one lets every client
+    /// resynchronize once.
+    pub fn checksum(&mut self) -> Vec<u8> {
+        self.checksums += 1;
         let (seq, state) = self
             .history
             .back()
@@ -216,6 +223,12 @@ impl Replication {
         bytes: &[u8],
     ) -> Option<Result<FromClient, String>> {
         if bytes == RESYNC {
+            if self.resynced.get(&from) == Some(&self.checksums) {
+                return Some(Err(format!(
+                    "peer {from} asked to resync again before a new checksum"
+                )));
+            }
+            self.resynced.insert(from, self.checksums);
             self.acked.remove(&from);
             return Some(Ok(FromClient::Resync));
         }
@@ -235,6 +248,7 @@ impl Replication {
     /// Forgets a client that left.
     pub fn forget(&mut self, peer: PeerId) {
         self.acked.remove(&peer);
+        self.resynced.remove(&peer);
     }
 
     fn capture(&self, world: &mut World) -> io::Result<State> {
@@ -801,6 +815,10 @@ mod tests {
         assert_eq!(
             replication.accept(1, &replica.resync()),
             Some(Ok(FromClient::Resync))
+        );
+        assert!(
+            replication.accept(1, &replica.resync()).unwrap().is_err(),
+            "once per checksum"
         );
         replica
             .apply(&mut client, HOST, &replication.full())
