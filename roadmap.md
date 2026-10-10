@@ -3664,7 +3664,15 @@ The networking model depends on the Milestone 8 result. Bit-identical determinis
   Nothing predicts terrain or other host-simulated results; the rule is in
   the `Predicted` docs and `docs/networking.md` "Predicting the player's
   own object".
-- [ ] Reconcile prediction error with presentation-only smoothing that never feeds back into simulation state.
+- [x] Reconcile prediction error with presentation-only smoothing that never feeds back into simulation state.
+  Evidence 2026-10-10 (lane tools): `net::predict::Smoothing::new(half_life,
+  snap)` keeps only a drawing offset: `correct(shown, corrected)` records
+  a reconcile's jump, `shown(simulated, elapsed)` returns the drawn
+  position with the offset halving each half-life, and corrections longer
+  than `snap` show at once. It takes the simulated state by value and
+  never returns into it.
+  `net::predict::tests::smoothing_fades_a_correction_without_touching_the_simulation`.
+  `docs/networking.md` "Predicting the player's own object".
 - [ ] Detect desync by periodic state-hash comparison, report it, and recover through full resynchronization.
 - [ ] Support spectator clients that receive state and send no input.
 

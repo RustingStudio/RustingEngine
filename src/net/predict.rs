@@ -11,6 +11,7 @@
 
 use bevy_ecs::prelude::*;
 use std::collections::VecDeque;
+use std::time::Duration;
 
 /// Marks the one object this client predicts: its local hero.
 /// [`Interpolation`](super::interpolate::Interpolation) leaves it alone, so
@@ -95,6 +96,54 @@ impl<I> Prediction<I> {
     }
 }
 
+/// Hides a reconcile's correction from the player without touching the
+/// simulation. It keeps only a drawing offset: the predicted state stays
+/// exactly what [`Prediction::reconcile`] returned, and the offset fades
+/// out over time.
+#[derive(Clone, Copy, Debug)]
+pub struct Smoothing {
+    offset: [f32; 3],
+    half_life: Duration,
+    snap: f32,
+}
+
+impl Smoothing {
+    /// Halves the shown error every `half_life`. A correction longer than
+    /// `snap` metres (a teleport or respawn) shows at once instead.
+    pub fn new(half_life: Duration, snap: f32) -> Self {
+        Self {
+            offset: [0.0; 3],
+            half_life,
+            snap,
+        }
+    }
+
+    /// Records a correction: the position was drawn at `shown`, and the
+    /// reconciled simulation now puts it at `corrected`.
+    pub fn correct(&mut self, shown: [f32; 3], corrected: [f32; 3]) {
+        let offset: [f32; 3] = std::array::from_fn(|i| shown[i] - corrected[i]);
+        let length = offset.iter().map(|x| x * x).sum::<f32>().sqrt();
+        self.offset = if length > self.snap { [0.0; 3] } else { offset };
+    }
+
+    /// Where to draw `simulated` after `elapsed` more time. Feed only
+    /// rendering from it, never the simulation.
+    pub fn shown(
+        &mut self,
+        simulated: [f32; 3],
+        elapsed: Duration,
+    ) -> [f32; 3] {
+        if !self.half_life.is_zero() {
+            let decay = 0.5f32
+                .powf(elapsed.as_secs_f32() / self.half_life.as_secs_f32());
+            self.offset = self.offset.map(|x| x * decay);
+        } else {
+            self.offset = [0.0; 3];
+        }
+        std::array::from_fn(|i| simulated[i] + self.offset[i])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +175,30 @@ mod tests {
             prediction.push(tick, 0.0);
         }
         assert_eq!(prediction.pending().count(), MAX_PENDING);
+    }
+
+    #[test]
+    fn smoothing_fades_a_correction_without_touching_the_simulation() {
+        let mut prediction = Prediction::new();
+        let mut position = [0.0f32; 3];
+        let step = |p: &mut [f32; 3], dx: &f32| p[0] += dx;
+        for tick in 1..=3 {
+            prediction.push(tick, 1.0);
+            step(&mut position, &1.0);
+        }
+        let mut smoothing = Smoothing::new(Duration::from_millis(100), 2.0);
+        let shown = smoothing.shown(position, Duration::ZERO);
+        // The host was 0.5 m behind: the simulation jumps, the drawing
+        // does not.
+        position = prediction.reconcile(1, [0.5, 0.0, 0.0], step);
+        assert_eq!(position, [2.5, 0.0, 0.0], "simulation takes it whole");
+        smoothing.correct(shown, position);
+        assert_eq!(smoothing.shown(position, Duration::ZERO), shown);
+        let later = smoothing.shown(position, Duration::from_millis(100));
+        assert!((later[0] - 2.75).abs() < 1e-5, "half the error left");
+        assert_eq!(position, [2.5, 0.0, 0.0], "never fed back");
+        // A teleport snaps.
+        smoothing.correct(position, [50.0, 0.0, 0.0]);
+        assert_eq!(smoothing.shown([50.0, 0.0, 0.0], Duration::ZERO)[0], 50.0);
     }
 }

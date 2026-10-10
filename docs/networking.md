@@ -478,8 +478,26 @@ position = prediction.reconcile(acked_tick, host_position, steer);
 - `steer` must be the same code on both sides, with the same fixed step.
 - It keeps at most `MAX_PENDING` (240) inputs. Inputs over UDP can be
   lost: send the last few ticks' inputs in each message.
-- A correction snaps. Ease the drawn position toward the result for a
-  few frames if it shows.
+- A correction would snap. `net::predict::Smoothing` hides it in the
+  drawing only:
+
+  ```rust
+  use rusting_engine::net::predict::Smoothing;
+
+  let mut smoothing = Smoothing::new(Duration::from_millis(100), 2.0);
+  // On the host's reply:
+  let before = drawn;
+  position = prediction.reconcile(acked_tick, host_position, steer);
+  smoothing.correct(before, position);
+  // Every frame:
+  drawn = smoothing.shown(position, frame_time);
+  transform.position = drawn;
+  ```
+
+  The simulation keeps the reconciled `position`; only the drawn one
+  lags, halving its error every half-life (100 ms here). A correction
+  longer than the snap distance (2 m here: a teleport or respawn) shows
+  at once. Never feed `drawn` back into `steer` or the host.
 - Predict only the local hero. Mark it with
   `net::predict::predict_only(world, hero)`, which removes `Predicted`
   from any other object, and use an `interpolated()` replica so the
