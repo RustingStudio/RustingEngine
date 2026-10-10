@@ -1,0 +1,29 @@
+{
+  "kind": "performance",
+  "template": "roguelike",
+  "request": "Players say this dungeon crawler gets heavier on every floor: each trip down the stairs makes every later frame do more work, and saved games grow with each floor. Find the cause and fix it without changing how the game plays or how the floors look.",
+  "seed": [
+    {
+      "file": "scenes/main.rscene",
+      "find": "  \"entities\": [\n",
+      "replace": "  \"entities\": [\n    {\n      \"id\": \"e8b4c0a7-2f19-4d6b-8c35-9a0e7f1d2b63\",\n      \"parent\": null,\n      \"name\": \"Tile Template\",\n      \"classes\": [],\n      \"visible\": false,\n      \"transform\": {\n        \"position\": [0.0, -20.0, 0.0],\n        \"rotation\": [0.0, 0.0, 0.0],\n        \"scale\": [0.92, 0.02, 0.92]\n      },\n      \"mesh_renderer\": {\n        \"mesh\": {\"BuiltinPrimitive\": \"Cube\"},\n        \"material\": {\"Inline\": {\"name\": \"\", \"model\": \"Pbr\", \"alpha_mode\": \"Opaque\", \"base_color\": [0.32, 0.3, 0.36, 1.0], \"emissive\": [0.0, 0.0, 0.0], \"metallic\": 0.0, \"roughness\": 0.9, \"transmission\": 0.0, \"ior\": 1.5, \"thickness\": 0.0, \"uv_scale\": [1.0, 1.0], \"uv_offset\": [0.0, 0.0], \"flat_shading\": false, \"base_color_texture\": null, \"normal_texture\": null, \"metallic_roughness_texture\": null, \"occlusion_texture\": null, \"emissive_texture\": null}},\n        \"cast_shadows\": false,\n        \"receive_shadows\": true\n      }\n    },\n"
+    },
+    {
+      "file": "src/main.rs",
+      "find": "    place(scene, \"Player\", START);\n    let mut draw = 0;\n",
+      "replace": "    place(scene, \"Player\", START);\n    // Stone tiles pave every cell of the floor.\n    for x in 1..=WIDTH {\n        for z in 1..=DEPTH {\n            let name = format!(\"Tile {floor} {x} {z}\");\n            scene.spawn_copy(\"Tile Template\", &name, [x as f32, 0.01, z as f32]);\n            scene.set_visible(&name, true);\n            scene.add_class(&name, \"tile\");\n        }\n    }\n    let mut draw = 0;\n"
+    }
+  ],
+  "remove": [],
+  "reference": [
+    {
+      "file": "src/main.rs",
+      "find": "        .chain(scene.in_class(\"enemy\"))\n",
+      "replace": "        .chain(scene.in_class(\"enemy\"))\n        .chain(scene.in_class(\"tile\"))\n"
+    }
+  ],
+  "hidden": [
+    "../../../src/templates/roguelike_descend.json",
+    "hidden/tiles.json"
+  ]
+}

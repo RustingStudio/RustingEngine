@@ -1,0 +1,184 @@
+{
+  "name": "tiles: on seed 1, three floors paved with tiles keep a flat number of live entities",
+  "seed": 1,
+  "ticks": 84,
+  "steps": [
+    {
+      "tick": 1,
+      "expect": {
+        "entity": "Tile 0 1 1",
+        "exists": true
+      }
+    },
+    {
+      "tick": 2,
+      "tap": "right"
+    },
+    {
+      "tick": 4,
+      "tap": "right"
+    },
+    {
+      "tick": 6,
+      "tap": "right"
+    },
+    {
+      "tick": 8,
+      "tap": "right"
+    },
+    {
+      "tick": 10,
+      "tap": "down"
+    },
+    {
+      "tick": 12,
+      "tap": "down"
+    },
+    {
+      "tick": 14,
+      "tap": "down"
+    },
+    {
+      "tick": 16,
+      "tap": "down"
+    },
+    {
+      "tick": 18,
+      "tap": "down"
+    },
+    {
+      "tick": 20,
+      "tap": "right"
+    },
+    {
+      "tick": 22,
+      "tap": "right"
+    },
+    {
+      "tick": 24,
+      "tap": "down"
+    },
+    {
+      "tick": 26,
+      "tap": "right"
+    },
+    {
+      "tick": 28,
+      "tap": "down"
+    },
+    {
+      "tick": 30,
+      "tap": "down"
+    },
+    {
+      "tick": 32,
+      "tap": "down"
+    },
+    {
+      "tick": 34,
+      "tap": "down"
+    },
+    {
+      "tick": 36,
+      "tap": "down"
+    },
+    {
+      "tick": 38,
+      "tap": "down"
+    },
+    {
+      "tick": 40,
+      "tap": "down"
+    },
+    {
+      "tick": 42,
+      "tap": "down"
+    },
+    {
+      "tick": 44,
+      "tap": "right"
+    },
+    {
+      "tick": 46,
+      "tap": "up"
+    },
+    {
+      "tick": 48,
+      "tap": "right"
+    },
+    {
+      "tick": 50,
+      "tap": "right"
+    },
+    {
+      "tick": 52,
+      "tap": "right"
+    },
+    {
+      "tick": 54,
+      "tap": "right"
+    },
+    {
+      "tick": 56,
+      "tap": "down"
+    },
+    {
+      "tick": 58,
+      "tap": "down"
+    },
+    {
+      "tick": 60,
+      "tap": "down"
+    },
+    {
+      "tick": 62,
+      "tap": "down"
+    },
+    {
+      "tick": 64,
+      "tap": "down"
+    },
+    {
+      "tick": 66,
+      "tap": "down"
+    },
+    {
+      "tick": 68,
+      "tap": "down"
+    },
+    {
+      "tick": 70,
+      "tap": "right"
+    },
+    {
+      "tick": 72,
+      "tap": "right"
+    },
+    {
+      "tick": 74,
+      "tap": "right"
+    },
+    {
+      "tick": 76,
+      "tap": "right"
+    },
+    {
+      "tick": 78,
+      "tap": "right"
+    },
+    {
+      "tick": 80,
+      "tap": "right"
+    },
+    {
+      "tick": 81,
+      "expect": {
+        "counter": "depth",
+        "equals": 3
+      }
+    }
+  ],
+  "budgets": {
+    "max_entities": 150
+  }
+}
