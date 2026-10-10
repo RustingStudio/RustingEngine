@@ -38,6 +38,15 @@ pub(super) fn decode(bytes: &[u8]) -> Result<([u32; 2], Vec<u8>), String> {
         width.map_err(|error| error.to_string())?,
         height.map_err(|error| error.to_string())?,
     );
+    // The header sizes the allocations, so bound it before trusting it.
+    if width == 0
+        || height == 0
+        || width > MAX_SIDE
+        || height > MAX_SIDE
+        || u64::from(width) * u64::from(height) > MAX_TEXELS
+    {
+        return Err(format!("unsupported size {width}x{height}"));
+    }
     let mut data = bytes.get(offset..).unwrap_or_default();
     let mut texels = Vec::with_capacity(width as usize * height as usize * 8);
     let mut scanline = vec![[0_u8; 4]; width as usize];
@@ -60,6 +69,11 @@ pub(super) fn decode(bytes: &[u8]) -> Result<([u32; 2], Vec<u8>), String> {
     }
     Ok(([width, height], texels))
 }
+
+/// Largest side and texel count accepted: 16384x4096 holds an 8K sky at
+/// 512 MiB of half floats.
+const MAX_SIDE: u32 = 16_384;
+const MAX_TEXELS: u64 = 1 << 26;
 
 /// Reads one scanline of RGBE texels and returns the bytes after it.
 fn read_scanline<'a>(
@@ -175,6 +189,8 @@ mod tests {
         assert_eq!(texel(7, 1), [0.25, 33.0 / 256.0, 0.0, 1.0]);
 
         assert!(decode(b"P6\n").is_err());
+        assert!(decode(&header(4_000_000_000, 4_000_000_000)).is_err());
+        assert!(decode(&header(16_384, 16_384)).is_err());
         let mut short = header(2, 1);
         short.extend([1, 2, 3]);
         assert!(decode(&short).is_err());
