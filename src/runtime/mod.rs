@@ -6,6 +6,7 @@
 mod actions;
 mod animation;
 mod audio;
+pub mod broad_phase;
 mod classes;
 mod click;
 pub mod cloth;
