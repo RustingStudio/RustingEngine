@@ -389,6 +389,34 @@ if let Some(ack) = replica.ack() {
   client's real acknowledgement, fixes it.
 - Use snapshots or deltas for a set of objects, not both.
 
+### Bandwidth per client
+
+Cap what the host sends each client with `net::limit::Bandwidth`, a byte
+budget per client that also measures what each one got:
+
+```rust
+use rusting_engine::net::limit::Bandwidth;
+
+let mut budget = Bandwidth::new(16_000.0, 4_000); // 16 KB/s, bursts of 4 KB
+// Host, every tick, instead of session.send_unreliable:
+for peer in session.peers() {
+    if let Some(bytes) = replication.snapshot_for(peer) {
+        budget.send_unreliable(&session, peer, &bytes, Instant::now())?;
+    }
+}
+let usage = budget.usage(peer); // bytes_sent, bytes_per_second, messages_dropped
+// On NetEvent::Disconnected(peer):
+budget.forget(peer);
+```
+
+- A message over the budget is not sent and counts in
+  `messages_dropped`. Snapshots suit this: the next one, encoded against
+  the client's last acknowledgement, carries what the dropped one had.
+  Do not send deltas or other messages that build on each other through
+  it.
+- The burst must hold the largest message; a bigger one is an error.
+- Budgets count payload bytes; `NetSession::stats` adds the headers.
+
 ## Predicting the player's own object
 
 Waiting a round trip for the host makes a player's own raft feel slow.

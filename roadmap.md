@@ -3634,7 +3634,15 @@ The networking model depends on the Milestone 8 result. Bit-identical determinis
   `docs/networking.md` has a per-field precision table (position 5 mm,
   rotation 0.0005 rad, scale 0.005, health exact).
 - [ ] Interest management: replicate only what a client's team can currently see, using the vision system from Milestone 27.
-- [ ] Per-client bandwidth budget with measured usage and an enforced cap.
+- [x] Per-client bandwidth budget with measured usage and an enforced cap.
+  Evidence 2026-10-10 (lane tools): `net::limit::Bandwidth::new(bytes_per_second,
+  burst)` is a byte token bucket per client; `send_unreliable` sends only
+  within budget (`Ok(false)` otherwise, error for a message over the
+  burst) and `usage(peer)` reports bytes and messages sent, messages
+  dropped and bytes in the last whole second.
+  `net::limit::tests::bandwidth_caps_and_measures_each_client` checks the
+  burst, per-client budgets, refill, the counters and the session's own
+  byte count. `docs/networking.md` "Bandwidth per client".
 - [ ] Replicate terrain modification events, not individual debris transforms. Clients re-simulate debris locally from the same events. This is the only approach that keeps bandwidth bounded during heavy destruction, and it depends on Milestone 8.
 
 ### Client
