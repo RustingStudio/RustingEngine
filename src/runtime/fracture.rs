@@ -14,6 +14,10 @@
 //! the energy beyond `break_energy` scattering the pieces away from the
 //! hardest hit.
 //!
+//! Each break sends one [`Fractured`] event naming the object, its pieces,
+//! where it was hit, how hard, and the world box it filled, so audio,
+//! particles, navigation and gameplay can react without polling.
+//!
 //! The pieces are [`Debris`], and [`manage_debris`] keeps them cheap. Only
 //! sleeping debris is ever removed or merged, so nothing vanishes in
 //! flight: a piece asleep for its fracture's `debris_lifetime` despawns,
@@ -25,7 +29,7 @@
 //!
 //! Determinism: Voronoi seeds come from [`RandomSeed`] streams of the
 //! fracture's own seed, cells are cut in index order, objects break in
-//! `SceneId` order, and the scatter is drawn from the scene's
+//! `SceneId` order (then `SpawnOrder`, never entity id), and the scatter is drawn from the scene's
 //! [`RandomSeed`] at the fixed tick, so the same scene and inputs always
 //! give the same bits.
 
@@ -39,8 +43,8 @@ use nalgebra::Vector3;
 use super::cpu_physics::next_spawn_order;
 use crate::assets::{AssetServer, MeshAsset, MeshVertex};
 use crate::runtime::{
-    sim_math, Collider, ColliderShape, CollisionLayers, FrameTime,
-    MeshRenderer, PhysicsBody, PhysicsWorld, RandomSeed, RigidBody,
+    sim_math, Collider, ColliderShape, CollisionLayers, EventQueue, FrameTime,
+    MeshRenderer, Name, PhysicsBody, PhysicsWorld, RandomSeed, RigidBody,
     RigidBodyKind, SceneId, Sleeping, SpawnOrder,
 };
 use crate::Transform;
@@ -80,6 +84,25 @@ impl Default for DebrisBudget {
     fn default() -> Self {
         Self(512)
     }
+}
+
+/// Sent in the fixed step an object with a [`Fracture`] broke, after it
+/// was despawned and its pieces spawned. Breaks send in `SceneId` order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fractured {
+    /// The despawned object.
+    pub entity: Entity,
+    pub name: Option<String>,
+    /// The new [`Debris`] bodies, in spawn order.
+    pub pieces: Vec<Entity>,
+    /// World point of the hardest hit that tick.
+    pub point: [f32; 3],
+    /// Impact energy in joules summed over the tick.
+    pub energy: f32,
+    pub mass: f32,
+    /// World box `[min, max]` the object filled before it broke, for
+    /// navigation and other spatial caches to rebuild.
+    pub bounds: [[f32; 3]; 2],
 }
 
 /// A body made by a break.
@@ -225,13 +248,18 @@ pub(super) fn break_fractures(world: &mut World) {
             (fracture.break_energy > 0.0
                 && impact.energy >= fracture.break_energy)
                 .then(|| {
+                    // Entity ids shift with unrelated spawns, so the scene
+                    // id or spawn order picks the order and the stream.
                     let id =
                         world.get::<SceneId>(entity).map(|id| id.0.as_u128());
-                    (id, entity, impact)
+                    let order = world.get::<SpawnOrder>(entity).map(|o| o.0);
+                    (id, order, entity, impact)
                 })
         })
         .collect();
-    breaking.sort_unstable_by_key(|(id, entity, _)| (*id, entity.to_bits()));
+    breaking.sort_unstable_by_key(|(id, order, entity, _)| {
+        (*id, *order, entity.to_bits())
+    });
     let tick = world
         .get_resource::<FrameTime>()
         .map_or(0, |t| t.fixed_tick);
@@ -239,11 +267,13 @@ pub(super) fn break_fractures(world: &mut World) {
         .get_resource::<RandomSeed>()
         .copied()
         .unwrap_or_default();
-    for (id, entity, impact) in breaking {
-        let stream = RandomSeed::stream(
-            "fracture",
-            id.map_or(entity.to_bits(), |id| id as u64 ^ (id >> 64) as u64),
-        );
+    for (id, order, entity, impact) in breaking {
+        let key = match (id, order) {
+            (Some(id), _) => id as u64 ^ (id >> 64) as u64,
+            (None, Some(order)) => order,
+            (None, None) => entity.to_bits(),
+        };
+        let stream = RandomSeed::stream("fracture", key);
         shatter(world, entity, impact, |k| seed.unit(tick, stream ^ k));
     }
 }
@@ -304,8 +334,19 @@ fn shatter(
     }
     let excess = (impact.energy - fracture.break_energy).max(0.0);
     let scatter = (excess / body.mass.max(1e-6)).sqrt();
+    let mut bounds = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
+    for vertex in &mesh.vertices {
+        let p = V::from(transform.position)
+            + turn * V::from(vertex.position).component_mul(&scale);
+        for axis in 0..3 {
+            bounds[0][axis] = bounds[0][axis].min(p[axis]);
+            bounds[1][axis] = bounds[1][axis].max(p[axis]);
+        }
+    }
+    let name = world.get::<Name>(entity).map(|name| name.0.clone());
     world.despawn(entity);
     let mut group = None;
+    let mut spawned = Vec::with_capacity(pieces.len());
     for (k, (mesh, center, volume)) in pieces.into_iter().enumerate() {
         let offset = turn * center.component_mul(&scale);
         let position = V::from(transform.position) + offset;
@@ -349,6 +390,19 @@ fn shatter(
         if let Some(layers) = layers {
             piece.insert(layers);
         }
+        spawned.push(piece.id());
+    }
+    if let Some(mut events) = world.get_resource_mut::<EventQueue<Fractured>>()
+    {
+        events.send(Fractured {
+            entity,
+            name,
+            pieces: spawned,
+            point: impact.point.into(),
+            energy: impact.energy,
+            mass: body.mass,
+            bounds,
+        });
     }
 }
 
@@ -938,36 +992,40 @@ mod tests {
         x: f32,
         height: f32,
         fracture: Fracture,
-    ) {
+    ) -> Entity {
         let world = app.world_mut();
+        let order = next_spawn_order(world);
         let (mesh, material) = {
             let mut assets = world.resource_mut::<AssetServer>();
             let material = assets.fallback_material;
             (assets.meshes.insert(box_mesh([0.5; 3])), material)
         };
-        world.spawn((
-            Transform::new([x, 0.5 + height, 0.0]),
-            PhysicsBody::default(),
-            RigidBody {
-                mass: 10.0,
-                ..RigidBody::default()
-            },
-            Collider {
-                shape: ColliderShape::ConvexMesh,
-                ..Collider::default()
-            },
-            MeshRenderer {
-                mesh,
-                material,
-                cast_shadows: true,
-                receive_shadows: true,
-            },
-            Fracture {
-                pieces: 6,
-                break_energy: 100.0,
-                ..fracture
-            },
-        ));
+        world
+            .spawn((
+                Transform::new([x, 0.5 + height, 0.0]),
+                PhysicsBody::default(),
+                RigidBody {
+                    mass: 10.0,
+                    ..RigidBody::default()
+                },
+                Collider {
+                    shape: ColliderShape::ConvexMesh,
+                    ..Collider::default()
+                },
+                MeshRenderer {
+                    mesh,
+                    material,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                },
+                Fracture {
+                    pieces: 6,
+                    break_energy: 100.0,
+                    ..fracture
+                },
+                order,
+            ))
+            .id()
     }
 
     fn run(app: &mut crate::runtime::App, ticks: u32) {
@@ -1002,6 +1060,63 @@ mod tests {
     fn debris_count(app: &mut crate::runtime::App) -> usize {
         let world = app.world_mut();
         world.query::<&Debris>().iter(world).count()
+    }
+
+    #[test]
+    fn a_break_sends_one_fractured_event_and_a_soft_landing_none() {
+        let mut app = ground();
+        let soft = add_crate(&mut app, -2.0, 0.2, Fracture::default());
+        let hard = add_crate(&mut app, 2.0, 3.0, Fracture::default());
+        app.world_mut()
+            .entity_mut(hard)
+            .insert(Name("crate".into()));
+        let mut seen = Vec::new();
+        for _ in 0..60 {
+            run(&mut app, 1);
+            let events = app.world_mut().resource::<EventQueue<Fractured>>();
+            seen.extend(events.iter().cloned());
+        }
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        let event = &seen[0];
+        assert_ne!(event.entity, soft);
+        assert_eq!(event.entity, hard);
+        assert_eq!(event.name.as_deref(), Some("crate"));
+        assert_eq!(event.mass, 10.0);
+        // About 290 J from 3 m; the hit is on the ground under the crate.
+        assert!(event.energy > 100.0 && event.energy < 400.0, "{event:?}");
+        assert!((event.point[0] - 2.0).abs() < 0.6, "{event:?}");
+        assert!(event.point[1].abs() < 0.1, "{event:?}");
+        let [min, max] = event.bounds;
+        for (axis, centre) in [(0, 2.0), (2, 0.0)] {
+            assert!((min[axis] - (centre - 0.5)).abs() < 0.05, "{event:?}");
+            assert!((max[axis] - (centre + 0.5)).abs() < 0.05, "{event:?}");
+        }
+        assert!(min[1].abs() < 0.1 && (max[1] - 1.0).abs() < 0.1);
+        // The pieces it names are the debris now in the world.
+        let world = app.world_mut();
+        assert_eq!(event.pieces.len(), 6);
+        assert!(event
+            .pieces
+            .iter()
+            .all(|&e| world.get::<Debris>(e).is_some()));
+        assert!(world.get_entity(hard).is_err());
+    }
+
+    #[test]
+    fn breaks_do_not_depend_on_entity_ids() {
+        // Unrelated entities shift every id; the pieces land the same.
+        let landed = |padding: usize| {
+            let mut app = ground();
+            for _ in 0..padding {
+                app.world_mut().spawn_empty();
+            }
+            add_crate(&mut app, 0.0, 3.0, Fracture::default());
+            run(&mut app, 60);
+            dynamic(&mut app)
+        };
+        let base = landed(0);
+        assert_eq!(base.len(), 6);
+        assert_eq!(landed(7), base);
     }
 
     #[test]

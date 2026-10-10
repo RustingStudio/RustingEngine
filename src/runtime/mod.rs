@@ -86,7 +86,8 @@ pub use fluid::{
     FluidSettings, FluidSolver, FluidSurface, FluidVolume,
 };
 pub use fracture::{
-    Debris, DebrisBudget, Fracture, FracturedMesh, MAX_FRACTURE_PIECES,
+    Debris, DebrisBudget, Fracture, Fractured, FracturedMesh,
+    MAX_FRACTURE_PIECES,
 };
 pub use game_feel::*;
 pub use hierarchy::{propagate_transforms, HierarchyDiagnostics};
@@ -279,6 +280,7 @@ impl Default for App {
         app.add_event::<CollisionEvent>();
         app.add_event::<JointBroken>();
         app.add_event::<FellOut>();
+        app.add_event::<Fractured>();
         app.add_event::<AnimationEvent>();
         // One chain: these systems all write `Transform`, and unordered
         // systems would run in whatever order threads finish.
