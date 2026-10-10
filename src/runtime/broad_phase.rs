@@ -85,8 +85,9 @@ fn buckets_of(lo: [i32; 3], hi: [i32; 3], buckets: u32) -> Vec<u32> {
 
 /// Packs `proxies` into the word buffer `broad_phase.comp` reads and
 /// writes, with rows of `capacity` partners. `None` for more than
-/// [`MAX_BROAD_PROXIES`] proxies, a box with a min above its max, or
-/// coordinates that are not finite or too far out for the grid.
+/// [`MAX_BROAD_PROXIES`] proxies, a box with a min above its max,
+/// coordinates that are not finite or too far out for the grid, or a
+/// buffer too large for the shader's 32-bit word offsets.
 #[must_use]
 pub fn pack(proxies: &[BroadProxy], capacity: u32) -> Option<Vec<u32>> {
     if proxies.len() > MAX_BROAD_PROXIES {
@@ -122,7 +123,12 @@ pub fn pack(proxies: &[BroadProxy], capacity: u32) -> Option<Vec<u32>> {
     let item_base = cursors + buckets as usize;
     let counts = item_base + items;
     let rows = counts + count;
-    let mut words = vec![0; rows + count * capacity as usize];
+    // The shader indexes with u32 words, so offsets must not wrap.
+    let total = (capacity as usize)
+        .checked_mul(count)
+        .and_then(|row_words| row_words.checked_add(rows))
+        .filter(|&total| total <= u32::MAX as usize)?;
+    let mut words = vec![0; total];
     words[..HEADER_WORDS].copy_from_slice(&[
         count as u32,
         buckets,
@@ -275,6 +281,8 @@ pub(crate) mod tests {
         far[0].min = [1e30; 3];
         far[0].max = [1e30; 3];
         assert!(pack(&far, 4).is_none());
+        // Rows past 32-bit offsets would wrap in the shader.
+        assert!(pack(&scattered(2), u32::MAX).is_none());
     }
 
     #[test]

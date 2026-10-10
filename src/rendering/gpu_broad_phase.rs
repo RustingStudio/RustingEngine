@@ -1,10 +1,14 @@
-//! Runs `broad_phase.comp`, the broad phase shared by every GPU solver.
+//! Runs `broad_phase.comp`, the broad phase shared by every GPU solver,
+//! without waiting, like [`super::gpu_cloth::GpuClothRunner`]: each
+//! submission signals a fence, and [`GpuBroadPhase::take_completed`]
+//! returns only finished ones, tagged with the fixed tick the caller gave.
 //! Packing, unpacking and the CPU reference live in
 //! [`crate::runtime::broad_phase`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
@@ -19,6 +23,7 @@ use vulkano::pipeline::{
     ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout,
     PipelineShaderStageCreateInfo,
 };
+use vulkano::sync::future::FenceSignalFuture;
 use vulkano::sync::GpuFuture;
 
 use crate::runtime::broad_phase::{pack, unpack, BroadPairs, BroadProxy};
@@ -30,6 +35,12 @@ mod shader {
     }
 }
 
+struct Pending {
+    fence: FenceSignalFuture<Box<dyn GpuFuture>>,
+    buffer: Subbuffer<[u32]>,
+    tick: u64,
+}
+
 pub struct GpuBroadPhase {
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -37,6 +48,7 @@ pub struct GpuBroadPhase {
     memory: Arc<StandardMemoryAllocator>,
     commands: Arc<StandardCommandBufferAllocator>,
     descriptors: Arc<StandardDescriptorSetAllocator>,
+    pending: Vec<Pending>,
 }
 
 impl GpuBroadPhase {
@@ -75,20 +87,21 @@ impl GpuBroadPhase {
             device,
             queue,
             pipeline,
+            pending: Vec::new(),
         })
     }
 
-    /// The overlapping pairs among `proxies`, rows of `capacity` partners;
-    /// `None` when [`pack`] refuses them. Waits for the GPU.
-    // ponytail: blocking; give it a fence and take results a frame later,
-    // as `GpuClothRunner` does, when a solver calls it every tick.
-    pub fn pairs(
-        &self,
+    /// Submits a search for the overlapping pairs among `proxies`, rows
+    /// of `capacity` partners, tagged with `tick`. Returns at once; `false`
+    /// when [`pack`] refuses the proxies and nothing was submitted.
+    pub fn submit(
+        &mut self,
+        tick: u64,
         proxies: &[BroadProxy],
         capacity: u32,
-    ) -> Result<Option<BroadPairs>, String> {
+    ) -> Result<bool, String> {
         let Some(words) = pack(proxies, capacity) else {
-            return Ok(None);
+            return Ok(false);
         };
         let error = |error: &dyn std::fmt::Display| error.to_string();
         let buffer = Buffer::from_iter(
@@ -131,15 +144,55 @@ impl GpuBroadPhase {
         // One workgroup runs every pass, with barriers between them.
         unsafe { builder.dispatch([1, 1, 1]) }.map_err(|e| format!("{e:?}"))?;
         let command_buffer = builder.build().map_err(|e| format!("{e:?}"))?;
-        vulkano::sync::now(self.device.clone())
+        let fence = vulkano::sync::now(self.device.clone())
             .then_execute(self.queue.clone(), command_buffer)
             .map_err(|e| error(&e))?
+            .boxed()
             .then_signal_fence_and_flush()
-            .map_err(|e| format!("{e:?}"))?
-            .wait(None)
             .map_err(|e| format!("{e:?}"))?;
-        let words = buffer.read().map_err(|e| format!("{e:?}"))?;
-        Ok(Some(unpack(&words)))
+        self.pending.push(Pending {
+            fence,
+            buffer,
+            tick,
+        });
+        Ok(true)
+    }
+
+    /// Submissions not yet returned by [`Self::take_completed`].
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The pairs of every finished submission with its tick, in submission
+    /// order. Never waits for unfinished work.
+    pub fn take_completed(&mut self) -> Vec<(u64, BroadPairs)> {
+        let mut done = Vec::new();
+        let mut index = 0;
+        while index < self.pending.len() {
+            if !self.pending[index].fence.is_signaled().unwrap_or(false) {
+                index += 1;
+                continue;
+            }
+            let pending = self.pending.remove(index);
+            // The zero timeout releases the buffer's GPU lock for the read.
+            if pending.fence.wait(Some(Duration::ZERO)).is_err() {
+                continue;
+            }
+            // A failed read (lost device) drops the submission.
+            if let Ok(words) = pending.buffer.read() {
+                done.push((pending.tick, unpack(&words)));
+            };
+        }
+        done
+    }
+
+    /// Blocks until every submission has finished. **Slow:** for tests and
+    /// tools only, never the per-frame path.
+    pub fn block_until_complete(&mut self) {
+        for pending in &self.pending {
+            let _ = pending.fence.wait(None);
+        }
     }
 }
 
@@ -162,42 +215,59 @@ mod tests {
             return;
         }
         let base = headless_device();
-        let broad = GpuBroadPhase::new(base.device.clone(), base.queue.clone())
-            .unwrap();
+        let mut broad =
+            GpuBroadPhase::new(base.device.clone(), base.queue.clone())
+                .unwrap();
+        // Blocks for one result; the frame path polls `take_completed`.
+        let mut pairs = |proxies: &[BroadProxy], capacity| {
+            if !broad.submit(7, proxies, capacity).unwrap() {
+                return None;
+            }
+            broad.block_until_complete();
+            let mut done = broad.take_completed();
+            assert_eq!(done.len(), 1);
+            let (tick, pairs) = done.pop().unwrap();
+            assert_eq!(tick, 7);
+            Some(pairs)
+        };
         // 3000 boxes of four sizes and three layers: more proxies than
         // lanes, many cells per bucket, boxes across cell borders.
         let proxies = scattered(3000);
         let expected = pairs_on_cpu(&proxies, 256);
         assert!(expected.pairs.len() > 1000, "{}", expected.pairs.len());
         assert!(expected.overflowed.is_empty());
-        let first = broad.pairs(&proxies, 256).unwrap().unwrap();
+        let first = pairs(&proxies, 256).unwrap();
         assert_eq!(first, expected);
         // Small rows overflow and keep the lowest partners, the same way
         // on every run.
         let tight = pairs_on_cpu(&proxies, 2);
         assert!(!tight.overflowed.is_empty());
         for _ in 0..3 {
-            assert_eq!(broad.pairs(&proxies, 2).unwrap().unwrap(), tight);
+            assert_eq!(pairs(&proxies, 2).unwrap(), tight);
         }
         // All points (no extent) and an empty set work too.
         let points: Vec<_> = proxies
             .iter()
             .map(|p| BroadProxy { max: p.min, ..*p })
             .collect();
-        assert_eq!(
-            broad.pairs(&points, 4).unwrap().unwrap(),
-            pairs_on_cpu(&points, 4)
-        );
-        assert_eq!(
-            broad.pairs(&[], 4).unwrap().unwrap(),
-            BroadPairs::default()
-        );
+        assert_eq!(pairs(&points, 4).unwrap(), pairs_on_cpu(&points, 4));
+        assert_eq!(pairs(&[], 4).unwrap(), BroadPairs::default());
         let bad = [BroadProxy {
             min: [1.0; 3],
             max: [0.0; 3],
             layer: 1,
             mask: 1,
         }];
-        assert_eq!(broad.pairs(&bad, 4).unwrap(), None);
+        assert_eq!(pairs(&bad, 4), None);
+        // Two searches in flight at once come back in order with their
+        // ticks, each once.
+        assert!(broad.submit(1, &proxies, 256).unwrap());
+        assert!(broad.submit(2, &points, 4).unwrap());
+        assert_eq!(broad.in_flight(), 2);
+        broad.block_until_complete();
+        let done = broad.take_completed();
+        assert_eq!(broad.in_flight(), 0);
+        assert_eq!(done, vec![(1, expected), (2, pairs_on_cpu(&points, 4))]);
+        assert!(broad.take_completed().is_empty());
     }
 }
