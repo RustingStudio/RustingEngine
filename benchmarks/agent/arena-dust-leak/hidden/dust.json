@@ -1,0 +1,17 @@
+{
+  "name": "dust: running kicks up dust puffs, and spent puffs leave the scene",
+  "ticks": 600,
+  "budgets": {
+    "max_entities": 90
+  },
+  "steps": [
+    {"tick": 0, "press": "up"},
+    {"tick": 2, "expect": {"entity": "Dust 1", "exists": true}},
+    {"tick": 2, "expect": {"entity": "Dust 1", "path": "/visible", "equals": true}},
+    {"tick": 100, "release": "up"},
+    {"tick": 100, "press": "down"},
+    {"tick": 300, "release": "down"},
+    {"tick": 300, "press": "left"},
+    {"tick": 599, "release": "left"}
+  ]
+}
