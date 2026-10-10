@@ -445,7 +445,9 @@ smooth.present(world, client_time);
   hides one lost update (100 ms at 20 Hz). Change it with `set_delay`.
 - Past the newest update an object holds still rather than guessing
   ahead. Use the same clock for `record` and `present`.
-- Set the player's own predicted object's `Transform` after `present`.
+- `record` skips the object marked `Predicted` (the local hero), so
+  `present` never moves it; the game sets its `Transform` from the
+  prediction.
 
 ## Predicting the player's own object
 
@@ -478,6 +480,14 @@ position = prediction.reconcile(acked_tick, host_position, steer);
   lost: send the last few ticks' inputs in each message.
 - A correction snaps. Ease the drawn position toward the result for a
   few frames if it shows.
+- Predict only the local hero. Mark it with
+  `net::predict::predict_only(world, hero)`, which removes `Predicted`
+  from any other object, and use an `interpolated()` replica so the
+  host's updates land in its `NetTransform`, not its `Transform`. Show
+  everything else from host state. Never predict terrain destruction or
+  other host-simulated results: that needs a simulation proven to match
+  the host's exactly, which the engine does not promise across machines
+  yet.
 
 ## Testing a bad connection
 

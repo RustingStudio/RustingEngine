@@ -3655,7 +3655,15 @@ The networking model depends on the Milestone 8 result. Bit-identical determinis
   way; `set_delay` changes it. `net::interpolate::tests::remote_objects_show_where_they_were_one_delay_ago`
   checks hold-before-first, halfway blend, a rotation across pi and
   hold-at-newest. `docs/networking.md` "Smoothing remote objects".
-- [ ] Predict only the local hero. Never predict terrain destruction results unless determinism is proven.
+- [x] Predict only the local hero. Never predict terrain destruction results unless determinism is proven.
+  Evidence 2026-10-10 (lane tools): `net::predict::Predicted` marks the
+  hero and `predict_only(world, hero)` keeps it the only one;
+  `Interpolation::record` skips it, so host updates land in its
+  `NetTransform` and the game draws its prediction.
+  `net::interpolate::tests::the_predicted_hero_is_not_interpolated`.
+  Nothing predicts terrain or other host-simulated results; the rule is in
+  the `Predicted` docs and `docs/networking.md` "Predicting the player's
+  own object".
 - [ ] Reconcile prediction error with presentation-only smoothing that never feeds back into simulation state.
 - [ ] Detect desync by periodic state-hash comparison, report it, and recover through full resynchronization.
 - [ ] Support spectator clients that receive state and send no input.

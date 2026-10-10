@@ -6,10 +6,11 @@
 //! it was `delay` ago, blending between the two updates around that time.
 //! A delay of a bit more than two update intervals hides one lost update.
 
+use super::predict::Predicted;
 use super::replicate::NetTransform;
 use crate::Transform;
 use bevy_ecs::prelude::*;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::f32::consts::{PI, TAU};
 use std::time::Duration;
 
@@ -47,9 +48,11 @@ impl Interpolation {
     /// Records every [`NetTransform`] as the state at `time`: the host
     /// time of the update just applied (such as its tick times the fixed
     /// step), or the time it arrived. Call it once per applied update.
+    /// Skips the [`Predicted`] hero, whose `Transform` the game sets.
     pub fn record(&mut self, world: &mut World, time: Duration) {
-        let mut query = world.query::<(Entity, &NetTransform)>();
-        let mut alive = Vec::new();
+        let mut query = world
+            .query_filtered::<(Entity, &NetTransform), Without<Predicted>>();
+        let mut alive = BTreeSet::new();
         for (entity, net) in query.iter(world) {
             let samples = self.samples.entry(entity).or_default();
             if samples.back().is_some_and(|(last, _)| *last >= time) {
@@ -59,8 +62,10 @@ impl Interpolation {
                 samples.pop_front();
             }
             samples.push_back((time, net.0));
-            alive.push(entity);
+            alive.insert(entity);
         }
+        // A host can make a client track MAX_OBJECTS objects; keep this
+        // n log n, not a scan per object.
         self.samples.retain(|entity, _| alive.contains(entity));
     }
 
@@ -171,5 +176,21 @@ mod tests {
         smooth.present(&mut client, ms(500));
         assert_eq!(smooth.delay(), ms(475));
         assert_eq!(shown(&mut client).position[0], 3.0, "never goes back");
+    }
+
+    #[test]
+    fn the_predicted_hero_is_not_interpolated() {
+        let mut world = World::new();
+        let at = |x| Transform::new([x, 0.0, 0.0]);
+        let hero = world.spawn((NetTransform(at(1.0)), at(9.0))).id();
+        let other = world.spawn((NetTransform(at(1.0)), at(9.0))).id();
+        crate::net::predict::predict_only(&mut world, other);
+        crate::net::predict::predict_only(&mut world, hero);
+        assert!(world.get::<Predicted>(other).is_none(), "only one hero");
+        let mut smooth = Interpolation::new(Duration::ZERO);
+        smooth.record(&mut world, Duration::ZERO);
+        smooth.present(&mut world, Duration::ZERO);
+        assert_eq!(world.get::<Transform>(hero).unwrap().position[0], 9.0);
+        assert_eq!(world.get::<Transform>(other).unwrap().position[0], 1.0);
     }
 }

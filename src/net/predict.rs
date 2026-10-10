@@ -9,7 +9,30 @@
 //! prediction changes nothing and a wrong one is fixed without a jump back
 //! in time.
 
+use bevy_ecs::prelude::*;
 use std::collections::VecDeque;
+
+/// Marks the one object this client predicts: its local hero.
+/// [`Interpolation`](super::interpolate::Interpolation) leaves it alone, so
+/// the game draws it from its prediction. Everything else, other players
+/// and anything the host simulates, such as terrain destruction, is shown
+/// from host state: predicting it needs a simulation proven to match the
+/// host's bit for bit.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct Predicted;
+
+/// Makes `hero` the only [`Predicted`] object in `world`.
+pub fn predict_only(world: &mut World, hero: Entity) {
+    let others: Vec<Entity> = world
+        .query_filtered::<Entity, With<Predicted>>()
+        .iter(world)
+        .filter(|entity| *entity != hero)
+        .collect();
+    for entity in others {
+        world.entity_mut(entity).remove::<Predicted>();
+    }
+    world.entity_mut(hero).insert(Predicted);
+}
 
 /// Unconfirmed inputs kept at most: 4 seconds at 60 ticks. Older ones are
 /// dropped, so a host that stops answering cannot grow memory.
