@@ -1319,9 +1319,10 @@ impl Default for ReflectionProbe {
 /// directions, and surfaces inside the box take their ambient light from
 /// the nearest probes instead of the sky or environment, so a dark room
 /// stays dark and a red wall tints what stands next to it. The first one in
-/// entity order is used.
-// ponytail: baked when the grid is added or changes, not every frame, so
-// moving objects and lights do not update it.
+/// entity order is used. Baked when the grid is added or changes; the High
+/// quality profile also recaptures two probes per frame, so moving objects
+/// and lights relight the grid within a few frames (one bounce). Eco and
+/// Balanced keep the baked probes.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LightProbeGrid {

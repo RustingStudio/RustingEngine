@@ -845,7 +845,7 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.light_probe_grid",
-        summary: "Grid of resolution light probes spread through a world-aligned box of half size extents around the object. Each probe records the light arriving from six directions; surfaces inside the box take their ambient light from the nearest probes in place of the sky or environment, so an enclosed room stays dark and a bright wall tints its neighbours. Baked when added or changed; at most 64 probes, the first grid in entity order.",
+        summary: "Grid of resolution light probes spread through a world-aligned box of half size extents around the object. Each probe records the light arriving from six directions; surfaces inside the box take their ambient light from the nearest probes in place of the sky or environment, so an enclosed room stays dark and a bright wall tints its neighbours. Baked when added or changed, and on the High quality profile two probes per frame are recaptured so moving objects and lights relight it (real-time one-bounce GI); at most 64 probes, the first grid in entity order.",
         gpu: "each probe renders the scene six times at 16x16 when baked; eight probe lookups per lit pixel inside the box",
         example: || json!({"extents": [5.0, 3.0, 5.0], "resolution": [3, 2, 3], "intensity": 1.0}),
     },

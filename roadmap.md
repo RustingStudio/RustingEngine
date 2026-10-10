@@ -2439,7 +2439,26 @@ Depends on: Milestones 3 and 4.
   `lightmaps_map_the_mesh_box_onto_the_unit_cube_and_skip_the_rest`. Full
   check: fmt, clippy (default, `--no-default-features`, `gpu-tests`),
   `cargo test --workspace` and the gpu-tests run (1000 lib tests) pass.
-- [ ] One real-time GI technique (probe-based DDGI or voxel/SDF GI) with a quality-profile fallback to ambient probes.
+- [x] One real-time GI technique (probe-based DDGI or voxel/SDF GI) with a quality-profile fallback to ambient probes.
+  Probe-based: on the High quality profile `rusting.light_probe_grid`
+  recaptures `LIGHT_PROBES_PER_FRAME` (2) probes per frame round robin
+  (`relight_light_probes`), so a grid of 64 probes follows moving objects
+  and lights within 32 frames. Each recapture renders the probe's six
+  16x16 faces with a capture renderer that `capture_faces` now keeps
+  between calls (format and size match), reads them back and patches the
+  probe's ambient cube into a fresh buffer, so frames in flight keep the
+  old one. Eco and Balanced fall back to the probes baked when the grid
+  changes. Limits: one bounce (captures do not see the probe light), each
+  recapture blocks on its readback (ponytail note: move the reduction to
+  compute if it shows in frame pacing), up to 32 frames of lag on a full
+  grid. Evidence: GPU test
+  `high_quality_relights_light_probes_when_the_red_slab_moves_away` (a
+  probe sees an unlit red slab; after the slab moves aside the wall turns
+  gray on High and stays red on Balanced); it failed with the relight call
+  removed ([247, 56, 56]). The light probe test still passes with the
+  cached capturer. Full check: fmt, clippy (default,
+  `--no-default-features`, `gpu-tests`), `cargo test --workspace` and the
+  gpu-tests run (1001 lib tests) pass.
 - [x] Sky system: procedural physical sky, HDRI skies, and sky-derived ambient/specular.
   Partial: `EnvironmentMap { texture, intensity }` (`rusting.environment_map`)
   loads an equirectangular image and replaces the `SkyLight` hemisphere as the

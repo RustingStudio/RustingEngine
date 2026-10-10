@@ -507,6 +507,11 @@ const LIGHT_PROBE_FACE_SIZE: u32 = 16;
 /// Rows of the light probe buffer before the probes' ambient cubes: grid
 /// center and probe count, half size and intensity, resolution.
 const LIGHT_PROBE_HEADER: usize = 3;
+/// Light probes the High profile recaptures each frame, round robin, so
+/// moving lights and objects relight the grid within a few frames.
+// ponytail: each recapture blocks on its readback; move the reduction to a
+// compute pass if the stall shows up in frame pacing.
+const LIGHT_PROBES_PER_FRAME: usize = 2;
 /// View direction and up vector of each probe face, in layer order. The
 /// fragment shader's `PROBE_FORWARD` and `PROBE_UP` match.
 const PROBE_FACES: [([f32; 3], [f32; 3]); 6] = [
@@ -1740,6 +1745,12 @@ pub struct SceneRenderer {
     light_probes: Subbuffer<[[f32; 4]]>,
     /// Grid `light_probes` was baked for.
     light_probe_key: Option<([f32; 3], crate::runtime::LightProbeGrid)>,
+    /// CPU copy of `light_probes`, patched by real-time relighting.
+    light_probe_rows: Vec<[f32; 4]>,
+    /// Next probe real-time relighting recaptures.
+    light_probe_cursor: usize,
+    /// Renderer `capture_faces` reuses while the format and size match.
+    capturer: Option<(Format, u32, Box<SceneRenderer>)>,
     /// Baked lightmaps; see `lightmap` for the layout.
     lightmaps: Subbuffer<[[f32; 4]]>,
     /// Hash of what `lightmaps` was baked from, 0 for nothing.
@@ -2168,6 +2179,9 @@ impl SceneRenderer {
             probe_keys: Vec::new(),
             light_probes,
             light_probe_key: None,
+            light_probe_rows: Vec::new(),
+            light_probe_cursor: 0,
+            capturer: None,
             lightmaps,
             lightmap_key: 0,
             tonemap_set,
@@ -2680,6 +2694,10 @@ impl SceneRenderer {
         }
         if self.light_probe_key != render_world.light_probe_grid {
             self.bake_light_probes(render_world, assets)?;
+        } else if resolve_quality(render_world.quality, &self.capabilities)
+            == QualityProfile::High
+        {
+            self.relight_light_probes(render_world, assets)?;
         }
         self.counters = RenderCounters::default();
         let preparation_start = std::time::Instant::now();
@@ -5373,9 +5391,9 @@ impl SceneRenderer {
         render_world: &RenderWorld,
         assets: &AssetServer,
     ) -> Result<(), SceneRenderError> {
-        let error = |error: &dyn Display| SceneRenderError(error.to_string());
         // Set first, so a failed bake is not retried every frame.
         self.light_probe_key = render_world.light_probe_grid;
+        self.light_probe_rows.clear();
         let Some((center, grid)) = render_world.light_probe_grid else {
             self.light_probes = create_light_probe_buffer(
                 &self.memory_allocator,
@@ -5385,6 +5403,82 @@ impl SceneRenderer {
         };
         let resolution = light_probe_resolution(grid.resolution);
         let positions = light_probe_positions(center, grid.extents, resolution);
+        let [rx, ry, rz] = resolution;
+        let mut rows = vec![
+            [center[0], center[1], center[2], positions.len() as f32],
+            [
+                grid.extents[0],
+                grid.extents[1],
+                grid.extents[2],
+                grid.intensity,
+            ],
+            [rx as f32, ry as f32, rz as f32, 0.0],
+        ];
+        rows.extend(self.light_probe_cubes(
+            &positions,
+            render_world,
+            assets,
+        )?);
+        self.light_probes =
+            create_light_probe_buffer(&self.memory_allocator, rows.clone())?;
+        self.light_probe_rows = rows;
+        self.light_probe_cursor = 0;
+        Ok(())
+    }
+
+    /// Recaptures the next `LIGHT_PROBES_PER_FRAME` probes of the baked
+    /// grid, so its light follows moving lights and objects.
+    fn relight_light_probes(
+        &mut self,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<(), SceneRenderError> {
+        let Some((center, grid)) = render_world.light_probe_grid else {
+            return Ok(());
+        };
+        let positions = light_probe_positions(
+            center,
+            grid.extents,
+            light_probe_resolution(grid.resolution),
+        );
+        // Nothing to patch after a failed bake.
+        if self.light_probe_rows.len()
+            != LIGHT_PROBE_HEADER + 6 * positions.len()
+        {
+            return Ok(());
+        }
+        let picked = (0..LIGHT_PROBES_PER_FRAME.min(positions.len()))
+            .map(|step| (self.light_probe_cursor + step) % positions.len())
+            .collect::<Vec<_>>();
+        self.light_probe_cursor =
+            (self.light_probe_cursor + picked.len()) % positions.len();
+        let picked_positions = picked
+            .iter()
+            .map(|&probe| positions[probe])
+            .collect::<Vec<_>>();
+        let cubes =
+            self.light_probe_cubes(&picked_positions, render_world, assets)?;
+        for (&probe, cube) in picked.iter().zip(cubes.chunks(6)) {
+            let first = LIGHT_PROBE_HEADER + 6 * probe;
+            self.light_probe_rows[first..first + 6].copy_from_slice(cube);
+        }
+        // A fresh buffer, so frames still in flight keep reading the old one.
+        self.light_probes = create_light_probe_buffer(
+            &self.memory_allocator,
+            self.light_probe_rows.clone(),
+        )?;
+        Ok(())
+    }
+
+    /// Captures six faces at each of `positions`, reads them back and
+    /// reduces each probe to six ambient cube rows.
+    fn light_probe_cubes(
+        &mut self,
+        positions: &[[f32; 3]],
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<Vec<[f32; 4]>, SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
         let size = LIGHT_PROBE_FACE_SIZE;
         // 32-bit floats, so the CPU reads the texels directly.
         let faces = self.capture_faces(
@@ -5428,25 +5522,12 @@ impl SceneRenderer {
         }
         self.submit_and_wait(commands)?;
         let texels = readback.read().map_err(|e| error(&e))?;
-        let [rx, ry, rz] = resolution;
-        let mut rows = vec![
-            [center[0], center[1], center[2], positions.len() as f32],
-            [
-                grid.extents[0],
-                grid.extents[1],
-                grid.extents[2],
-                grid.intensity,
-            ],
-            [rx as f32, ry as f32, rz as f32, 0.0],
-        ];
-        for probe in texels.chunks(6 * (size * size) as usize) {
-            rows.extend(
-                ambient_cube(probe, size).map(|[r, g, b]| [r, g, b, 0.0]),
-            );
-        }
-        self.light_probes =
-            create_light_probe_buffer(&self.memory_allocator, rows)?;
-        Ok(())
+        Ok(texels
+            .chunks(6 * (size * size) as usize)
+            .flat_map(|probe| {
+                ambient_cube(probe, size).map(|[r, g, b]| [r, g, b, 0.0])
+            })
+            .collect())
     }
 
     /// Lays out and bakes `render_world.lightmaps` into `lightmaps`, one
@@ -5531,7 +5612,7 @@ impl SceneRenderer {
     // ponytail: the temporary renderer builds every pipeline again, so a
     // probe moved every frame stutters; keep one around if probes animate.
     fn capture_faces(
-        &self,
+        &mut self,
         centers: impl IntoIterator<Item = [f32; 3]>,
         size: u32,
         format: Format,
@@ -5539,12 +5620,19 @@ impl SceneRenderer {
         assets: &AssetServer,
     ) -> Result<Vec<Arc<Image>>, SceneRenderError> {
         let error = |error: &dyn Display| SceneRenderError(error.to_string());
-        let mut capturer = SceneRenderer::new(
-            self.queue.clone(),
-            self.memory_allocator.clone(),
-            format,
-            [size; 2],
-        )?;
+        let mut capturer = match self.capturer.take() {
+            Some((cached_format, cached_size, capturer))
+                if cached_format == format && cached_size == size =>
+            {
+                capturer
+            }
+            _ => Box::new(SceneRenderer::new(
+                self.queue.clone(),
+                self.memory_allocator.clone(),
+                format,
+                [size; 2],
+            )?),
+        };
         let mut world = render_world.clone();
         world.reflection_probes.clear();
         world.light_probe_grid = None;
@@ -5612,6 +5700,7 @@ impl SceneRenderer {
                 faces.push(face);
             }
         }
+        self.capturer = Some((format, size, capturer));
         Ok(faces)
     }
 
@@ -19152,6 +19241,73 @@ mod tests {
         );
         scene.render_world.light_probe_grid = None;
         assert_eq!(render_pixel(&mut scene, [4, 4]), outside, "no grid");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn high_quality_relights_light_probes_when_the_red_slab_moves_away() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // The probe test's scene: a probe in front of a white wall sees an
+        // unlit red slab behind the camera. Then the slab moves far away
+        // without the grid changing.
+        let mut scene = SlabScene::new(&[
+            (0.0, MaterialAsset::default()),
+            (
+                8.0,
+                MaterialAsset {
+                    model: crate::assets::MaterialModel::Unlit,
+                    base_color: [1.0, 0.0, 0.0, 1.0],
+                    ..MaterialAsset::default()
+                },
+            ),
+        ]);
+        scene.render_world.light_probe_grid = Some((
+            [0.0, 0.0, 2.0],
+            crate::runtime::LightProbeGrid {
+                extents: [3.0; 3],
+                resolution: [1, 1, 1],
+                intensity: 1.0,
+            },
+        ));
+        let slab_at = |x: f32| -> [[f32; 4]; 4] {
+            (Matrix4::new_translation(&Vector3::new(x, 0.0, 8.0))
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    40.0, 40.0, 0.1,
+                )))
+            .into()
+        };
+        let mut moved = |quality| {
+            scene.render_world.quality = quality;
+            scene
+                .render_world
+                .light_probe_grid
+                .as_mut()
+                .unwrap()
+                .1
+                .intensity += 0.001;
+            scene.render_world.renderables[1].transform.matrix = slab_at(0.0);
+            scene.render_world.renderables_revision += 1;
+            let red = render_pixel(&mut scene, [4, 4]);
+            // Seen edge on from the probe, far off to the side.
+            scene.render_world.renderables[1].transform.matrix = slab_at(500.0);
+            scene.render_world.renderables_revision += 1;
+            (red, render_pixel(&mut scene, [4, 4]))
+        };
+        let (red, relit) = moved(QualityProfile::High);
+        assert!(red[1] < red[0] / 3, "red from the probe: {red:?}");
+        assert!(
+            relit[0] > 40 && relit[0].abs_diff(relit[1]) < 8,
+            "gray once the probe recaptures: {relit:?}"
+        );
+        let (red, stale) = moved(QualityProfile::Balanced);
+        assert!(red[1] < red[0] / 3, "red from the probe: {red:?}");
+        assert_eq!(stale, red, "Balanced keeps the baked probes");
     }
 
     #[test]
