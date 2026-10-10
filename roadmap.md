@@ -2310,6 +2310,7 @@ Depends on: Milestones 5, 8, and 10.
 ### Coupling
 
 - [ ] Two-way coupling between rigid, articulated, deformable, fluid, and granular simulation in one scene.
+  - [x] Step 1 (2026-10-11, lane physics): deformables meet fluid and granular particles. `step_soft_bodies` makes each nearby grain a dynamic sphere (its mass, half the fluid spacing plus half the deformable's shortest rest edge across). The XPBD substeps then solve it as an obstacle, so pins and stiff constraints carry the grains' weight, and the grains' new states are written back. Pinned particles now push obstacles too; before this, water leaked past a pinned edge. Known ceiling (`ponytail:` on `grain_bodies`): grains over about 30× the mass of the particles under them tear through, and grains finer than about 3/4 of the deformable spacing slip between particles. Evidence: `soft_body::tests::a_light_jelly_floats_on_water_and_sand_and_a_heavy_one_sinks`. On water a 300 kg/m³ jelly rests with its bottom at 0.19 m and a 5000 kg/m³ jelly sinks to 0.06 m. On sand they rest at 0.15 m and 0 m. `water_poured_on_a_pinned_sheet_stays_on_it_and_sags_it`: 48 kg of water stays above 0.5 m on a 10 kg pinned sheet, no grain is lost, and the middle sags below 0.95 m (alone it hangs at 0.97 m). Full check: fmt, clippy ×3, lib 890, gpu-tests lib 1008.
 - [ ] Mixed CPU/GPU ownership for coupled objects with defined latency and state age.
 
 ### Exit gate

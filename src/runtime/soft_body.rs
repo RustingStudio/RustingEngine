@@ -211,6 +211,16 @@ fn tet_edges(tet: [u32; 4]) -> [[u32; 2]; 6] {
 }
 
 impl SoftBody {
+    /// Shortest rest edge, 0 with no edges: the lattice spacing of a block.
+    #[must_use]
+    pub fn min_rest_length(&self) -> f32 {
+        self.rest_lengths
+            .iter()
+            .copied()
+            .reduce(f32::min)
+            .unwrap_or(0.0)
+    }
+
     /// Builds a body from particle positions and tetrahedra. Each
     /// tetrahedron's mass (`density` times its volume) is shared equally by
     /// its four particles. Inside-out tetrahedra are turned the right way.
@@ -612,10 +622,8 @@ pub(super) fn solve_holds(
         let Some(body) = bodies.get_mut(obstacle.body) else {
             continue;
         };
+        // Pinned particles push too: they move the body alone.
         for i in 0..positions.len() {
-            if inverse_masses[i] == 0.0 {
-                continue;
-            }
             let arm = vector(positions[i]) - vector(body.position);
             let local = body.rotation.inverse() * arm;
             if let Some((normal, depth)) = obstacle.shape.push_out(local) {
@@ -641,13 +649,16 @@ fn close_gap(
 ) {
     let weight = inverse_masses[particle];
     let length = gap.norm();
-    if length < 1e-9 || weight == 0.0 {
+    if length < 1e-9 {
         return;
     }
     let normal = gap / length;
     let turn = arm.cross(&normal);
     let body_weight =
         body.inverse_mass + turn.dot(&(body.inverse_inertia * turn));
+    if weight + body_weight == 0.0 {
+        return;
+    }
     let lambda = length / (weight + body_weight);
     positions[particle] =
         (vector(positions[particle]) + normal * (weight * lambda)).into();
@@ -1099,7 +1110,10 @@ type ColliderEntry = (
 /// box and capsule colliders, then writes back the pose and velocities of
 /// the dynamic bodies it moved. Attachments to a missing or parented body
 /// hold nothing; a volume does not collide with the bodies it is attached
-/// to.
+/// to. Particles of every [`super::FluidVolume`] (fluid or granular) near
+/// a volume join its step as small dynamic spheres (see [`grain_bodies`]),
+/// so the two push each other with their masses: a light jelly floats, a
+/// heavy one sinks, and a sheet holds water and sags under it.
 // ponytail: every collider is checked against every volume each tick (a
 // bounding-sphere test); use the broad phase if scenes get many of both.
 #[allow(clippy::type_complexity)]
@@ -1122,8 +1136,21 @@ pub(super) fn step_soft_bodies(
         bevy_ecs::prelude::Without<super::gpu_cloth::GpuCloth>,
     >,
     mut bodies: CoupledBodies,
+    mut fluids: bevy_ecs::prelude::Query<(
+        bevy_ecs::prelude::Entity,
+        Option<&super::SpawnOrder>,
+        &mut super::FluidVolume,
+    )>,
 ) {
     let dt = time.fixed_delta.as_secs_f32();
+    let mut fluids: Vec<_> = fluids.iter_mut().collect();
+    fluids.sort_by_key(|(entity, order, _)| {
+        super::fluid::visit_key(*order, *entity)
+    });
+    let mut fluids: Vec<_> = fluids
+        .iter_mut()
+        .map(|(_, _, fluid)| &mut **fluid)
+        .collect();
     let mut colliders: Vec<ColliderEntry> = bodies
         .iter()
         .filter_map(|(entity, order, transform, _, collider, physics)| {
@@ -1154,6 +1181,8 @@ pub(super) fn step_soft_bodies(
             &volume.attachments,
             particles,
             bounds,
+            &mut fluids,
+            volume.body.min_rest_length() / 2.0,
             dt,
             |held, anchors, obstacles| {
                 volume.body.step_coupled(
@@ -1180,6 +1209,8 @@ pub(super) fn step_soft_bodies(
             &cloth.attachments,
             particles,
             bounds,
+            &mut fluids,
+            cloth.cloth.min_rest_length() / 2.0,
             dt,
             |held, anchors, obstacles| {
                 cloth.cloth.step_coupled(
@@ -1194,14 +1225,18 @@ pub(super) fn step_soft_bodies(
     }
 }
 
-/// Gathers the bodies one volume hangs on and the colliders near its
-/// `bounds`, runs `step` with them and writes back the dynamic ones.
+/// Gathers the bodies one volume hangs on, the colliders near its
+/// `bounds` and the grains of `fluids` near it (its particles are balls of
+/// `radius`), runs `step` with them and writes back the dynamic ones.
+#[allow(clippy::too_many_arguments)]
 fn couple(
     bodies: &mut CoupledBodies,
     colliders: &[ColliderEntry],
     attachments: &[SoftAttachment],
     particles: usize,
     (low, high): (Vector3<f32>, Vector3<f32>),
+    fluids: &mut [&mut super::FluidVolume],
+    radius: f32,
     dt: f32,
     step: impl FnOnce(&mut [AnchorBody], &[Anchor], &[Obstacle]),
 ) {
@@ -1247,7 +1282,22 @@ fn couple(
             obstacles.push(Obstacle { body, shape });
         }
     }
+    let rigid = held.len();
+    let grains = grain_bodies(fluids, (low, high), radius, dt);
+    for (index, &(_, _, shape, body)) in grains.iter().enumerate() {
+        held.push(body);
+        obstacles.push(Obstacle {
+            body: rigid + index,
+            shape,
+        });
+    }
     step(&mut held, &anchors, &obstacles);
+    for (&(fluid, grain, ..), state) in grains.iter().zip(&held[rigid..]) {
+        let fluid = &mut fluids[fluid].fluid;
+        fluid.positions[grain] = state.position;
+        fluid.velocities[grain] = state.velocity;
+    }
+    held.truncate(rigid);
     for (entity, state) in entities.into_iter().zip(held) {
         if state.inverse_mass == 0.0 {
             continue;
@@ -1263,6 +1313,64 @@ fn couple(
         rigid.linear_velocity = state.velocity;
         rigid.angular_velocity = state.angular_velocity;
     }
+}
+
+/// Every particle of `fluids` that can reach the box `bounds` this tick,
+/// as `(fluid index, particle index, shape, body)`: a dynamic sphere of
+/// the particle's mass, `radius` plus half the fluid spacing across (so a
+/// soft-body particle, a point in the step, stops at the sum of both
+/// radii), with no spin. The fluid has already stepped this tick, so like a
+/// rigid body the grain starts where it was a tick ago and moves through
+/// the tick again. Fluids and particles go in index order.
+// ponytail: grains finer than about 3/4 of a deformable's spacing can slip
+// between its particles, and a grain over about 30 times the mass of the
+// particles it rests on overpowers their constraints and tears through
+// (1 kg water grains need a sheet of 3 kg/m² or more at 0.1 m spacing).
+// Push grains out of tetrahedra and triangles, or scale contact masses,
+// if fine or heavy fluids meet coarse or light deformables.
+fn grain_bodies(
+    fluids: &[&mut super::FluidVolume],
+    (low, high): (Vector3<f32>, Vector3<f32>),
+    radius: f32,
+    dt: f32,
+) -> Vec<(usize, usize, ObstacleShape, AnchorBody)> {
+    let mut grains = Vec::new();
+    for (index, volume) in fluids.iter().enumerate() {
+        let settings = &volume.settings;
+        if settings.particle_mass <= 0.0 {
+            continue;
+        }
+        let reach = radius + settings.spacing / 2.0;
+        let fluid = &volume.fluid;
+        for (grain, (&position, &velocity)) in
+            fluid.positions.iter().zip(&fluid.velocities).enumerate()
+        {
+            let velocity = vector(velocity);
+            let start = vector(position) - velocity * dt;
+            // Distance from the box to the start and to the end of the
+            // grain's path through the tick.
+            let gap = |p: Vector3<f32>| {
+                (low - p).sup(&(p - high)).sup(&Vector3::zeros()).norm()
+            };
+            if gap(start).min(gap(vector(position))) > reach {
+                continue;
+            }
+            grains.push((
+                index,
+                grain,
+                ObstacleShape::Sphere(reach),
+                AnchorBody {
+                    position: start.into(),
+                    rotation: nalgebra::Rotation3::identity(),
+                    velocity: velocity.into(),
+                    angular_velocity: [0.0; 3],
+                    inverse_mass: 1.0 / settings.particle_mass,
+                    inverse_inertia: nalgebra::Matrix3::zeros(),
+                },
+            ));
+        }
+    }
+    grains
 }
 
 /// The smallest box around some points.
@@ -1591,5 +1699,107 @@ mod tests {
                 assert!(vector(vertex.normal).dot(&outward) > 0.0);
             }
         }
+    }
+
+    use crate::runtime::{
+        App, Cloth, ClothSettings, ClothVolume, Fluid, FluidSettings,
+        FluidSolver, FluidVolume,
+    };
+
+    fn run_app(app: &mut App, ticks: u32) {
+        for _ in 0..ticks {
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+        }
+    }
+
+    /// Lowest point of a 0.3 m jelly of `density` dropped into a 0.4 m
+    /// deep pool of water or sand after 4 s.
+    fn jelly_rest(density: f32, solver: FluidSolver) -> f32 {
+        let mut app = App::new();
+        let settings = FluidSettings {
+            bounds: ([-0.4, 0.0, -0.4], [0.4, 2.0, 0.4]),
+            particle_mass: 1.0,
+            solver,
+            ..FluidSettings::default()
+        };
+        let fluid = Fluid::block([-0.35, 0.0, -0.35], [8, 4, 8], 0.1);
+        app.world_mut().spawn(FluidVolume::new(settings, fluid));
+        let body =
+            SoftBody::block([-0.15, 0.6, -0.15], [3; 3], 0.1, density).unwrap();
+        let jelly = app
+            .world_mut()
+            .spawn(SoftBodyVolume::new(SoftBodySettings::default(), body))
+            .id();
+        run_app(&mut app, 240);
+        let volume = app.world().get::<SoftBodyVolume>(jelly).unwrap();
+        volume
+            .body
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    #[test]
+    fn a_light_jelly_floats_on_water_and_sand_and_a_heavy_one_sinks() {
+        for solver in [FluidSolver::Particles, FluidSolver::Granular] {
+            let light = jelly_rest(300.0, solver);
+            let heavy = jelly_rest(5000.0, solver);
+            assert!(light > 0.12, "{solver:?}: light jelly bottom at {light}");
+            assert!(
+                light > heavy + 0.08,
+                "{solver:?}: light {light} vs heavy {heavy}"
+            );
+        }
+        assert!(jelly_rest(5000.0, FluidSolver::Particles) < 0.1);
+    }
+
+    #[test]
+    fn water_poured_on_a_pinned_sheet_stays_on_it_and_sags_it() {
+        let mut app = App::new();
+        let settings = FluidSettings {
+            bounds: ([-0.5, 0.0, -0.5], [0.5, 3.0, 0.5]),
+            particle_mass: 1.0,
+            ..FluidSettings::default()
+        };
+        let fluid = Fluid::block([-0.15, 1.3, -0.15], [4, 3, 4], 0.1);
+        let count = fluid.positions.len();
+        app.world_mut().spawn(FluidVolume::new(settings, fluid));
+        let mut cloth = Cloth::grid(
+            [-0.5, 1.0, -0.5],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [10, 10],
+            0.1,
+            10.0,
+        )
+        .unwrap();
+        for (index, mass) in cloth.inverse_masses.iter_mut().enumerate() {
+            let (x, z) = (index % 11, index / 11);
+            if x == 0 || x == 10 || z == 0 || z == 10 {
+                *mass = 0.0;
+            }
+        }
+        let sheet = app
+            .world_mut()
+            .spawn(ClothVolume::new(ClothSettings::default(), cloth))
+            .id();
+        run_app(&mut app, 180);
+        let fluid = &app
+            .world_mut()
+            .query::<&FluidVolume>()
+            .single(app.world())
+            .unwrap()
+            .fluid;
+        let lowest = fluid.positions.iter().map(|p| p[1]).fold(9.0, f32::min);
+        assert_eq!(fluid.positions.len(), count);
+        let cloth = &app.world().get::<ClothVolume>(sheet).unwrap().cloth;
+        let middle = cloth.positions[5 * 11 + 5][1];
+        assert!(lowest > 0.5, "water fell through to {lowest}");
+        // 48 kg of water on a 10 kg sheet pulls its middle down from the
+        // 0.97 it hangs at alone.
+        assert!(middle < 0.95, "sheet middle at {middle}");
+        assert!(middle > 0.3, "sheet middle at {middle}");
     }
 }

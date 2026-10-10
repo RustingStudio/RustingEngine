@@ -91,6 +91,16 @@ pub struct Cloth {
 }
 
 impl Cloth {
+    /// Shortest rest edge, 0 with no edges: the grid spacing of a sheet.
+    #[must_use]
+    pub fn min_rest_length(&self) -> f32 {
+        self.edge_rests
+            .iter()
+            .copied()
+            .reduce(f32::min)
+            .unwrap_or(0.0)
+    }
+
     /// Cloth over `positions` (its rest shape) with `density` in kilograms
     /// per square meter. Each triangle gives a third of its mass to each
     /// corner.
