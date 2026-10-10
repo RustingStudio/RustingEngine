@@ -2412,6 +2412,21 @@ Depends on: Milestones 3 and 4.
   (a repeating sampler blended the top row with the bottom one) and before
   the mip chain (rough metal stayed pure red). Unit test
   `environment_maps_resolve_their_texture_and_reach_the_render_world`.
+  Partial (procedural sky): `ProceduralSky { intensity, haze, ground_color,
+  sun_size }` (`rusting.procedural_sky`) draws a single-scattering daylight
+  sky (Rayleigh air, Mie haze, Kasten-Young air mass, `src/shaders/sky.glsl`)
+  behind the scene, with a sun disc, under the fog. The sun is the shadowed
+  directional light, else the first one. Without an environment map, a
+  compute pass bakes the sky into a 128x64 half-float equirect with a mip
+  chain, re-baked only when the sun or settings change, and binds it as the
+  environment, so surfaces get sky ambient and specular. Known ceilings: one
+  scattering bounce, no night sky or moon, no `.hdr` HDRI loading, and
+  environment maps are still not drawn as the background. Evidence: GPU test
+  `the_procedural_sky_follows_the_sun_and_lights_the_scene` (horizon blue at
+  noon, red at sunset, a bright disc, and a slab lit with no ambient light);
+  it failed with the sky pass gated off (black background) and with the bake
+  not bound (slab unchanged). Unit test
+  `the_sun_is_the_shadowed_light_and_sets_the_sky_brightness`.
 
 ### Screen-space and post effects
 

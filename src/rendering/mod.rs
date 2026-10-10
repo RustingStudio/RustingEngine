@@ -18,6 +18,7 @@ mod post_effects;
 pub mod readback;
 pub mod render_scale;
 pub mod scene_renderer;
+mod sky;
 pub mod swapchain;
 
 use std::sync::Arc;

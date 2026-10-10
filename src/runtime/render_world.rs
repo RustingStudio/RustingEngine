@@ -146,6 +146,7 @@ pub struct RenderWorld {
     pub reflection_probes: Vec<([f32; 3], super::ReflectionProbe)>,
     pub tone_mapping: Option<ToneMapping>,
     pub fog: Option<super::Fog>,
+    pub procedural_sky: Option<super::ProceduralSky>,
     /// Box-to-world matrix (transform times half size) and settings of
     /// each [`FogVolume`](super::FogVolume), in entity order.
     pub fog_volumes: Vec<([[f32; 4]; 4], super::FogVolume)>,
@@ -330,6 +331,7 @@ pub fn extract_render_world(world: &mut World) {
             .collect()
     };
     let tone_mapping = collect_first::<ToneMapping>(world);
+    let procedural_sky = collect_first::<super::ProceduralSky>(world);
     let eye = active_camera.as_ref().map(|camera| {
         let [x, y, z, _] = camera.transform.matrix[3];
         [x, y, z]
@@ -507,6 +509,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.views = views;
     render_world.tone_mapping = tone_mapping;
     render_world.fog = fog;
+    render_world.procedural_sky = procedural_sky;
     render_world.fog_volumes = fog_volumes;
     render_world.bloom = bloom;
     render_world.auto_exposure = auto_exposure;

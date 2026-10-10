@@ -1229,6 +1229,38 @@ pub(super) fn apply_scene_background(
     }
 }
 
+/// Daylight sky computed from the sun: blue overhead, pale toward the
+/// horizon, orange at sunset, dark at night. It is drawn behind everything
+/// and lights surfaces from every side and in their reflections, like an
+/// [`EnvironmentMap`] (which wins for lighting when both exist). The sun
+/// is the shadow-casting directional light, else the first one. The one
+/// on the entity with the lowest ID is used.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProceduralSky {
+    /// Multiplies the sky's brightness, which follows the sun's.
+    pub intensity: f32,
+    /// 0 is clear air, 1 a hazy, washed-out sky with a wide glow around
+    /// the sun.
+    pub haze: f32,
+    /// Linear RGB albedo of the ground seen below the horizon.
+    pub ground_color: [f32; 3],
+    /// Diameter of the drawn sun disc in degrees; 0 hides it. The real sun
+    /// is 0.53.
+    pub sun_size: f32,
+}
+
+impl Default for ProceduralSky {
+    fn default() -> Self {
+        Self {
+            intensity: 1.0,
+            haze: 0.2,
+            ground_color: [0.3, 0.28, 0.25],
+            sun_size: 1.0,
+        }
+    }
+}
+
 /// Equirectangular (2:1) sky image that surfaces reflect and that lights
 /// them from every side, replacing the [`SkyLight`](super::SkyLight)
 /// hemisphere. Rough surfaces sample blurrier mip levels. The one on the

@@ -20,11 +20,12 @@ use crate::runtime::{
     JointKind, JointMotor, JointSpring, LightCookie, LootEntry, LootTable,
     MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial, PhysicsSettings,
     PhysicsSyncMode, Pickup, PlatformerController, PlayerController, Polygon2d,
-    PostVolume, QualityProfile, RandomSeed, ReflectionProbe, RenderBounds,
-    RenderSettings, ReverbZone, SceneBackground, SceneInstance, ShadowQuality,
-    SkyLight, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, TileKind, TileMap, ToneMapper, ToneMapping,
-    Tween, TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
+    PostVolume, ProceduralSky, QualityProfile, RandomSeed, ReflectionProbe,
+    RenderBounds, RenderSettings, ReverbZone, SceneBackground, SceneInstance,
+    ShadowQuality, SkyLight, SlideSound, SoftBlock, SoundCue, SoundId,
+    SpawnGrid, Squash, StateAction, StateTransition, TileKind, TileMap,
+    ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle,
+    WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -1177,6 +1178,27 @@ crate::reflect! {
         distortion: f32 {
             unit: "factor", min: 0.0, max: 1.0,
             doc: "tube bulge and row wobble over time",
+        },
+    }
+}
+
+crate::reflect! {
+    struct ProceduralSky {
+        intensity: f32 {
+            unit: "factor", min: 0.0,
+            doc: "multiplies the sky's brightness, which follows the sun's",
+        },
+        haze: f32 {
+            unit: "factor", min: 0.0, max: 1.0,
+            doc: "0 clear air, 1 hazy with a wide glow around the sun",
+        },
+        ground_color: [f32; 3] {
+            unit: "linear rgb", min: 0.0, max: 1.0,
+            doc: "albedo of the ground seen below the horizon",
+        },
+        sun_size: f32 {
+            unit: "degrees", min: 0.0, max: 20.0,
+            doc: "diameter of the drawn sun disc; 0 hides it",
         },
     }
 }

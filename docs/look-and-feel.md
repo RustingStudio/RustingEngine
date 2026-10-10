@@ -197,6 +197,22 @@ box turns and scales with the object; up to eight are drawn:
    "density": 0.3, "extents": [20, 1, 20]}}}
 ```
 
+### Procedural sky
+
+A `rusting.procedural_sky` on any object draws a daylight sky behind the
+scene: blue overhead, paler at the horizon, red and dim as the sun sets,
+with a sun disc `sun_size` degrees across. The sun is the directional light
+that casts shadows (else the first one), so turning that light turns the
+sky. The sky also lights and reflects in every surface, like an environment
+map; a `rusting.environment_map` still wins for lighting when both are set.
+`haze` (0..1) greys and brightens it, `ground_color` fills the lower half.
+
+```json
+{"name": "Sky", "components": {"rusting.procedural_sky":
+  {"intensity": 1.0, "haze": 0.2, "ground_color": [0.3, 0.28, 0.25],
+   "sun_size": 1.0}}}
+```
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,

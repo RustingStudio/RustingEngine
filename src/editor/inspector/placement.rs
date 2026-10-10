@@ -18,7 +18,8 @@ use crate::runtime::{
     AMBIENT_OCCLUSION_COMPONENT, AUTO_EXPOSURE_COMPONENT, BACKGROUND_COMPONENT,
     BLOOM_COMPONENT, ENVIRONMENT_MAP_COMPONENT, FOG_COMPONENT,
     FOG_VOLUME_COMPONENT, HUD_ELEMENT_COMPONENT, POST_VOLUME_COMPONENT,
-    SKY_LIGHT_COMPONENT, TILE_MAP_COMPONENT, TONE_MAPPING_COMPONENT,
+    PROCEDURAL_SKY_COMPONENT, SKY_LIGHT_COMPONENT, TILE_MAP_COMPONENT,
+    TONE_MAPPING_COMPONENT,
 };
 use crate::runtime::{
     ANIMATION_COMPONENT, ARTICULATION_COMPONENT, AUTO_SIMULATION_COMPONENT,
@@ -73,6 +74,7 @@ fn kind(name: &str) -> Kind {
         | DEPTH_OF_FIELD_COMPONENT
         | MOTION_BLUR_COMPONENT
         | POST_VOLUME_COMPONENT
+        | PROCEDURAL_SKY_COMPONENT
         | AMBIENT_OCCLUSION_COMPONENT => Kind::Environment,
         HUD_ELEMENT_COMPONENT => Kind::Hud,
         TILE_MAP_COMPONENT => Kind::TileMap,
@@ -132,6 +134,9 @@ pub(in crate::editor) fn placement(
             first_with::<crate::runtime::EnvironmentMap>(world)
         }
         FOG_COMPONENT => first_with::<Fog>(world),
+        PROCEDURAL_SKY_COMPONENT => {
+            first_with::<crate::runtime::ProceduralSky>(world)
+        }
         BLOOM_COMPONENT => first_with::<Bloom>(world),
         AUTO_EXPOSURE_COMPONENT => first_with::<AutoExposure>(world),
         COLOR_GRADING_COMPONENT => {
@@ -419,6 +424,10 @@ pub(in crate::editor) fn component_help(
         POST_VOLUME_COMPONENT => (
             "Limits this object's fog and color grading to a box around it.",
             "A foggy hall next to a warm office.",
+        ),
+        PROCEDURAL_SKY_COMPONENT => (
+            "Draws a daylight sky that follows the sun and lights the scene.",
+            "Outdoor levels, day-night cycles.",
         ),
         FOG_VOLUME_COMPONENT => (
             "Fills a box around this object with fog, seen from outside too.",

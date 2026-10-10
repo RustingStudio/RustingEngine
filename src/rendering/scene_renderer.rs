@@ -15,6 +15,7 @@ use super::post_effects::{
     BloomChain, ExposureMeter, OcclusionParams, OcclusionTargets,
     PostPipelines, TemporalHistory,
 };
+use super::sky::{sky_params, SkyBake};
 
 use nalgebra::{
     Matrix4, Orthographic3, Perspective3, Point3, Vector3, Vector4,
@@ -554,6 +555,9 @@ struct ShadowUpload {
     fog_volumes: [[[f32; 4]; 4]; MAX_FOG_VOLUMES],
     /// Color in rgb and density in w of each fog volume.
     fog_volume_colors: [[f32; 4]; MAX_FOG_VOLUMES],
+    /// The procedural sky, as `sky::sky_params` lays it out; all zero
+    /// without one.
+    sky: [[f32; 4]; 3],
 }
 
 /// Side length in texels of the directional shadow map and the view
@@ -1710,6 +1714,8 @@ pub struct SceneRenderer {
     screens_drawn: Vec<(bevy_ecs::entity::Entity, u64)>,
     /// 1x1 white texture bound in place of every missing material map.
     white_texture: (Arc<ImageView>, Arc<Sampler>),
+    /// The procedural sky's lighting image, made on first use.
+    sky_bake: Option<SkyBake>,
     /// Per-slot stand-ins for a map that is referenced but missing or
     /// malformed: magenta base color, flat normal, white for the rest.
     missing_textures: [(Arc<ImageView>, Arc<Sampler>); MATERIAL_TEXTURES],
@@ -2045,6 +2051,7 @@ impl SceneRenderer {
             screen_frame: 0,
             screens_drawn: Vec::new(),
             white_texture,
+            sky_bake: None,
             missing_textures,
             white_material,
             samplers: HashMap::from([(
@@ -3069,14 +3076,37 @@ impl SceneRenderer {
                     && occlusion.radius > 0.0
                     && occlusion.intensity > 0.0
             });
-        let environment =
-            render_world.environment.and_then(|(texture, intensity)| {
+        let sky = render_world
+            .procedural_sky
+            .filter(|_| lit)
+            .map(|sky| sky_params(&sky, &render_world.directional_lights));
+        let environment = render_world
+            .environment
+            .and_then(|(texture, intensity)| {
                 let prepared = self.prepared_textures.get(&texture.key())?;
                 Some((
                     (prepared.view.clone()?, prepared.sampler.clone()),
                     intensity,
                 ))
-            });
+            })
+            .map(Ok)
+            .or_else(|| {
+                // Without an environment map, the sky lights the scene.
+                sky?;
+                let bake = match &mut self.sky_bake {
+                    Some(bake) => bake,
+                    None => match SkyBake::new(
+                        &self.queue,
+                        &self.memory_allocator,
+                        &self.descriptor_allocator,
+                    ) {
+                        Ok(bake) => self.sky_bake.insert(bake),
+                        Err(error) => return Some(Err(error)),
+                    },
+                };
+                Some(Ok(((bake.view.clone(), bake.sampler.clone()), 1.0)))
+            })
+            .transpose()?;
         let shadow_upload = self.frame_contexts[self.frame_index]
             .transient
             .allocate_sized::<ShadowUpload>()
@@ -3207,6 +3237,7 @@ impl SceneRenderer {
                         [r.max(0.0), g.max(0.0), b.max(0.0), volume.density]
                     })
                 }),
+                sky: sky.unwrap_or_default(),
             };
         let cluster_list = build_light_clusters(
             &self.prepared_lights.as_ref().unwrap().local,
@@ -3754,6 +3785,9 @@ impl SceneRenderer {
             timestamps,
             passes: Vec::new(),
         };
+        if let (Some(params), Some(bake)) = (sky, &mut self.sky_bake) {
+            bake.record(&mut commands, params)?;
+        }
         let uploads =
             !self.pending_texture_uploads.is_empty() || carry.is_some();
         if uploads {
@@ -4391,6 +4425,7 @@ impl SceneRenderer {
             draw_batches(&mut commands, gpu_cull, &active.pipeline, None)?;
         if fog.is_some_and(|fog| fog.sky_affect > 0.0)
             || !fog_volumes.is_empty()
+            || sky.is_some()
         {
             // Same layout as the scene pipelines, so their sets and camera
             // stay bound.
@@ -7098,7 +7133,7 @@ fn pass_time(
 /// bound range. The slice start stands in for `firstInstance`, which
 /// indirect draws may not set without `drawIndirectFirstInstance`.
 /// Fills mips 1 and up of `image`, each a linear downscale of the one above.
-fn record_mip_chain(
+pub(super) fn record_mip_chain(
     commands: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     image: &Arc<Image>,
 ) -> Result<(), SceneRenderError> {
@@ -10698,10 +10733,32 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 fog_shafts;
     mat4 fog_volumes[8];
     vec4 fog_volume_colors[8];
+    vec4 sky[3];
 } shadow;
 #include "fog.glsl"
+#include "sky.glsl"
 void main() {
-    f_color = fog_sky(v_ndc);
+    vec4 fog = fog_sky(v_ndc);
+    if (shadow.sky[2].w < 0.5) {
+        f_color = fog;
+        return;
+    }
+    // The procedural sky replaces the background under the fog.
+    vec3 start = fog_unproject(v_ndc, 0.0);
+    vec3 direction = normalize(fog_unproject(v_ndc, 0.5) - start);
+    vec3 sun = shadow.sky[0].xyz;
+    vec3 sun_color = shadow.sky[1].rgb;
+    float haze = shadow.sky[1].w;
+    vec3 sky = sky_radiance(direction, sun, sun_color, haze,
+        shadow.sky[2].rgb);
+    // The sun disc: its sunlight spread over its solid angle.
+    float cos_radius = shadow.sky[0].w;
+    if (cos_radius < 1.0 && dot(direction, sun) > cos_radius
+        && direction.y > 0.0) {
+        sky += sky_sunlight(sun, sun_color, haze)
+            / (6.2831853 * (1.0 - cos_radius));
+    }
+    f_color = vec4(fog.rgb + fog.a * sky, 0.0);
 }
 "#
     }
@@ -11693,6 +11750,70 @@ mod tests {
             "in front of the sky: {r} {g} {b}"
         );
         assert_eq!(render_pixel(&mut sky, [0, 4]), [0, 0, 0]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn the_procedural_sky_follows_the_sun_and_lights_the_scene() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let sun =
+            |toward: Vector3<f32>| crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &-toward.normalize(),
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: 100_000.0,
+                    shadows: false,
+                },
+            };
+        // The camera looks down -Z at the horizon.
+        let mut sky = SlabScene::new(&[]);
+        sky.render_world.procedural_sky =
+            Some(crate::runtime::ProceduralSky::default());
+        sky.render_world.directional_lights = vec![sun(Vector3::y())];
+        let [r, _, b] = render_pixel(&mut sky, [4, 4]);
+        assert!(b > r + 10, "noon: {r} {b}");
+        // Low in front of the camera, the sun reddens the sky.
+        sky.render_world.directional_lights =
+            vec![sun(Vector3::new(0.0, 0.05, -1.0))];
+        let [r, _, b] = render_pixel(&mut sky, [4, 4]);
+        assert!(r > b + 10, "sunset: {r} {b}");
+        // Its disc is far brighter than the sky beside it.
+        sky.render_world.procedural_sky = Some(crate::runtime::ProceduralSky {
+            sun_size: 90.0,
+            ..crate::runtime::ProceduralSky::default()
+        });
+        sky.render_world.directional_lights =
+            vec![sun(Vector3::new(0.0, 0.2, -1.0))];
+        let [r, g, _] = render_pixel(&mut sky, [4, 4]);
+        assert!(r > 250 && g > 150, "sun disc: {r} {g}");
+
+        // Without ambient light, the sky still lights a white slab facing
+        // the horizon.
+        let mut scene = SlabScene::new(&[(0.0, MaterialAsset::default())]);
+        scene.render_world.ambient_light = None;
+        let [r0, g0, b0] = render_pixel(&mut scene, [4, 4]);
+        scene.render_world.procedural_sky =
+            Some(crate::runtime::ProceduralSky::default());
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(
+            r > r0 + 20 && g > g0 + 20 && b > b0 + 20,
+            "sky light: {r} {g} {b}, without: {r0} {g0} {b0}"
+        );
     }
 
     #[test]
