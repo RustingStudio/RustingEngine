@@ -5996,7 +5996,7 @@ fn a_light_ball_floats_in_a_fluid_and_a_heavy_one_sinks() {
             // The grid's cells (twice the spacing) must be smaller than the
             // ball, or the hole it leaves in the water stays open.
             spacing: match solver {
-                FluidSolver::Particles => 0.1,
+                FluidSolver::Particles | FluidSolver::Granular => 0.1,
                 FluidSolver::Grid => 0.05,
             },
             ..FluidSettings::default()
@@ -6138,7 +6138,8 @@ fn fluid_blocks_round_trip_through_scenes_and_become_volumes() {
         count_y: 2,
         count_z: 4,
         viscosity: 0.2,
-        solver: FluidSolver::Grid,
+        solver: FluidSolver::Granular,
+        friction: 0.9,
         visible: false,
         ..FluidBlock::default()
     };
@@ -6157,7 +6158,8 @@ fn fluid_blocks_round_trip_through_scenes_and_become_volumes() {
     let volume = query.single(loaded.world()).unwrap();
     assert_eq!(volume.fluid.positions.len(), 24);
     assert_eq!(volume.settings.bounds.0[1], 1.5);
-    assert_eq!(volume.settings.solver, FluidSolver::Grid);
+    assert_eq!(volume.settings.solver, FluidSolver::Granular);
+    assert_eq!(volume.settings.friction, 0.9);
     let _ = entity;
 }
 

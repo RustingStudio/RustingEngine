@@ -1013,9 +1013,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.fluid_block",
-        summary: "Particle fluid: a block of count_x by count_y by count_z particles resting on the floor of a box centered on the entity. It runs every fixed tick, floats and sinks dynamic bodies with sphere colliders, and draws a smooth water surface when visible (show_particles adds a sphere per particle). solver Particles (position based) suits small splashy volumes of a few thousand particles; Grid runs FLIP on a grid over the box and carries large water volumes (softer, slowly loses volume). CPU only, deterministic.",
+        summary: "Particle fluid: a block of count_x by count_y by count_z particles resting on the floor of a box centered on the entity. It runs every fixed tick, floats and sinks dynamic bodies with sphere colliders, and draws a smooth water surface when visible (show_particles adds a sphere per particle). solver Particles (position based) suits small splashy volumes of a few thousand particles; Grid runs FLIP on a grid over the box and carries large water volumes (softer, slowly loses volume); Granular makes grains with friction (sand, gravel, rubble) that pile into heaps, steeper as friction grows. CPU only, deterministic.",
         gpu: NO_GPU,
-        example: || json!({"spacing": 0.1, "count_x": 6, "count_y": 6, "count_z": 6, "container_half_extents": [0.5, 0.5, 0.5], "iterations": 4, "viscosity": 0.01, "solver": "Particles", "visible": true, "show_particles": false}),
+        example: || json!({"spacing": 0.1, "count_x": 6, "count_y": 6, "count_z": 6, "container_half_extents": [0.5, 0.5, 0.5], "iterations": 4, "viscosity": 0.01, "solver": "Particles", "friction": 0.6, "visible": true, "show_particles": false}),
     },
     ComponentSection {
         key: "rusting.soft_block",

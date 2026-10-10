@@ -41,6 +41,9 @@ pub struct FluidSettings {
     pub bounds: ([f32; 3], [f32; 3]),
     /// Which solver steps the particles.
     pub solver: FluidSolver,
+    /// Coulomb friction between grains and against the container, for
+    /// [`FluidSolver::Granular`]; the others ignore it.
+    pub friction: f32,
 }
 
 /// The solver a fluid runs on.
@@ -62,6 +65,9 @@ pub enum FluidSolver {
     /// FLIP on a grid over the container: no neighbor search, so it carries
     /// large water volumes; softer, and it slowly loses volume.
     Grid,
+    /// Grains with friction (sand, gravel, rubble): they pile into heaps
+    /// whose slope grows with `friction`.
+    Granular,
 }
 
 impl Default for FluidSettings {
@@ -75,6 +81,7 @@ impl Default for FluidSettings {
             viscosity: 0.01,
             bounds: ([-1.0; 3], [1.0; 3]),
             solver: FluidSolver::Particles,
+            friction: 0.6,
         }
     }
 }
@@ -128,6 +135,48 @@ fn spiky_gradient(d: [f32; 3], h: f32) -> [f32; 3] {
     [d[0] * scale, d[1] * scale, d[2] * scale]
 }
 
+/// Neighbor lists of `points` within `h`. A hash grid with cell size `h` holds the
+/// indices in ascending order, so each list comes out sorted.
+pub(super) fn neighbors(points: &[[f32; 3]], h: f32) -> Vec<Vec<u32>> {
+    let cell = |p: [f32; 3]| {
+        [
+            (p[0] / h).floor() as i32,
+            (p[1] / h).floor() as i32,
+            (p[2] / h).floor() as i32,
+        ]
+    };
+    let mut grid: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+    for (i, p) in points.iter().enumerate() {
+        grid.entry(cell(*p)).or_default().push(i as u32);
+    }
+    let h2 = h * h;
+    let count = points.len();
+    let mut lists = Vec::with_capacity(count);
+    for i in 0..count {
+        let c = cell(points[i]);
+        let mut found = Vec::new();
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let key = [c[0] + dx, c[1] + dy, c[2] + dz];
+                    for &j in grid.get(&key).into_iter().flatten() {
+                        let d = sub(points[i], points[j as usize]);
+                        if j as usize != i && dot(d) < h2 {
+                            found.push(j);
+                        }
+                    }
+                }
+            }
+        }
+        // Cells are visited in a fixed order, but the merged list is
+        // only sorted per cell. Sort so the sum order never depends on
+        // the grid layout.
+        found.sort_unstable();
+        lists.push(found);
+    }
+    lists
+}
+
 impl Fluid {
     /// Fills a box of particles on the rest lattice, x fastest.
     pub fn block(min: [f32; 3], counts: [u32; 3], spacing: f32) -> Self {
@@ -162,48 +211,8 @@ impl Fluid {
         sum * settings.particle_mass
     }
 
-    /// Rebuilds neighbor lists. A hash grid with cell size `h` holds the
-    /// indices in ascending order, so each list comes out sorted.
     fn find_neighbors(&mut self, h: f32) {
-        let cell = |p: [f32; 3]| {
-            [
-                (p[0] / h).floor() as i32,
-                (p[1] / h).floor() as i32,
-                (p[2] / h).floor() as i32,
-            ]
-        };
-        let mut grid: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
-        for (i, p) in self.predicted.iter().enumerate() {
-            grid.entry(cell(*p)).or_default().push(i as u32);
-        }
-        let h2 = h * h;
-        let count = self.predicted.len();
-        self.neighbors.resize_with(count, Vec::new);
-        for i in 0..count {
-            let c = cell(self.predicted[i]);
-            let mut found = Vec::new();
-            for dz in -1..=1 {
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        let key = [c[0] + dx, c[1] + dy, c[2] + dz];
-                        for &j in grid.get(&key).into_iter().flatten() {
-                            let d = sub(
-                                self.predicted[i],
-                                self.predicted[j as usize],
-                            );
-                            if j as usize != i && dot(d) < h2 {
-                                found.push(j);
-                            }
-                        }
-                    }
-                }
-            }
-            // Cells are visited in a fixed order, but the merged list is
-            // only sorted per cell. Sort so the sum order never depends on
-            // the grid layout.
-            found.sort_unstable();
-            self.neighbors[i] = found;
-        }
+        self.neighbors = neighbors(&self.predicted, h);
     }
 
     fn clamp_to_bounds(p: &mut [f32; 3], bounds: ([f32; 3], [f32; 3])) {
@@ -217,8 +226,12 @@ impl Fluid {
         if dt <= 0.0 {
             return;
         }
-        if settings.solver == FluidSolver::Grid {
-            return super::flip::step(self, settings, dt);
+        match settings.solver {
+            FluidSolver::Particles => {}
+            FluidSolver::Grid => return super::flip::step(self, settings, dt),
+            FluidSolver::Granular => {
+                return super::granular::step(self, settings, dt);
+            }
         }
         let count = self.positions.len();
         let h = settings.radius();
@@ -426,8 +439,11 @@ pub struct FluidBlock {
     pub iterations: u32,
     /// XSPH viscosity in 0..1.
     pub viscosity: f32,
-    /// Particles for small splashy volumes, Grid for large water volumes.
+    /// Particles for small splashy volumes, Grid for large water volumes,
+    /// Granular for sand and gravel.
     pub solver: FluidSolver,
+    /// Grain friction for the Granular solver; higher piles steeper.
+    pub friction: f32,
     /// Draw the fluid as a water surface.
     pub visible: bool,
     /// Also draw each particle as a sphere (for debugging the solver).
@@ -445,6 +461,7 @@ impl Default for FluidBlock {
             iterations: 4,
             viscosity: 0.01,
             solver: FluidSolver::Particles,
+            friction: 0.6,
             visible: true,
             show_particles: false,
         }
@@ -480,6 +497,7 @@ fn volume_for_block(
         iterations: block.iterations,
         viscosity: block.viscosity,
         solver: block.solver,
+        friction: block.friction,
         bounds: (
             std::array::from_fn(|axis| center[axis] - half[axis]),
             std::array::from_fn(|axis| center[axis] + half[axis]),
@@ -980,7 +998,12 @@ pub(super) fn couple_fluids(
             };
             let sphere = displaced;
             let filled = (inside as f32 * particle_volume / sphere).min(1.0);
-            if filled <= 0.0 || gravity_size <= 0.0 {
+            // Grains hold a body up by contact (the push and trade above),
+            // not by buoyancy.
+            if filled <= 0.0
+                || gravity_size <= 0.0
+                || settings.solver == FluidSolver::Granular
+            {
                 continue;
             }
             let lift = settings.rest_density() * filled * sphere * gravity_size

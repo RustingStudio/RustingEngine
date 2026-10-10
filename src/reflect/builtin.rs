@@ -676,7 +676,7 @@ crate::reflect! {
 }
 
 crate::reflect! {
-    enum FluidSolver { Particles, Grid }
+    enum FluidSolver { Particles, Grid, Granular }
 }
 
 crate::reflect! {
@@ -690,7 +690,8 @@ crate::reflect! {
         },
         iterations: u32 { unit: "passes", min: 1.0, max: 16.0 },
         viscosity: f32 { unit: "factor", min: 0.0, max: 1.0 },
-        solver: FluidSolver { doc: "Particles for small splashy volumes, Grid (FLIP) for large water" },
+        solver: FluidSolver { doc: "Particles for small splashy volumes, Grid (FLIP) for large water, Granular for sand and gravel" },
+        friction: f32 { unit: "factor", min: 0.0, max: 2.0, doc: "Granular: grain friction; higher piles steeper" },
         visible: bool { doc: "draw the fluid as a water surface" },
         show_particles: bool { doc: "also draw one sphere per particle" },
     }
