@@ -223,6 +223,25 @@ clouds brighter than white, so reflections and lighting keep their punch:
   {"texture": "skies/field.hdr", "intensity": 1.0, "background": true}}}
 ```
 
+### Decals
+
+A `rusting.decal` paints an image onto whatever lies inside a box around
+its object: a poster on a wall, a crack, a stain, road paint. The image is
+projected along the object's forward axis (-Z) with its top along +Y, so
+place the object against the surface and face it in. Surfaces that face
+away from the projection are left alone. `color` multiplies the image and
+its alpha scales the coverage; leave `texture` empty to paint plain color.
+Later decals paint over earlier ones; up to sixteen are drawn, using at
+most four distinct images:
+
+```json
+{"name": "Crack", "transform": {"position": [0, 1.5, -4.9]},
+ "components": {"rusting.decal": {"texture": "decals/crack.png",
+   "color": [1, 1, 1, 1], "extents": [0.5, 0.5, 0.2]}}}
+```
+
+Decals change the surface color only, not its normals or roughness.
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,

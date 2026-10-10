@@ -13,7 +13,7 @@ use crate::runtime::{
     AmbientLight, AmbientOcclusion, Antialiasing, Articulation, AutoExposure,
     AutoSimulation, AxisLock, AxisMotion, Bloom, BurstEmitter, CameraScreen,
     CameraShake, ColorGrading, ColorLut, CombineMode, Connection, Connections,
-    Counter, CullingMode, DepthOfField, DeterminismMode, Dialogue,
+    Counter, CullingMode, Decal, DepthOfField, DeterminismMode, Dialogue,
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
     FluidBlock, Fog, FogVolume, ForceField, GravityVolume, GroundSurface,
     Health, Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
@@ -1201,6 +1201,24 @@ crate::reflect! {
             unit: "degrees", min: 0.0, max: 20.0,
             doc: "diameter of the drawn sun disc; 0 hides it",
         },
+    }
+}
+
+crate::reflect! {
+    struct Decal {
+        texture: PathBuf {
+            unit: "asset path",
+            doc: "image painted onto surfaces in the box; empty paints color",
+        },
+        color: [f32; 4] {
+            unit: "linear rgba", min: 0.0,
+            doc: "multiplies the image; alpha scales its coverage",
+        },
+        extents: [f32; 3] {
+            unit: "m", min: 0.0,
+            doc: "half size of the box; it projects along local -Z",
+        },
+        #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
     }
 }
 

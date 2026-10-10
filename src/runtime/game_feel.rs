@@ -1703,6 +1703,39 @@ pub struct LightCookie {
     pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
 }
 
+/// Paints an image onto the surfaces inside a box of half size `extents`
+/// around the object, projected along its forward axis (-Z) with the
+/// image's top along +Y: a poster on a wall, a crack, a puddle stain.
+/// Surfaces facing away from the projection get none of it.
+// ponytail: sixteen decals and four distinct images per frame (the first
+// in entity order); move to a texture array and clustered decals if
+// scenes need more.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Decal {
+    /// Image path relative to the project's `assets` folder; empty paints
+    /// plain `color`.
+    pub texture: std::path::PathBuf,
+    /// Linear RGBA multiplied with the image; alpha scales its coverage.
+    pub color: [f32; 4],
+    /// Half size of the box in the object's local axes, in metres.
+    pub extents: [f32; 3],
+    /// The loaded `texture`, set by the engine.
+    #[serde(skip)]
+    pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+}
+
+impl Default for Decal {
+    fn default() -> Self {
+        Self {
+            texture: std::path::PathBuf::new(),
+            color: [1.0; 4],
+            extents: [0.5, 0.5, 0.25],
+            handle: None,
+        }
+    }
+}
+
 /// Color lookup table applied after tone mapping and [`ColorGrading`]: an
 /// image strip of N squares of N x N pixels side by side (for example
 /// 256 x 16 or 1024 x 32). Red runs across each square, green down it, and
@@ -1732,13 +1765,14 @@ impl Default for ColorLut {
 }
 
 /// Loads the image of each added or changed [`EnvironmentMap`],
-/// [`LightCookie`] and [`ColorLut`]. An image whose load failed (file missing or not written
+/// [`LightCookie`], [`Decal`] and [`ColorLut`]. An image whose load failed (file missing or not written
 /// yet) is tried again about every two seconds.
 pub(super) fn load_environment_maps(
     assets: Option<ResMut<crate::assets::AssetServer>>,
     mut maps: Query<&mut EnvironmentMap>,
     mut cookies: Query<&mut LightCookie>,
     mut luts: Query<&mut ColorLut>,
+    mut decals: Query<&mut Decal>,
     mut frame: bevy_ecs::prelude::Local<u32>,
 ) {
     let Some(mut assets) = assets else {
@@ -1786,6 +1820,12 @@ pub(super) fn load_environment_maps(
             bevy_ecs::change_detection::DetectChanges::is_changed(&lut);
         let lut = lut.bypass_change_detection();
         load(changed, &lut.texture, &mut lut.handle, "color lut");
+    }
+    for mut decal in &mut decals {
+        let changed =
+            bevy_ecs::change_detection::DetectChanges::is_changed(&decal);
+        let decal = decal.bypass_change_detection();
+        load(changed, &decal.texture, &mut decal.handle, "decal");
     }
 }
 

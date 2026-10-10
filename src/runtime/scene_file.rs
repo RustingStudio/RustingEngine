@@ -1191,6 +1191,8 @@ pub const MOTION_BLUR_COMPONENT: &str = "rusting.motion_blur";
 pub const PROCEDURAL_SKY_COMPONENT: &str = "rusting.procedural_sky";
 /// Registry name of the built-in box of local fog.
 pub const FOG_VOLUME_COMPONENT: &str = "rusting.fog_volume";
+/// Registry name of the built-in projected image.
+pub const DECAL_COMPONENT: &str = "rusting.decal";
 /// Registry name of the built-in fog and grading area.
 pub const POST_VOLUME_COMPONENT: &str = "rusting.post_volume";
 pub const CAMERA_SCREEN_COMPONENT: &str = "rusting.camera_screen";
@@ -1375,6 +1377,9 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::FogVolume>(FOG_VOLUME_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Decal>(DECAL_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::ProceduralSky>(PROCEDURAL_SKY_COMPONENT)

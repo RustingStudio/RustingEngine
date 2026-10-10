@@ -493,6 +493,11 @@ const SSR_MAX_ROUGHNESS: f32 = 0.5;
 const MAX_REFLECTION_PROBES: usize = 4;
 /// Fog volumes the main pass reads; `fog.glsl` declares the same count.
 const MAX_FOG_VOLUMES: usize = 8;
+/// Decals the main pass paints; the fragment shader declares the same
+/// count.
+const MAX_DECALS: usize = 16;
+/// Distinct decal images per frame, in set 2 binding 9.
+const MAX_DECAL_IMAGES: usize = 4;
 /// Side length in texels of each captured probe face.
 const PROBE_FACE_SIZE: u32 = 128;
 /// View direction and up vector of each probe face, in layer order. The
@@ -559,6 +564,15 @@ struct ShadowUpload {
     /// without one. `sky[2].w` is 2 when the environment map is drawn as
     /// the background instead.
     sky: [[f32; 4]; 3],
+    /// x counts the decals.
+    decal_info: [f32; 4],
+    /// World-to-box matrix of each decal; the box spans -1..1.
+    decals: [[[f32; 4]; 4]; MAX_DECALS],
+    /// Each decal's projection axis (the box's +Z in world space) and its
+    /// image slot in w, -1 for none.
+    decal_axes: [[f32; 4]; MAX_DECALS],
+    /// Linear RGBA tint of each decal.
+    decal_colors: [[f32; 4]; MAX_DECALS],
 }
 
 /// Side length in texels of the directional shadow map and the view
@@ -1269,6 +1283,39 @@ fn light_cookies(render_world: &RenderWorld) -> Vec<Handle<TextureAsset>> {
         }
     }
     cookies
+}
+
+/// A decal's box-to-world matrix, settings and image slot.
+type FrameDecal<'a> = (&'a [[f32; 4]; 4], &'a crate::runtime::Decal, f32);
+
+/// The decals the main pass paints, at most [`MAX_DECALS`] in entity
+/// order, with their image slot (-1 for none), and the distinct images in
+/// slot order. A decal whose image finds no free slot is dropped.
+fn frame_decals(
+    render_world: &RenderWorld,
+) -> (Vec<FrameDecal<'_>>, Vec<Handle<TextureAsset>>) {
+    let mut images = Vec::new();
+    let mut decals = Vec::new();
+    for (matrix, decal) in &render_world.decals {
+        let slot = match decal.handle {
+            None => -1.0,
+            Some(image) => {
+                match images.iter().position(|&slot| slot == image) {
+                    Some(slot) => slot as f32,
+                    None if images.len() < MAX_DECAL_IMAGES => {
+                        images.push(image);
+                        (images.len() - 1) as f32
+                    }
+                    None => continue,
+                }
+            }
+        };
+        decals.push((matrix, decal, slot));
+        if decals.len() == MAX_DECALS {
+            break;
+        }
+    }
+    (decals, images)
 }
 
 /// Screen tiles across and down and depth slices of the light clusters.
@@ -2734,6 +2781,7 @@ impl SceneRenderer {
                 .map(|(texture, ..)| texture)
                 .into_iter()
                 .chain(light_cookies(render_world))
+                .chain(frame_decals(render_world).1)
                 .chain(render_world.color_lut.map(|(texture, _)| texture))
                 .collect(),
         )?;
@@ -2996,6 +3044,7 @@ impl SceneRenderer {
         let fog = render_world
             .fog
             .filter(|fog| lit && effects.fog && fog.density > 0.0);
+        let (decals, decal_images) = frame_decals(render_world);
         let fog_volumes: &[_] = if lit && effects.fog {
             let volumes = &render_world.fog_volumes;
             &volumes[..volumes.len().min(MAX_FOG_VOLUMES)]
@@ -3253,6 +3302,30 @@ impl SceneRenderer {
                     }
                     rows
                 },
+                decal_info: [decals.len() as f32, 0.0, 0.0, 0.0],
+                decals: std::array::from_fn(|index| {
+                    decals
+                        .get(index)
+                        .and_then(|(matrix, ..)| {
+                            Matrix4::from(**matrix).try_inverse()
+                        })
+                        .unwrap_or_else(Matrix4::identity)
+                        .into()
+                }),
+                decal_axes: std::array::from_fn(|index| {
+                    decals.get(index).map_or([0.0; 4], |(matrix, _, slot)| {
+                        let axis = Matrix4::from(**matrix)
+                            .transform_vector(&Vector3::z())
+                            .try_normalize(0.0)
+                            .unwrap_or_else(Vector3::z);
+                        [axis.x, axis.y, axis.z, *slot]
+                    })
+                }),
+                decal_colors: std::array::from_fn(|index| {
+                    decals.get(index).map_or([0.0; 4], |(_, decal, _)| {
+                        decal.color.map(|channel| channel.max(0.0))
+                    })
+                }),
             };
         let cluster_list = build_light_clusters(
             &self.prepared_lights.as_ref().unwrap().local,
@@ -3346,6 +3419,23 @@ impl SceneRenderer {
                             .unwrap_or_else(|| self.white_texture.clone())
                     })
                 }),
+                WriteDescriptorSet::image_view_sampler_array(
+                    9,
+                    0,
+                    (0..MAX_DECAL_IMAGES).map(|slot| {
+                        decal_images
+                            .get(slot)
+                            .and_then(|image| {
+                                let prepared =
+                                    self.prepared_textures.get(&image.key())?;
+                                Some((
+                                    prepared.view.clone()?,
+                                    prepared.sampler.clone(),
+                                ))
+                            })
+                            .unwrap_or_else(|| self.white_texture.clone())
+                    }),
+                ),
             ],
             [],
         )
@@ -9665,6 +9755,11 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 fog_shafts;
     mat4 fog_volumes[8];
     vec4 fog_volume_colors[8];
+    vec4 sky[3];
+    vec4 decal_info;
+    mat4 decals[16];
+    vec4 decal_axes[16];
+    vec4 decal_colors[16];
 } shadow;
 layout(set = 2, binding = 2) uniform sampler2D environment_map;
 layout(set = 2, binding = 3) uniform sampler2D scene_color;
@@ -9690,6 +9785,32 @@ vec3 cookie_at(int slot, vec2 uv) {
     if (slot == 1) return texture(cookies[1], uv).rgb;
     if (slot == 2) return texture(cookies[2], uv).rgb;
     return texture(cookies[3], uv).rgb;
+}
+// Decal images; decal_axes[i].w picks one. Matches MAX_DECAL_IMAGES.
+layout(set = 2, binding = 9) uniform sampler2D decal_images[4];
+vec4 decal_at(int slot, vec2 uv) {
+    if (slot < 0) return vec4(1.0);
+    if (slot == 0) return texture(decal_images[0], uv);
+    if (slot == 1) return texture(decal_images[1], uv);
+    if (slot == 2) return texture(decal_images[2], uv);
+    return texture(decal_images[3], uv);
+}
+// `color` with every decal whose box holds `position` painted over it in
+// order, faded out on surfaces turned away from the projection.
+vec3 paint_decals(vec3 color, vec3 position, vec3 normal) {
+    for (int i = 0; i < int(shadow.decal_info.x); ++i) {
+        vec3 p = (shadow.decals[i] * vec4(position, 1.0)).xyz;
+        if (any(greaterThan(abs(p), vec3(1.0)))) {
+            continue;
+        }
+        float facing = dot(normal, shadow.decal_axes[i].xyz);
+        // Image top along +Y; texture rows run down.
+        vec4 paint = decal_at(int(floor(shadow.decal_axes[i].w + 0.5)),
+            vec2(p.x, -p.y) * 0.5 + 0.5) * shadow.decal_colors[i];
+        color = mix(color, paint.rgb,
+            clamp(paint.a, 0.0, 1.0) * smoothstep(0.1, 0.3, facing));
+    }
+    return color;
 }
 #include "fog.glsl"
 // 0 opaque, 1 blended, 2 screen-space reflection overlay on opaque surfaces.
@@ -9912,6 +10033,8 @@ void main() {
         discard;
     }
     float alpha = v_alpha.x == 2u ? base_color.a : 1.0;
+    base_color.rgb = paint_decals(base_color.rgb, v_world_position,
+        normalize(v_normal));
     // Opacity 0 draws nothing: reflections are not scaled by alpha, so a
     // fully clear surface would otherwise still show a faint mirror.
     if (v_alpha.x == 2u && alpha <= 0.0 && v_transmission.x <= 0.0) {
@@ -12789,6 +12912,99 @@ mod tests {
                 "occluder shadows the floor from {light:?}, got {shadowed}"
             );
         }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn decals_paint_their_image_on_surfaces_facing_the_projection() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // An unlit grey floor under a decal of four colored quadrants that
+        // fills the 2 m view; each screen quadrant shows its image quadrant.
+        let extent = [16, 16];
+        let mut scene = SlabScene::with_extent(
+            &[(
+                0.0,
+                MaterialAsset {
+                    model: MaterialModel::Unlit,
+                    base_color: [0.2, 0.2, 0.2, 1.0],
+                    ..MaterialAsset::default()
+                },
+            )],
+            extent,
+        );
+        let quadrant = |x: u32, y: u32| match (x < 8, y < 8) {
+            (true, true) => [255, 0, 0, 255],
+            (false, true) => [0, 255, 0, 255],
+            (true, false) => [0, 0, 255, 255],
+            (false, false) => [255, 255, 255, 255],
+        };
+        let image = scene.assets.textures.insert(TextureAsset {
+            size: [16, 16],
+            rgba8: (0..16)
+                .flat_map(|y| (0..16).flat_map(move |x| quadrant(x, y)))
+                .collect(),
+            color_space: TextureColorSpace::Srgb,
+            sampler: TextureSampler::default(),
+        });
+        let decal = |matrix: Matrix4<f32>, decal| {
+            let scale = Vector3::new(1.0, 1.0, 0.5);
+            (matrix.prepend_nonuniform_scaling(&scale).into(), decal)
+        };
+        let image_decal = crate::runtime::Decal {
+            handle: Some(image),
+            ..crate::runtime::Decal::default()
+        };
+        let render = |scene: &mut SlabScene| {
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            move |x: u32, y: u32| {
+                let at = ((y * extent[0] + x) * 4) as usize;
+                [pixels[at + 2], pixels[at + 1], pixels[at]]
+            }
+        };
+        let bright = |pixel: [u8; 3]| pixel.map(|c| c > 150);
+
+        scene.render_world.decals =
+            vec![decal(Matrix4::identity(), image_decal.clone())];
+        let pixel = render(&mut scene);
+        assert_eq!(bright(pixel(4, 4)), [true, false, false], "top left");
+        assert_eq!(bright(pixel(11, 4)), [false, true, false], "top right");
+        assert_eq!(bright(pixel(4, 11)), [false, false, true], "bottom left");
+        assert_eq!(bright(pixel(11, 11)), [true; 3], "bottom right");
+
+        // Turned to project up, away from the floor: nothing is painted.
+        scene.render_world.decals = vec![decal(
+            Matrix4::from_euler_angles(std::f32::consts::PI, 0.0, 0.0),
+            image_decal,
+        )];
+        let pixel = render(&mut scene);
+        let grey = pixel(4, 4);
+        assert!(grey.iter().all(|&c| c > 50 && c < 150), "{grey:?}");
+
+        // A plain half-transparent red decal over the right half only.
+        scene.render_world.decals = vec![decal(
+            Matrix4::new_translation(&Vector3::new(1.0, 0.0, 0.0)),
+            crate::runtime::Decal {
+                color: [1.0, 0.0, 0.0, 0.5],
+                ..crate::runtime::Decal::default()
+            },
+        )];
+        let pixel = render(&mut scene);
+        assert_eq!(pixel(4, 8), grey, "left half untouched");
+        let right = pixel(11, 8);
+        assert!(right[0] > grey[0] + 40 && right[1] < grey[1], "{right:?}");
     }
 
     #[test]

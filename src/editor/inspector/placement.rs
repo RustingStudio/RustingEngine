@@ -16,7 +16,7 @@ use crate::runtime::{
     DirectionalLight, Fog, MeshRenderer, Name, PointLight, SceneBackground,
     SkyLight, SpotLight, ToneMapping, AMBIENT_LIGHT_COMPONENT,
     AMBIENT_OCCLUSION_COMPONENT, AUTO_EXPOSURE_COMPONENT, BACKGROUND_COMPONENT,
-    BLOOM_COMPONENT, ENVIRONMENT_MAP_COMPONENT, FOG_COMPONENT,
+    BLOOM_COMPONENT, DECAL_COMPONENT, ENVIRONMENT_MAP_COMPONENT, FOG_COMPONENT,
     FOG_VOLUME_COMPONENT, HUD_ELEMENT_COMPONENT, POST_VOLUME_COMPONENT,
     PROCEDURAL_SKY_COMPONENT, SKY_LIGHT_COMPONENT, TILE_MAP_COMPONENT,
     TONE_MAPPING_COMPONENT,
@@ -428,6 +428,10 @@ pub(in crate::editor) fn component_help(
         PROCEDURAL_SKY_COMPONENT => (
             "Draws a daylight sky that follows the sun and lights the scene.",
             "Outdoor levels, day-night cycles.",
+        ),
+        DECAL_COMPONENT => (
+            "Paints an image onto the surfaces inside a box.",
+            "Posters, cracks, stains, road markings.",
         ),
         FOG_VOLUME_COMPONENT => (
             "Fills a box around this object with fog, seen from outside too.",

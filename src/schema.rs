@@ -862,6 +862,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"color": [0.6, 0.6, 0.65], "density": 0.5, "extents": [2.0, 2.0, 2.0]}),
     },
     ComponentSection {
+        key: "rusting.decal",
+        summary: "Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain. color (linear rgba) multiplies the image and its alpha scales the coverage; an empty texture paints plain color. Surfaces facing away from the projection are left alone. Later decals in entity order paint over earlier ones; the renderer uses the first sixteen, with at most four distinct images.",
+        gpu: "a box test per decal per lit pixel, plus one texture sample inside a box",
+        example: || json!({"texture": "decals/crack.png", "color": [1.0, 1.0, 1.0, 1.0], "extents": [0.5, 0.5, 0.25]}),
+    },
+    ComponentSection {
         key: "rusting.post_volume",
         summary: "Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside. Higher priority wins where volumes overlap. Fog and grading without a volume apply everywhere else; a hall with fog and a sickly grade and an office with a warm grade each get one.",
         gpu: NO_GPU,

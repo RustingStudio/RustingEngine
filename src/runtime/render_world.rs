@@ -153,6 +153,10 @@ pub struct RenderWorld {
     /// Box-to-world matrix (transform times half size) and settings of
     /// each [`FogVolume`](super::FogVolume), in entity order.
     pub fog_volumes: Vec<([[f32; 4]; 4], super::FogVolume)>,
+    /// Box-to-world matrix (transform times half size) and settings of
+    /// each [`Decal`](super::Decal) whose image is loaded or that has none,
+    /// in entity order.
+    pub decals: Vec<([[f32; 4]; 4], super::Decal)>,
     pub bloom: Option<super::Bloom>,
     pub auto_exposure: Option<super::AutoExposure>,
     pub depth_of_field: Option<super::DepthOfField>,
@@ -340,6 +344,29 @@ pub fn extract_render_world(world: &mut World) {
             .map(|(_, matrix, volume)| (matrix, volume))
             .collect()
     };
+    let decals = {
+        let mut query =
+            world.query::<(Entity, &GlobalTransform, &super::Decal)>();
+        let mut decals = query
+            .iter(world)
+            .filter(|(_, _, decal)| {
+                decal.handle.is_some() || decal.texture.as_os_str().is_empty()
+            })
+            .map(|(entity, transform, decal)| {
+                let [x, y, z] = decal.extents;
+                let matrix = nalgebra::Matrix4::from(transform.matrix)
+                    * nalgebra::Matrix4::new_nonuniform_scaling(
+                        &nalgebra::Vector3::new(x, y, z),
+                    );
+                (entity.index(), matrix.into(), decal.clone())
+            })
+            .collect::<Vec<_>>();
+        decals.sort_by_key(|(entity, ..)| *entity);
+        decals
+            .into_iter()
+            .map(|(_, matrix, decal)| (matrix, decal))
+            .collect()
+    };
     let tone_mapping = collect_first::<ToneMapping>(world);
     let procedural_sky = collect_first::<super::ProceduralSky>(world);
     let eye = active_camera.as_ref().map(|camera| {
@@ -521,6 +548,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.fog = fog;
     render_world.procedural_sky = procedural_sky;
     render_world.fog_volumes = fog_volumes;
+    render_world.decals = decals;
     render_world.bloom = bloom;
     render_world.auto_exposure = auto_exposure;
     render_world.depth_of_field = depth_of_field;
@@ -1279,6 +1307,33 @@ mod tests {
             (saturation - 1.0).abs() < 1e-6,
             "half way, got {saturation}"
         );
+    }
+
+    #[test]
+    fn decals_wait_for_their_image() {
+        use crate::runtime::Decal;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        app.spawn((
+            Transform::default(),
+            Decal {
+                texture: "missing.png".into(),
+                ..Decal::default()
+            },
+        ));
+        app.spawn((
+            Transform::new([1.0, 0.0, 0.0]),
+            Decal {
+                extents: [2.0, 1.0, 0.5],
+                ..Decal::default()
+            },
+        ));
+        app.update(Duration::ZERO).unwrap();
+        let decals = &app.world().resource::<RenderWorld>().decals;
+        assert_eq!(decals.len(), 1, "the unloaded image is skipped");
+        let corner = nalgebra::Matrix4::from(decals[0].0)
+            * nalgebra::Vector4::new(1.0, 1.0, 1.0, 1.0);
+        assert_eq!(corner, nalgebra::Vector4::new(3.0, 1.0, 0.5, 1.0));
     }
 
     #[test]

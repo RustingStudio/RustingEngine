@@ -2734,6 +2734,20 @@ Depends on: Milestones 3 and 4.
 - [ ] GPU particle system reusing the physics compute infrastructure, with collision against physics shapes, attractors, sub-emitters, and trails.
 - [ ] Particle emission driven by physics events: impacts, fracture, debris settling.
 - [ ] Decals, including decals that survive or are invalidated by fracture.
+  Partial (lane/render): `rusting.decal` projects an image (or plain color)
+  along its object's -Z into a box of half size `extents`, painting base
+  color on surfaces facing the projection; up to 16 decals and 4 distinct
+  images per frame (set 2 binding 9), later ones over earlier.
+  Evidence: GPU test
+  `decals_paint_their_image_on_surfaces_facing_the_projection` (image
+  quadrants land on the matching screen quadrants, a decal turned away
+  paints nothing, a half-alpha color decal tints only its box); unit test
+  `decals_wait_for_their_image`. Mutations (flipped uv, no facing fade, no
+  box test) each fail the GPU test. Full check: workspace lib 872 passed,
+  gpu-tests run 994 passed.
+  Not done: fracture survival or invalidation (the engine has no fracture
+  yet), decal normals and roughness, decals on skinned or moving objects
+  following them.
 - [ ] Instanced multi-mesh rendering and foliage scattering with wind driven by physics force fields.
 - [ ] Heightmap terrain rendering with texture splatting and LOD.
 - [ ] Automatic mesh LOD generation at import.
