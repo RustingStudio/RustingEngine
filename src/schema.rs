@@ -1812,7 +1812,7 @@ mod tests {
         );
     }
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::runtime::{
@@ -1890,6 +1890,155 @@ mod tests {
         {
             assert_eq!(schemas[name]["$schema"], JSON_SCHEMA_DRAFT, "{name}");
         }
+    }
+
+    /// Where `value` breaks `schema`, for the keywords `json_schemas` uses.
+    fn violations(schema: &Value, value: &Value, at: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut fail = |what: String| out.push(format!("{at}: {what}"));
+        if schema.get("const").is_some_and(|wanted| wanted != value) {
+            fail(format!("is not {}", schema["const"]));
+        }
+        let is = |kind: &str| match kind {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => panic!("unknown type {kind}"),
+        };
+        let kinds = match &schema["type"] {
+            Value::String(kind) => vec![kind.as_str()],
+            Value::Array(kinds) => {
+                kinds.iter().filter_map(Value::as_str).collect()
+            }
+            _ => Vec::new(),
+        };
+        if !kinds.is_empty() && !kinds.iter().any(|kind| is(kind)) {
+            fail(format!("is not {kinds:?}"));
+            return out;
+        }
+        let number = value.as_f64();
+        if let (Some(n), Some(min)) = (number, schema["minimum"].as_f64()) {
+            if n < min {
+                fail(format!("is below {min}"));
+            }
+        }
+        if let (Some(n), Some(max)) = (number, schema["maximum"].as_f64()) {
+            if n > max {
+                fail(format!("is above {max}"));
+            }
+        }
+        if let Some(object) = value.as_object() {
+            for key in schema["required"].as_array().into_iter().flatten() {
+                if !object.contains_key(key.as_str().unwrap()) {
+                    fail(format!("misses {key}"));
+                }
+            }
+            for (key, item) in object {
+                let at = format!("{at}/{key}");
+                match (
+                    &schema["properties"][key],
+                    &schema["additionalProperties"],
+                ) {
+                    (Value::Null, Value::Bool(false)) => {
+                        out.push(format!("{at}: is not allowed"))
+                    }
+                    (Value::Null, Value::Null) => {}
+                    (Value::Null, other) | (other, _) => {
+                        out.extend(violations(other, item, &at))
+                    }
+                }
+            }
+        }
+        if let Some(items) = value.as_array() {
+            let count = items.len() as u64;
+            if schema["minItems"].as_u64().is_some_and(|min| count < min)
+                || schema["maxItems"].as_u64().is_some_and(|max| count > max)
+            {
+                out.push(format!("{at}: has {count} items"));
+            }
+            if !schema["items"].is_null() {
+                for (index, item) in items.iter().enumerate() {
+                    out.extend(violations(
+                        &schema["items"],
+                        item,
+                        &format!("{at}/{index}"),
+                    ));
+                }
+            }
+        }
+        if let Some(branches) = schema["oneOf"].as_array() {
+            let matching = branches
+                .iter()
+                .filter(|branch| violations(branch, value, at).is_empty())
+                .count();
+            if matching != 1 {
+                out.push(format!("{at}: matches {matching} of oneOf"));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn json_schemas_validate_every_scene_patch_scenario_and_project() {
+        let schemas = json_schemas();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        let mut folders = vec![root.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(folder).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy();
+                if path.is_dir() {
+                    if !name.starts_with('.') && name != "target" {
+                        folders.push(path);
+                    }
+                } else if name.ends_with(".json") || name.ends_with(".rscene") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut checked = BTreeMap::<&str, usize>::new();
+        let mut check = |kind: &'static str, value: &Value, origin: &str| {
+            *checked.entry(kind).or_default() += 1;
+            let found = violations(&schemas[kind], value, "");
+            assert!(
+                found.is_empty(),
+                "{origin} breaks the {kind} schema: {found:?}"
+            );
+        };
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let value: Value = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let kind = if value.get("entities").is_some() {
+                "scene"
+            } else if value.get("operations").is_some() {
+                "scene_patch"
+            } else if value.get("ticks").is_some() {
+                "scenario"
+            } else if path.ends_with("project.json") {
+                "project"
+            } else {
+                continue;
+            };
+            check(kind, &value, &path.display().to_string());
+        }
+        for info in crate::diagnostics::CODES {
+            if info.example.starts_with('{') {
+                let value = serde_json::from_str(info.example).unwrap();
+                check("scene_patch", &value, info.code);
+            }
+        }
+        // A broken document must not pass.
+        let bad = json!({"operations": [{"op": "set", "path": 3}]});
+        assert!(!violations(&schemas["scene_patch"], &bad, "").is_empty());
+        let counts: Vec<_> = checked.values().copied().collect();
+        assert!(counts.iter().all(|&count| count >= 10), "{checked:?}");
+        assert_eq!(counts.len(), 4, "{checked:?}");
     }
 
     #[test]
