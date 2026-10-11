@@ -49,6 +49,8 @@ were run against this version of the engine.
   builds the full reference; CI fails on a broken link in it.
 - [Assets](assets.md): importing images, models and sounds with their
   license record, generating assets, and exporting the game.
+- [Platforms](platforms.md): supported systems, and why web, iOS and
+  consoles wait until after 1.0.
 - [2D games](2d.md): orthographic cameras, sprites, tile maps, platformer
   movement and bodies kept in the plane.
 - [Input](input.md): actions bound to keys, mouse and gamepad, reading

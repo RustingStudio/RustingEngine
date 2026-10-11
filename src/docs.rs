@@ -134,6 +134,11 @@ const PAGES: &[(&str, &str, &str)] = &[
         "guide",
         include_str!("../docs/plugin-authoring.md"),
     ),
+    (
+        "guide/platforms",
+        "guide",
+        include_str!("../docs/platforms.md"),
+    ),
 ];
 
 /// Sample games shipped with the engine: name, README and game code.
