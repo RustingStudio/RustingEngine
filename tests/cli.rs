@@ -1794,3 +1794,116 @@ fn scene_retarget_saves_a_clip_on_the_other_rig() {
     assert_eq!(missing["diagnostics"][0]["code"], "RETARGET_FAILED");
     std::fs::remove_dir_all(parent).unwrap();
 }
+
+/// Fenced code blocks of the agent guides as `(language, body)`.
+fn guide_blocks() -> Vec<(&'static str, &'static str)> {
+    let skill = include_str!("../skills/rusting-game/SKILL.md");
+    let agents = include_str!("../src/project_agents.md");
+    [skill, agents]
+        .iter()
+        .flat_map(|text| text.split("```").skip(1).step_by(2))
+        .map(|block| block.split_once('\n').unwrap())
+        .collect()
+}
+
+#[test]
+fn agent_guide_examples_run_in_a_new_project() {
+    let parent = temporary_parent();
+    let project = generated_project(&parent);
+    let cli = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(args)
+            .arg("--json")
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8(output.stdout).unwrap(),
+        )
+    };
+    let (mut patches, mut scenarios) = (0, 0);
+    for (language, body) in guide_blocks() {
+        if language != "json" {
+            continue;
+        }
+        if body.contains("\"operations\"") {
+            std::fs::write(project.join("patch.json"), body).unwrap();
+            let (ok, out) = cli(&[
+                "scene",
+                "patch",
+                "scenes/main.rscene",
+                "patch.json",
+                "--dry-run",
+            ]);
+            assert!(ok, "{body}\n{out}");
+            patches += 1;
+        } else {
+            // Scenarios name a guide's example game, so they only parse.
+            serde_json::from_str::<rusting_engine::scenario::Scenario>(body)
+                .unwrap_or_else(|e| panic!("{body}\n{e}"));
+            scenarios += 1;
+        }
+    }
+    assert!(patches > 0 && scenarios > 0);
+    // Commands with no placeholder that write nothing must succeed.
+    let skill = include_str!("../skills/rusting-game/SKILL.md");
+    let agents = include_str!("../src/project_agents.md");
+    let mut ran = 0;
+    for code in [skill, agents]
+        .iter()
+        .flat_map(|text| text.split('`').skip(1).step_by(2))
+    {
+        let Some(args) = code.strip_prefix("rusting ") else {
+            continue;
+        };
+        let args: Vec<&str> = args.split_whitespace().collect();
+        let placeholder = args.iter().any(|arg| {
+            arg.contains(['<', '[', ','])
+                || arg.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                    && !arg.contains('_')
+        });
+        let quiet = rusting_engine::cli::READ_ONLY_COMMANDS
+            .iter()
+            .any(|command| args.starts_with(command))
+            || args == ["fix", "--dry-run"];
+        if placeholder || !quiet || args.iter().any(|a| a.contains("build/")) {
+            continue;
+        }
+        let (ok, out) = cli(&args);
+        assert!(ok, "`{code}` fails: {out}");
+        ran += 1;
+    }
+    assert!(ran > 15, "only {ran} commands ran");
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+/// Each whole game in the agent guides builds as a project's `main.rs`.
+#[test]
+#[ignore = "runs real cargo builds of a generated project"]
+fn agent_guide_games_build() {
+    let parent = temporary_parent();
+    let project = generated_project(&parent);
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/cli-games");
+    let mut built = 0;
+    for (language, body) in guide_blocks() {
+        if language != "rust" || !body.contains("rusting_game!(update)") {
+            continue;
+        }
+        std::fs::write(project.join("src/main.rs"), body).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(["check", ".", "--json"])
+            .current_dir(&project)
+            .env("CARGO_TARGET_DIR", &target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{body}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        built += 1;
+    }
+    assert!(built >= 2, "only {built} games");
+    let _ = std::fs::remove_dir_all(&parent);
+}
