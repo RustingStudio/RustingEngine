@@ -1505,6 +1505,7 @@ pub fn json_schemas() -> Value {
                     "properties": {"tick": {"type": "integer", "minimum": 0}},
                     "required": ["tick"]}},
                 "keep_going": {"type": "boolean"},
+                "realtime": {"type": "boolean"},
                 "annotate": {"type": "boolean"},
                 "contact_sheet": {"type": "string"},
                 "audio_out": {"type": "string"},

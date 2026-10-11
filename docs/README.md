@@ -28,6 +28,9 @@ were run against this version of the engine.
 5. [Physics sandbox](tutorials/05-physics-sandbox.md): make a ball bouncy,
    throw balls from the camera with an input action, test it first, and
    check that debug and release builds simulate the same.
+6. [Multiplayer physics](tutorials/06-multiplayer-physics.md): turn the
+   sandbox into a networked game with a dedicated server, and test a client
+   against it.
 
 ## Guides and reference
 

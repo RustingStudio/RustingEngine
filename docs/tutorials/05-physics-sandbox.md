@@ -228,3 +228,6 @@ generator, and do not read the wall clock in gameplay code. See
   `set_linear_velocity`.
 - Test-first scenarios with `tap`, `counter`, and `exists` checks.
 - `rusting determinism` to prove debug and release builds agree.
+
+Next, [Tutorial 6](06-multiplayer-physics.md) turns this sandbox into a
+multiplayer game.
