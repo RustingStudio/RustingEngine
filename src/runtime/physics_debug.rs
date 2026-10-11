@@ -3,8 +3,9 @@
 //! [`PhysicsWorld::debug_draw`] draws every collider as a wireframe
 //! coloured by its state ([`colors`]), each contact as a cross with its
 //! normal, each solver contact point's normal impulse (as the push on one
-//! of the pair), and each joint as a line
-//! between its two anchors. GPU bodies show at their read-back pose, since
+//! of the pair), each joint as a line
+//! between its two anchors, and each contact island of two or more bodies
+//! as a box around them. GPU bodies show at their read-back pose, since
 //! the CPU world keeps them as proxies.
 //!
 //! The editor draws it in the Scene view while a [`PhysicsDebugDraw`]
@@ -27,6 +28,7 @@ pub struct PhysicsDebugDraw {
     pub contacts: bool,
     pub impulses: bool,
     pub joints: bool,
+    pub islands: bool,
 }
 
 impl Default for PhysicsDebugDraw {
@@ -36,6 +38,7 @@ impl Default for PhysicsDebugDraw {
             contacts: true,
             impulses: true,
             joints: true,
+            islands: true,
         }
     }
 }
@@ -52,6 +55,7 @@ pub mod colors {
     pub const CONTACT: [f32; 4] = [1.0, 0.25, 0.2, 1.0];
     pub const IMPULSE: [f32; 4] = [1.0, 0.9, 0.2, 1.0];
     pub const JOINT: [f32; 4] = [0.3, 0.6, 1.0, 1.0];
+    pub const ISLAND: [f32; 4] = [1.0, 1.0, 1.0, 0.5];
 }
 
 /// Length of a contact normal, in metres.
@@ -64,7 +68,7 @@ const CROSS: f32 = 0.05;
 const CIRCLE_SEGMENTS: usize = 16;
 
 impl PhysicsWorld {
-    /// Adds the last step's colliders, contacts, impulses and joints, as
+    /// Adds the last step's colliders, contacts, impulses, joints and islands, as
     /// chosen by `settings`, to `overlay`. Reads [`Joint`]s from `world`.
     pub fn debug_draw(
         &self,
@@ -150,6 +154,84 @@ impl PhysicsWorld {
                 overlay.line_on_top(start, end, colors::JOINT, 2.0);
             }
         }
+        if settings.islands {
+            for [low, high] in self.island_boxes(world) {
+                let center = (low + high) / 2.0;
+                wire(
+                    &Shape::Box((high - low) / 2.0),
+                    center,
+                    Rotation3::identity(),
+                    &mut lines,
+                );
+            }
+            for [start, end] in lines.drain(..) {
+                overlay.line(start, end, colors::ISLAND);
+            }
+        }
+    }
+
+    /// World boxes around each island of two or more dynamic bodies that
+    /// touch or are jointed, in the order of their first body. Fixed,
+    /// kinematic, sensor and GPU bodies split islands, as in the solver.
+    // ponytail: articulation links join an island only through contacts;
+    // add their tree edges if articulated islands need to show whole.
+    fn island_boxes(&self, world: &World) -> Vec<[Vector3<f32>; 2]> {
+        let member = |body: &Body| {
+            body.kind == RigidBodyKind::Dynamic && !body.proxy && !body.sensor
+        };
+        let index: HashMap<Entity, usize> = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, body)| member(body))
+            .map(|(index, body)| (body.entity, index))
+            .collect();
+        let mut parent: Vec<usize> = (0..self.bodies.len()).collect();
+        fn root(parent: &mut [usize], mut at: usize) -> usize {
+            while parent[at] != at {
+                parent[at] = parent[parent[at]];
+                at = parent[at];
+            }
+            at
+        }
+        let mut join = |a: Entity, b: Entity| {
+            if let (Some(&a), Some(&b)) = (index.get(&a), index.get(&b)) {
+                let (a, b) = (root(&mut parent, a), root(&mut parent, b));
+                parent[a.max(b)] = a.min(b);
+            }
+        };
+        for contact in self.contacts.iter().filter(|c| !c.sensor) {
+            join(contact.a, contact.b);
+        }
+        if let Some(mut query) = world.try_query::<(Entity, &Joint)>() {
+            for (entity, joint) in query.iter(world) {
+                join(entity, joint.target);
+            }
+        }
+        // Each island's box and body count, in the order of its first body.
+        let mut boxes: Vec<([Vector3<f32>; 2], usize)> = Vec::new();
+        let mut slot = HashMap::new();
+        for (at, body) in self.bodies.iter().enumerate() {
+            if !member(body) {
+                continue;
+            }
+            let top = root(&mut parent, at);
+            let reach = Vector3::repeat(body.bounding_radius());
+            let (low, high) = (body.position - reach, body.position + reach);
+            let island = *slot.entry(top).or_insert_with(|| {
+                boxes.push(([low, high], 0));
+                boxes.len() - 1
+            });
+            let ([min, max], count) = &mut boxes[island];
+            *min = min.inf(&low);
+            *max = max.sup(&high);
+            *count += 1;
+        }
+        boxes
+            .into_iter()
+            .filter(|&(_, count)| count > 1)
+            .map(|(bounds, _)| bounds)
+            .collect()
     }
 }
 
@@ -378,5 +460,49 @@ mod tests {
         assert!(app.world().get::<Sleeping>(crate_box).is_some());
         let lines = draw(&app);
         assert!(count(&lines, colors::SLEEPING) >= 12);
+    }
+
+    #[test]
+    fn debug_draw_boxes_islands_of_touching_and_jointed_bodies() {
+        let mut app = App::new();
+        body(&mut app, -0.5, [20.0, 0.5, 20.0], RigidBodyKind::Fixed);
+        // Two crates stacked on the ground: one island, since the ground
+        // does not join islands.
+        body(&mut app, 0.5, [0.5; 3], RigidBodyKind::Dynamic);
+        body(&mut app, 1.5, [0.5; 3], RigidBodyKind::Dynamic);
+        // A crate alone on the ground: no box of its own.
+        let lone = body(&mut app, 0.5, [0.5; 3], RigidBodyKind::Dynamic);
+        app.world_mut().get_mut::<Transform>(lone).unwrap().position[0] = 10.0;
+        // Two boxes jointed in the air, apart: one island.
+        let upper = body(&mut app, 8.0, [0.2; 3], RigidBodyKind::Dynamic);
+        let lower = body(&mut app, 6.0, [0.2; 3], RigidBodyKind::Dynamic);
+        for (entity, x) in [(upper, -10.0), (lower, -10.0)] {
+            app.world_mut()
+                .get_mut::<Transform>(entity)
+                .unwrap()
+                .position[0] = x;
+        }
+        app.world_mut().entity_mut(lower).insert(Joint::new(
+            JointKind::default(),
+            upper,
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ));
+        app.update(Duration::from_secs_f64(1.0 / 60.0)).unwrap();
+
+        let mut boxes = app
+            .world()
+            .resource::<PhysicsWorld>()
+            .island_boxes(app.world());
+        boxes.sort_by(|a, b| b[0].x.total_cmp(&a[0].x));
+        assert_eq!(boxes.len(), 2, "{boxes:?}");
+        let [low, high] = boxes[0];
+        assert!(low.x < -0.5 && high.x > 0.5 && high.x < 2.0, "{boxes:?}");
+        assert!(low.y < 0.0 && high.y > 2.0, "{boxes:?}");
+        let [low, high] = boxes[1];
+        assert!(low.x < -10.0 && high.x > -10.0, "{boxes:?}");
+        assert!(low.y < 6.0 && high.y > 8.0, "{boxes:?}");
+        // Each island is drawn as one 12-edge box.
+        assert_eq!(count(&draw(&app), colors::ISLAND), 24);
     }
 }
