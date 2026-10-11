@@ -4126,7 +4126,7 @@ Depends on: Milestones 3, 4, and 21.
 - [ ] Delta snapshot encoding and decoding round-trip correctly.
 - [ ] Bandwidth stays within the per-client budget during maximum destruction.
 - [ ] Mid-match disconnect and reconnect resynchronizes correctly.
-- [ ] Protocol version mismatch is rejected at connect time.
+- [x] Protocol version mismatch is rejected at connect time. Done 2026-10-11: every JOIN and HOST_ROOM starts with `PROTOCOL_VERSION`, and `check_version` answers anything else with a REJECT naming both versions before the peer gets an id. Evidence: unit test `net::tests::a_host_refuses_another_protocol_version`, extended: a direct host refuses version 99 and never reports the client as connected; a relay refuses a version-99 HOST_ROOM, a version-99 JOIN to a live room, and a JOIN too short to hold a version (`missing protocol version`), and the room's host never sees a refused client. Full check: fmt, clippy (default, no-default-features, gpu-tests), rustdoc, tests (lib 891, 1008 with gpu-tests) green.
 - [ ] A client reporting an impossible position or terrain state is rejected by the server.
 
 ### Terrain and navigation tests

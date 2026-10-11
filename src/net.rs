@@ -1678,12 +1678,38 @@ mod tests {
     fn a_host_refuses_another_protocol_version() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let _host = NetSession::host_on(listener, "").unwrap();
+        let direct = NetSession::host_on(listener, "").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
         write_frame(&mut stream, JOIN, HOST, &99u16.to_le_bytes()).unwrap();
         let (kind, _, reason) = read_frame(&mut stream, MAX_MESSAGE).unwrap();
         assert_eq!(kind, REJECT);
         assert!(String::from_utf8_lossy(&reason).contains("99"));
+        assert!(direct.poll().is_empty(), "a refused client never joins");
+
+        // A relay refuses an old host and an old client the same way, and
+        // a payload too short to hold a version.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = listener.local_addr().unwrap();
+        std::thread::spawn(move || run_relay(listener, ""));
+        let host = NetSession::host_room(relay, "").unwrap();
+        let code = host.room_code().unwrap().to_owned();
+        let mut old_join = 99u16.to_le_bytes().to_vec();
+        old_join.push(u8::try_from(code.len()).unwrap());
+        old_join.extend(code.as_bytes());
+        for (kind, payload, expected) in [
+            (HOST_ROOM, 99u16.to_le_bytes().to_vec(), "99"),
+            (JOIN, old_join, "99"),
+            (JOIN, vec![1], "missing protocol version"),
+        ] {
+            let mut stream = TcpStream::connect(relay).unwrap();
+            write_frame(&mut stream, kind, HOST, &payload).unwrap();
+            let (answer, _, reason) =
+                read_frame(&mut stream, MAX_MESSAGE).unwrap();
+            assert_eq!(answer, REJECT);
+            let reason = String::from_utf8_lossy(&reason);
+            assert!(reason.contains(expected), "{reason}");
+        }
+        assert!(host.poll().is_empty(), "a refused client never joins");
     }
 
     #[test]
