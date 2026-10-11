@@ -2337,6 +2337,8 @@ Depends on: Milestones 5, 6, and 10. Deformable and fluid tooling follows Milest
 ### Physics debugger
 
 - [ ] Debug draw for shapes, contacts, normals, impulses, joints, islands, sleeping state, broad-phase cells, and GPU ownership.
+  - [x] Shapes, contacts, normals, impulses, joints, sleeping state and GPU ownership. `PhysicsWorld::debug_draw` adds the last step's collider wireframes to a `RenderDebugOverlay`, coloured by kind, sleep, sensor and GPU ownership (`physics_debug_colors`). It also draws contact crosses with their normals, solver normal impulses at each manifold point, and joint anchors with the link between them. The editor Scene view draws it while a `PhysicsDebugDraw` resource exists; the header toggle is in the `docs/editor-overhaul.md` backlog. Evidence: `physics_debug::tests::debug_draw_shows_shapes_contacts_impulses_joints_and_sleep`. It checks 12 edges per box in the right colour, a GPU-owned body, a contact cross and normal, four upward impulses under a resting crate, joint anchors at both ends, and the sleeping colour once the crate sleeps. fmt, all three clippy configurations, `cargo test --workspace` (lib 900) and the gpu-tests run (lib 1019) pass.
+  - [ ] Islands and broad-phase cells. The CPU solver builds its contact islands inside the step and keeps none; draw them once the step records them, and draw broad-phase cells when the shared GPU broad phase drives the solvers.
 - [ ] Record physics sessions (from play mode or a running game) and scrub a timeline tick by tick, using Milestone 8 replay.
 - [ ] Per-body inspector showing state history, contacts, applied forces, owning solver, sync mode, and readback age.
 - [ ] Remote physics debugging of a running game process from the editor.

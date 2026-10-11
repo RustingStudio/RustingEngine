@@ -48,11 +48,14 @@ use crate::Transform;
 mod articulation;
 #[path = "joints.rs"]
 mod joints;
+#[path = "physics_debug.rs"]
+mod physics_debug;
 pub use articulation::Articulation;
 pub use joints::{
     AxisMotion, Joint, JointAxis, JointBroken, JointKind, JointMotor,
     JointSpring,
 };
+pub use physics_debug::{colors as physics_debug_colors, PhysicsDebugDraw};
 
 /// Replaces the scene gravity for dynamic CPU bodies that overlap this
 /// object's sensor collider, like a Godot `Area3D` gravity override: zero-g

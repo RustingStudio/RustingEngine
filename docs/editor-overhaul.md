@@ -405,3 +405,10 @@ record mode and the rest-pose preview. Later:
   paths shown as warnings, instead of the raw matrix list.
 - Pose mode: rotate joints with the gizmo while the Timeline is in Record,
   without selecting each joint in the Scene tree first.
+
+## Deferred: physics debug draw
+
+- The Scene view draws `PhysicsWorld::debug_draw` while a
+  `PhysicsDebugDraw` resource exists. Left: a Scene view header toggle (an
+  Overlays popover like Blender's) with one checkbox per part (shapes,
+  contacts, impulses, joints), and a color legend.
