@@ -1110,4 +1110,77 @@ mod tests {
             .physics_events_dropped;
         assert_eq!(dropped, lost);
     }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_condition_events_reach_their_entity_with_id_and_payload() {
+        use crate::runtime::{
+            EventQueue, GpuCondition, GpuEventPayload, GpuEventRegistry,
+            GpuPhysicsEvent, GpuPhysicsRule, GpuPhysicsWatch,
+            HybridPhysicsPlugin, PhysicsBody, SimulationClass,
+        };
+
+        let mut app = App::new();
+        app.add_plugin(AssetPlugin).unwrap();
+        app.add_plugin(HybridPhysicsPlugin).unwrap();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        // A despawned entity and an unwatched body keep entity, slot and
+        // spawn order apart.
+        let gone = app.spawn(Transform::default());
+        app.world_mut().despawn(gone);
+        let gpu = || PhysicsBody {
+            simulation: SimulationClass::Gpu,
+            ..PhysicsBody::default()
+        };
+        app.spawn((Transform::new([-4.0, 2.0, 0.0]), gpu()));
+        let watched = |rule| GpuPhysicsWatch { rules: vec![rule] };
+        // Both fall from rest: past 3 m/s after 0.31 s, below 1 m after
+        // 0.45 s.
+        let fast = app.spawn((
+            Transform::new([3.0, 2.0, 0.0]),
+            gpu(),
+            watched(
+                GpuPhysicsRule::new(
+                    "fast",
+                    GpuCondition::velocity_y().less_than(-3.0),
+                )
+                .payload(GpuEventPayload::Velocity),
+            ),
+        ));
+        let low = app.spawn((
+            Transform::new([5.0, 2.0, -1.0]),
+            gpu(),
+            watched(
+                GpuPhysicsRule::new(
+                    "low",
+                    GpuCondition::position_y().less_than(1.0),
+                )
+                .payload(GpuEventPayload::Position),
+            ),
+        ));
+        let mut capture = HeadlessCapture::new([16, 16]).unwrap();
+        let mut events = Vec::new();
+        for _ in 0..45 {
+            capture.frame(&mut app, Duration::from_millis(16)).unwrap();
+            let queue = app.world().resource::<EventQueue<GpuPhysicsEvent>>();
+            events.extend(queue.iter().copied());
+        }
+        let registry = app.world().resource::<GpuEventRegistry>();
+        let [first, second] = events[..] else {
+            panic!("{events:?}");
+        };
+        assert_eq!(first.entity, fast);
+        assert_eq!(first.event_id, registry.id("fast").unwrap());
+        assert!(first.tick < second.tick, "{events:?}");
+        let [_, vy, _, _] = first.payload;
+        assert!((-3.2..-3.0).contains(&vy), "{first:?}");
+        assert_eq!(second.entity, low);
+        assert_eq!(second.event_id, registry.id("low").unwrap());
+        let [x, y, z, _] = second.payload;
+        assert_eq!([x, z], [5.0, -1.0]);
+        assert!((0.9..1.0).contains(&y), "{second:?}");
+    }
 }
