@@ -4093,6 +4093,75 @@ fn state_hash_ignores_resources_that_shift_entity_ids() {
 }
 
 #[test]
+fn presentation_off_leaves_every_tick_hash_unchanged() {
+    let hashes = |presentation: bool| {
+        let mut app = App::new();
+        cpu_ground(app.world_mut());
+        for (i, height) in [1.0, 2.1, 3.2].into_iter().enumerate() {
+            let body = cpu_body(
+                app.world_mut(),
+                [0.1 * i as f32, height, 0.0],
+                UNIT_BOX,
+                RigidBodyKind::Dynamic,
+            );
+            // Its trigger flags are simulation state, so both runs keep
+            // it; only its particles are presentation.
+            app.world_mut().entity_mut(body).insert(BurstEmitter {
+                count: 8,
+                lifetime: 0.5,
+                ..BurstEmitter::default()
+            });
+            if presentation {
+                app.world_mut().entity_mut(body).insert((
+                    SoundCue {
+                        clip: "sounds/land.ogg".into(),
+                        ..SoundCue::default()
+                    },
+                    SlideSound::default(),
+                    ParticleEmitter::default(),
+                ));
+            }
+        }
+        if presentation {
+            app.spawn((Transform::new([0.0, 2.0, 6.0]), Camera::default()));
+            app.spawn((Transform::default(), PointLight::default()));
+            app.spawn((Transform::default(), ReverbZone::default()));
+            app.spawn(HudElement {
+                text: "Score".into(),
+                ..HudElement::default()
+            });
+        }
+        let (mut particles, mut sounds) = (0, 0);
+        for _ in 0..120 {
+            run_fixed_steps(&mut app, 1);
+            sounds += app.world().resource::<EventQueue<SoundEvent>>().len();
+            let world = app.world_mut();
+            let live: Vec<_> = world
+                .query_filtered::<Entity, bevy_ecs::prelude::Or<(
+                    With<BurstParticle>,
+                    With<ParticleSystem>,
+                )>>()
+                .iter(world)
+                .collect();
+            particles += live.len();
+            if !presentation {
+                for entity in live {
+                    world.despawn(entity);
+                }
+            }
+        }
+        let hashes = app.world().resource::<StateHashes>().recent.clone();
+        (hashes, particles, sounds)
+    };
+    let (with, particles, sounds) = hashes(true);
+    assert!(particles > 0 && sounds > 0, "{particles} {sounds}");
+    let (without, _, sounds) = hashes(false);
+    assert_eq!(sounds, 0);
+    assert_eq!(with.len(), 120);
+    assert_eq!(with, without);
+}
+
+#[test]
 fn compare_runs_reports_the_first_divergent_tick_and_body() {
     #[derive(Resource)]
     struct Nudge(u64);
