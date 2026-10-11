@@ -1505,6 +1505,94 @@ fn serve_answers_json_rpc_lines_with_the_cli_envelope() {
 }
 
 #[test]
+fn cli_serve_and_mcp_give_the_same_envelope_for_each_operation() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let project =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/putt_course");
+    // Command words, then the rest of the arguments.
+    let operations: [(&str, &[&str]); 9] = [
+        ("validate", &[]),
+        ("lint", &[]),
+        ("project inspect", &["--summary"]),
+        ("scene inspect", &["scenes/main.rscene", "--limit", "3"]),
+        (
+            "scene query",
+            &["scenes/main.rscene", "--component", "camera"],
+        ),
+        ("scene inspect", &["missing.rscene"]),
+        ("explain", &["SCENE_IO"]),
+        ("schema", &["scene"]),
+        ("asset list", &[]),
+    ];
+    // Sends one request line per operation and reads one reply per line.
+    let talk = |command: &[&str], lines: Vec<String>| -> Vec<Value> {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(command)
+            .current_dir(&project)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        for line in lines {
+            writeln!(stdin, "{line}").unwrap();
+        }
+        drop(stdin);
+        let output = child.wait_with_output().unwrap();
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    let served = talk(
+        &["serve"],
+        operations
+            .iter()
+            .enumerate()
+            .map(|(id, (method, params))| {
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
+            })
+            .collect(),
+    );
+    let called = talk(
+        &["mcp", "."],
+        operations
+            .iter()
+            .enumerate()
+            .map(|(id, (method, params))| {
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": method.replace(' ', "_"), "arguments": {"args": params}}}).to_string()
+            })
+            .collect(),
+    );
+    assert_eq!(served.len(), operations.len());
+    assert_eq!(called.len(), operations.len());
+    for (id, (method, params)) in operations.iter().enumerate() {
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(method.split(' '))
+            .args(*params)
+            .arg("--json")
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mcp: Value = serde_json::from_str(
+            called[id]["result"]["content"][0]["text"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(served[id]["result"], cli, "serve differs on {method}");
+        assert_eq!(mcp, cli, "mcp differs on {method}");
+        assert_eq!(
+            called[id]["result"]["isError"],
+            !cli["ok"].as_bool().unwrap(),
+        );
+    }
+    assert_eq!(served[5]["result"]["ok"], false);
+}
+
+#[test]
 #[ignore = "runs a real cargo build of a generated project"]
 fn debug_session_steps_and_inspects_a_running_game() {
     use std::io::Write;

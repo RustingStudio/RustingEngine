@@ -4147,7 +4147,7 @@ Depends on: Milestones 3, 4, and 21.
 - [ ] The generated skill file and `AGENTS.md` match the current schema and API index.
 - [ ] JSON Schema files validate every scene, patch, and scenario in the repository.
 - [ ] Every sample passes `rusting lint`, its invariants, a 100-seed fuzz run, and the scenario strength check.
-- [ ] CLI, daemon, and MCP adapter return identical results for the same operation.
+- [x] CLI, daemon, and MCP adapter return identical results for the same operation. Done 2026-10-11: new `tests/cli.rs` `cli_serve_and_mcp_give_the_same_envelope_for_each_operation` runs nine operations (validate, lint, project inspect, scene inspect, scene query, a failing scene inspect, explain, schema, asset list) in `samples/putt_course` through `rusting ... --json`, one `rusting serve` session and one `rusting mcp .` session, and asserts the three envelopes are equal and MCP `isError` matches `ok`. Full check: fmt, clippy (default, no-default-features, gpu-tests), rustdoc, tests (lib 893, 1010 with gpu-tests; cli 32, 33 with gpu-tests) green.
 
 ### CI matrix
 
