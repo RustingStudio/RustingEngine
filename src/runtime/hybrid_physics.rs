@@ -117,12 +117,17 @@ impl PhysicsIdRegistry {
     }
 
     /// Releases an entity ID and invalidates all delayed events using it.
+    ///
+    /// A slot whose generation reaches `u32::MAX` is retired, not reused:
+    /// wrapping back to 1 would let ids from its first use resolve again.
     pub fn release(&mut self, entity: Entity) -> Option<PhysicsId> {
         let old_id = self.entity_ids.remove(&entity)?;
         let entry = &mut self.slots[old_id.slot as usize];
         entry.entity = None;
-        entry.generation = next_generation(entry.generation);
-        self.free_slots.push(old_id.slot);
+        if entry.generation < u32::MAX {
+            entry.generation += 1;
+            self.free_slots.push(old_id.slot);
+        }
         Some(old_id)
     }
 
@@ -149,15 +154,6 @@ impl PhysicsIdRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entity_ids.is_empty()
-    }
-}
-
-fn next_generation(generation: u32) -> u32 {
-    let next = generation.wrapping_add(1);
-    if next == 0 {
-        1
-    } else {
-        next
     }
 }
 
@@ -1953,10 +1949,15 @@ fn maintain_gpu_physics_ids(
     mut removed_bodies: RemovedComponents<super::PhysicsBody>,
     mut registry: ResMut<PhysicsIdRegistry>,
 ) {
-    // Removal messages also cover despawned entities. Releasing the registry
-    // entry is enough because a despawned entity cannot keep its component.
+    // Removal messages also cover despawned entities, which have no
+    // component left to remove.
     for entity in removed_bodies.read() {
-        registry.release(entity);
+        if registry.release(entity).is_none() {
+            continue;
+        }
+        if let Ok(mut entity) = commands.get_entity(entity) {
+            entity.try_remove::<PhysicsId>();
+        }
     }
 
     for (entity, body) in &changed_bodies {
@@ -1967,5 +1968,34 @@ fn maintain_gpu_physics_ids(
             registry.release(entity);
             commands.entity(entity).remove::<PhysicsId>();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_slot_at_the_last_generation_is_retired_not_wrapped() {
+        let first = Entity::from_raw_u32(1).unwrap();
+        let second = Entity::from_raw_u32(2).unwrap();
+        let mut ids = PhysicsIdRegistry::default();
+        let oldest = ids.assign(first);
+        ids.release(first);
+        ids.slots[0].generation = u32::MAX - 1;
+        let last = ids.assign(first);
+        assert_eq!(last.generation, u32::MAX - 1);
+        ids.release(first);
+        let final_use = ids.assign(first);
+        assert_eq!((final_use.slot, final_use.generation), (0, u32::MAX));
+        ids.release(first);
+
+        // Wrapping would hand slot 0 out again at generation 1.
+        let fresh = ids.assign(second);
+        assert_eq!(fresh.slot, 1);
+        for id in [oldest, last, final_use] {
+            assert_eq!(ids.resolve(id), None, "{id:?}");
+        }
+        assert_eq!(ids.resolve(fresh), Some(second));
     }
 }

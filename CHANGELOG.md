@@ -6,6 +6,10 @@
 
 - Physics suite scenes `BuoyancySort`, `SheetCatch` and `JellyRaft` check two-way coupling between rigid bodies, cloth, soft bodies and fluid
 
+### Fixed
+
+- A body that loses its `PhysicsBody` component no longer keeps a stale `PhysicsId`, and a `PhysicsId` slot is retired at its last generation instead of wrapping, so old GPU events can never reach a newer body
+
 ## [2.4.1] - 2026-10-10
 
 Fixes 2.4.0 builds: without the Vulkan SDK the cloth shader failed to compile, and the crates.io package needed a newer `rusting-core` than the one published.

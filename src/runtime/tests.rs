@@ -8585,3 +8585,108 @@ fn cpu_physics_matches_bit_for_bit_whatever_the_render_frame_rate() {
         assert_eq!((run.1, run.2), (runs[0].1, runs[0].2));
     }
 }
+
+#[test]
+fn physics_ids_map_entities_both_ways_and_reject_every_released_body() {
+    let mut app = App::new();
+    app.add_plugin(HybridPhysicsPlugin).unwrap();
+    let gpu = || PhysicsBody {
+        simulation: SimulationClass::Gpu,
+        ..Default::default()
+    };
+    let bodies: Vec<_> = (0..4).map(|_| app.spawn(gpu())).collect();
+    let cpu = app.spawn(PhysicsBody::default());
+    app.update(Duration::ZERO).unwrap();
+
+    // Each GPU body gets one id; its component, the registry and an event
+    // built from it all lead back to the same entity.
+    let ids: Vec<_> = bodies
+        .iter()
+        .map(|&entity| {
+            let id = *app.world().get::<PhysicsId>(entity).unwrap();
+            let registry = app.world().resource::<PhysicsIdRegistry>();
+            assert_eq!(registry.id_for(entity), Some(id));
+            assert_eq!(registry.resolve(id), Some(entity));
+            let raw = RawGpuPhysicsEvent {
+                body_slot: id.slot,
+                body_generation: id.generation,
+                ..Default::default()
+            };
+            assert_eq!(raw.physics_id(), id);
+            id
+        })
+        .collect();
+    assert_eq!(
+        ids.iter().map(|id| id.slot).collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
+    assert!(app.world().get::<PhysicsId>(cpu).is_none());
+    // A zeroed id, as an unused GPU buffer entry holds, names no body.
+    let registry = app.world().resource::<PhysicsIdRegistry>();
+    assert_eq!(registry.resolve(PhysicsId::default()), None);
+    assert_eq!(registry.len(), 4);
+
+    // Three ways to leave the GPU: lose the body component, move to the
+    // CPU, despawn. Body 3 stays.
+    app.world_mut()
+        .entity_mut(bodies[0])
+        .remove::<PhysicsBody>();
+    app.world_mut()
+        .get_mut::<PhysicsBody>(bodies[1])
+        .unwrap()
+        .simulation = SimulationClass::Cpu;
+    app.world_mut().despawn(bodies[2]);
+    app.update(Duration::ZERO).unwrap();
+    for &entity in &bodies[..2] {
+        assert!(app.world().get::<PhysicsId>(entity).is_none());
+    }
+    let registry = app.world().resource::<PhysicsIdRegistry>();
+    assert_eq!(registry.len(), 1);
+    for (index, &id) in ids[..3].iter().enumerate() {
+        assert_eq!(registry.resolve(id), None, "body {index}");
+        assert_eq!(registry.id_for(bodies[index]), None);
+    }
+    assert_eq!(registry.resolve(ids[3]), Some(bodies[3]));
+
+    // New bodies reuse the freed slots under new generations, so delayed
+    // events for the old bodies are dropped and theirs are delivered.
+    let newer: Vec<_> = (0..3).map(|_| app.spawn(gpu())).collect();
+    app.update(Duration::ZERO).unwrap();
+    let new_ids: Vec<_> = newer
+        .iter()
+        .map(|&entity| *app.world().get::<PhysicsId>(entity).unwrap())
+        .collect();
+    let mut slots: Vec<_> = new_ids.iter().map(|id| id.slot).collect();
+    slots.sort_unstable();
+    assert_eq!(slots, [0, 1, 2]);
+    for new_id in &new_ids {
+        let old = ids.iter().find(|id| id.slot == new_id.slot).unwrap();
+        assert_ne!(old.generation, new_id.generation);
+    }
+    let event_id = app
+        .world_mut()
+        .resource_mut::<GpuEventRegistry>()
+        .register("hit");
+    let raw = |id: PhysicsId| RawGpuPhysicsEvent {
+        body_slot: id.slot,
+        body_generation: id.generation,
+        event_id: event_id.0,
+        ..Default::default()
+    };
+    let events: Vec<_> =
+        ids.iter().chain(&new_ids).map(|&id| raw(id)).collect();
+    let report = route_gpu_physics_events(app.world_mut(), &events);
+    assert_eq!((report.delivered, report.stale), (4, 3));
+    app.update(Duration::ZERO).unwrap();
+    let mut delivered: Vec<_> = app
+        .world()
+        .resource::<EventQueue<GpuPhysicsEvent>>()
+        .iter()
+        .map(|event| event.entity)
+        .collect();
+    delivered.sort_unstable();
+    let mut expected = vec![bodies[3]];
+    expected.extend(&newer);
+    expected.sort_unstable();
+    assert_eq!(delivered, expected);
+}
