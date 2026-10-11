@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use bevy_ecs::entity::Entity;
 
 use super::{
-    Cloth, ClothSettings, Collider, ColliderShape, Fluid, FluidSettings, Joint,
-    JointKind, PhysicsBody, RigidBody, RigidBodyKind,
+    Cloth, ClothSettings, Collider, ColliderShape, Debris, Fluid,
+    FluidSettings, Fracture, Joint, JointKind, MeshRenderer, PhysicsBody,
+    RigidBody, RigidBodyKind, Vehicle,
 };
 use crate::{App, Transform};
 
@@ -37,6 +38,15 @@ pub enum SuiteScene {
     /// mean particle height ends than at rest spacing, as a fraction of
     /// that height (compression; negative is expansion).
     FluidDrop,
+    /// `size` raycast cars on a flat floor, 12 m apart, at full throttle
+    /// and full right lock; the error is the most any car's up axis
+    /// tilted from vertical in any step, in radians.
+    VehicleStress,
+    /// `size` 10 kg crates that break into 6 pieces above 100 J, dropped
+    /// 3 m onto a floor; the error is the share of the `6 * size` pieces
+    /// not resting above the floor's top at the end (sunk, or never
+    /// broken off).
+    FractureDrop,
 }
 
 /// What one run of a [`SuiteScene`] measured.
@@ -52,12 +62,14 @@ pub struct SuiteScore {
 const DT: f64 = 1.0 / 60.0;
 
 impl SuiteScene {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::StackingStability,
         Self::JointChain,
         Self::CcdBullets,
         Self::ClothHang,
         Self::FluidDrop,
+        Self::VehicleStress,
+        Self::FractureDrop,
     ];
 
     #[must_use]
@@ -68,6 +80,8 @@ impl SuiteScene {
             Self::CcdBullets => "ccd_bullets",
             Self::ClothHang => "cloth_hang",
             Self::FluidDrop => "fluid_drop",
+            Self::VehicleStress => "vehicle_stress",
+            Self::FractureDrop => "fracture_drop",
         }
     }
 
@@ -80,6 +94,8 @@ impl SuiteScene {
             Self::CcdBullets => "tunnelled share",
             Self::ClothHang => "max edge strain",
             Self::FluidDrop => "height loss",
+            Self::VehicleStress => "max tilt (rad)",
+            Self::FractureDrop => "missing share",
         }
     }
 
@@ -259,6 +275,111 @@ impl SuiteScene {
                         / fluid.positions.len() as f32;
                 1.0 - mean_height / (width / 2.0)
             }
+            Self::VehicleStress => {
+                let side = (size as f32).sqrt().ceil().max(1.0) as usize;
+                let half = 6.0 * side as f32 + 50.0;
+                body(
+                    &mut app,
+                    [0.0, -0.5, 0.0],
+                    ColliderShape::Box {
+                        half_extents: [half, 0.5, half],
+                    },
+                    RigidBodyKind::Fixed,
+                );
+                let cars: Vec<_> = (0..size)
+                    .map(|index| {
+                        let x = 12.0 * (index % side) as f32;
+                        let z = 12.0 * (index / side) as f32;
+                        let car = body(
+                            &mut app,
+                            [x - 6.0 * side as f32, 1.0, z - 6.0 * side as f32],
+                            ColliderShape::Box {
+                                half_extents: [0.9, 0.3, 2.0],
+                            },
+                            RigidBodyKind::Dynamic,
+                        );
+                        let world = app.world_mut();
+                        world.get_mut::<RigidBody>(car).unwrap().mass = 1200.0;
+                        world.entity_mut(car).insert(Vehicle {
+                            throttle: 1.0,
+                            steer: 1.0,
+                            ..Vehicle::default()
+                        });
+                        car
+                    })
+                    .collect();
+                let mut worst = 0.0_f32;
+                for _ in 0..steps {
+                    step(&mut app, &mut elapsed);
+                    for &car in &cars {
+                        let up = point(&app, car, [0.0, 1.0, 0.0])[1]
+                            - position(&app, car)[1];
+                        worst = worst.max(up.clamp(-1.0, 1.0).acos());
+                    }
+                }
+                worst
+            }
+            Self::FractureDrop => {
+                app.add_plugin(crate::assets::AssetPlugin).unwrap();
+                let half = 1.5 * size as f32 + 5.0;
+                body(
+                    &mut app,
+                    [0.0, -0.5, 0.0],
+                    ColliderShape::Box {
+                        half_extents: [half, 0.5, 5.0],
+                    },
+                    RigidBodyKind::Fixed,
+                );
+                for index in 0..size {
+                    let world = app.world_mut();
+                    let order = super::cpu_physics::next_spawn_order(world);
+                    let mut assets =
+                        world.resource_mut::<crate::assets::AssetServer>();
+                    let renderer = MeshRenderer {
+                        mesh: assets.meshes.insert(
+                            crate::assets::procedural_primitive_mesh(
+                                crate::assets::PrimitiveShape::Cube,
+                            ),
+                        ),
+                        material: assets.fallback_material,
+                        cast_shadows: true,
+                        receive_shadows: true,
+                    };
+                    world.spawn((
+                        Transform::new([
+                            3.0 * index as f32 - 1.5 * size as f32,
+                            3.5,
+                            0.0,
+                        ]),
+                        PhysicsBody::default(),
+                        RigidBody {
+                            mass: 10.0,
+                            ..RigidBody::default()
+                        },
+                        Collider {
+                            shape: ColliderShape::ConvexMesh,
+                            ..Collider::default()
+                        },
+                        renderer,
+                        Fracture {
+                            pieces: 6,
+                            break_energy: 100.0,
+                            ..Fracture::default()
+                        },
+                        order,
+                    ));
+                }
+                for _ in 0..steps {
+                    step(&mut app, &mut elapsed);
+                }
+                let world = app.world_mut();
+                let above = world
+                    .query::<(&Transform, &Debris)>()
+                    .iter(world)
+                    .filter(|(transform, _)| transform.position[1] > 0.0)
+                    .count();
+                1.0 - above as f32 / (6 * size).max(1) as f32
+            }
         };
         SuiteScore {
             scene: self,
@@ -333,5 +454,9 @@ mod tests {
         // Baseline, not a goal: four density iterations let a 6-particle
         // column sink about a third (1000 particles: a fifth).
         assert!(fluid.error.abs() < 0.4, "{fluid:?}");
+        let cars = SuiteScene::VehicleStress.run(4, 240);
+        assert!(cars.error < 0.2, "{cars:?}");
+        let crates = SuiteScene::FractureDrop.run(4, 90);
+        assert_eq!(crates.error, 0.0, "{crates:?}");
     }
 }
