@@ -42,7 +42,7 @@ use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
     COLOR_LUT_COMPONENT, DEPTH_OF_FIELD_COMPONENT, FLASH_COMPONENT,
     MATERIAL_OVERRIDE_COMPONENT, MOTION_BLUR_COMPONENT, POST_SHADER_COMPONENT,
-    SPAWN_GRID_COMPONENT, SQUASH_COMPONENT,
+    SKY_SHADER_COMPONENT, SPAWN_GRID_COMPONENT, SQUASH_COMPONENT,
 };
 
 /// Components that together make a World Environment object.
@@ -73,6 +73,7 @@ fn kind(name: &str) -> Kind {
         | COLOR_GRADING_COMPONENT
         | COLOR_LUT_COMPONENT
         | POST_SHADER_COMPONENT
+        | SKY_SHADER_COMPONENT
         | DEPTH_OF_FIELD_COMPONENT
         | MOTION_BLUR_COMPONENT
         | POST_VOLUME_COMPONENT
@@ -148,6 +149,7 @@ pub(in crate::editor) fn placement(
         POST_SHADER_COMPONENT => {
             first_with::<crate::runtime::PostShader>(world)
         }
+        SKY_SHADER_COMPONENT => first_with::<crate::runtime::SkyShader>(world),
         DEPTH_OF_FIELD_COMPONENT => {
             first_with::<crate::runtime::DepthOfField>(world)
         }
@@ -405,6 +407,10 @@ pub(in crate::editor) fn component_help(
         POST_SHADER_COMPONENT => (
             "Runs your own GLSL on every pixel of the final image.",
             "Outlines, pixelation, a night-vision or heat-haze look.",
+        ),
+        SKY_SHADER_COMPONENT => (
+            "Paints the background with your own GLSL.",
+            "Alien skies, starfields, a stylized gradient or aurora.",
         ),
         LIGHT_COOKIE_COMPONENT => (
             "Projects an image through this object's spot light.",

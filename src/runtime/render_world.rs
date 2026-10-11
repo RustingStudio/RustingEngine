@@ -175,6 +175,9 @@ pub struct RenderWorld {
     /// Source of the first [`PostShader`](super::PostShader) in entity
     /// order; empty when there is none.
     pub post_shader: String,
+    /// Source of the first [`SkyShader`](super::SkyShader) in entity
+    /// order; empty when there is none.
+    pub sky_shader: String,
     /// Meshes that show a camera's image, in entity order.
     pub screens: Vec<ExtractedScreen>,
     pub ambient_occlusion: Option<super::AmbientOcclusion>,
@@ -434,14 +437,10 @@ pub fn extract_render_world(world: &mut World) {
             .min_by_key(|(entity, ..)| *entity)
             .map(|(_, handle, intensity)| (handle, intensity))
     };
-    let post_shader = {
-        let mut query = world.query::<(Entity, &super::PostShader)>();
-        query
-            .iter(world)
-            .min_by_key(|(entity, _)| entity.index())
-            .map(|(_, shader)| shader.source.clone())
-            .unwrap_or_default()
-    };
+    let post_shader =
+        first_source::<super::PostShader>(world, |shader| &shader.source);
+    let sky_shader =
+        first_source::<super::SkyShader>(world, |shader| &shader.source);
     let screens = collect_screens(world);
     let ambient_occlusion = collect_first::<super::AmbientOcclusion>(world);
     let particles = collect_particles(world);
@@ -627,6 +626,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.color_grading = color_grading;
     render_world.color_lut = color_lut;
     render_world.post_shader = post_shader;
+    render_world.sky_shader = sky_shader;
     render_world.screens = screens;
     render_world.ambient_occlusion = ambient_occlusion;
     render_world.particles = particles;
@@ -1238,6 +1238,19 @@ fn collect_spot_lights(world: &mut World) -> Vec<ExtractedSpotLight> {
 }
 
 /// The environment component on the lowest entity, so the pick is stable.
+/// The shader source of the first `T` in entity order, or empty.
+fn first_source<T: Component>(
+    world: &mut World,
+    source: impl Fn(&T) -> &String,
+) -> String {
+    let mut query = world.query::<(Entity, &T)>();
+    query
+        .iter(world)
+        .min_by_key(|(entity, _)| entity.index())
+        .map(|(_, shader)| source(shader).clone())
+        .unwrap_or_default()
+}
+
 fn collect_first<T: Component + Copy>(world: &mut World) -> Option<T> {
     let mut query = world.query::<(Entity, &T)>();
     query

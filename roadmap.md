@@ -3046,7 +3046,21 @@ Depends on: Milestones 3 and 4.
   version and `:3:`, clearing it restores the built-in); binding the
   built-in pipeline instead fails it. Full check: fmt, clippy x3,
   `cargo test --workspace` (lib 888) and the gpu-tests run (lib 1026) pass.
-  Not done: sky, particle and fog kinds; scene files saving a material's
+  Sky: a `SkyShader` component (`rusting.sky_shader`) holds GLSL headed
+  `#rusting sky 1` defining `void sky(SkyInput i, inout vec3 color)`
+  (direction, time) over the procedural sky or background map, or black;
+  the sky fragment shader moved to `src/shaders/fragment/sky.frag` with the
+  hook, the background pass runs whenever a sky shader is set, and errors
+  keep the built-in background and land in `SceneRenderer::sky_shader_error`.
+  The post and sky pipelines share one per-source cache. GPU test
+  `sky_shaders_paint_only_the_background` (the background turns the
+  view direction's blue while the quad in front keeps its color, time
+  follows the clock, version 2 and a typo leave the background with errors
+  naming version and `:3:`); dropping the hook call fails it. Full check:
+  fmt, clippy x3, `cargo test --workspace` (lib 888) and the gpu-tests run
+  (lib 1027) pass.
+  Not done: particle and fog kinds; reflections and environment lighting
+  ignore the sky shader; scene files saving a material's
   `shader` (needs a cooked format version); the depth prepass and shadows
   ignore the surface shader; post shaders cannot read depth.
 - [ ] A visual shader graph that compiles to the same language.

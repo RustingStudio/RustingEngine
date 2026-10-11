@@ -119,6 +119,46 @@ it for outlines, blurs or warps. The definitions live in
 `src/shaders/post.glsl`. A post shader that fails leaves the image as is,
 prints the error once, and `SceneRenderer::post_shader_error` keeps it.
 
+## Sky shaders
+
+A `SkyShader` component colors the background wherever no surface was
+drawn. The one on the entity with the lowest ID is used, and scene files
+save it.
+
+```rust
+use rusting_engine::runtime::{App, SkyShader};
+
+const DUSK: &str = r#"#rusting sky 1
+void sky(SkyInput i, inout vec3 color) {
+    float up = max(i.direction.y, 0.0);
+    color = mix(vec3(1.0, 0.4, 0.2), vec3(0.05, 0.0, 0.2), sqrt(up));
+}
+"#;
+
+fn build(app: &mut App) {
+    app.spawn(SkyShader { source: DUSK.into() });
+}
+```
+
+The header is `#rusting sky 1` and the hook is
+
+```glsl
+void sky(SkyInput i, inout vec3 color);
+```
+
+`color` is linear HDR. It arrives as the `ProceduralSky` or the background
+`EnvironmentMap`, or black without either, and replaces the background
+color. Fog still covers it.
+
+| `SkyInput i` | |
+| --- | --- |
+| `vec3 direction` | unit world-space direction from the camera through the pixel |
+| `float time` | seconds since the game started |
+
+The definitions live in `src/shaders/sky_shader.glsl`. A sky shader that
+fails leaves the built-in background, prints the error once, and
+`SceneRenderer::sky_shader_error` keeps it.
+
 ## Not yet
 
 - Scene files do not save a material's `shader`, so surface shaders come
@@ -126,4 +166,6 @@ prints the error once, and `SceneRenderer::post_shader_error` keeps it.
 - The depth prepass and shadows ignore the surface shader, so `discard`
   and alpha changes do not cut holes in shadows.
 - Post shaders cannot read depth.
-- Sky, particle and fog shader kinds.
+- Reflections, the environment lighting and reflection probes do not see
+  the sky shader.
+- Particle and fog shader kinds.

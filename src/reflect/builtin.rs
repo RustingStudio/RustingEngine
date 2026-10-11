@@ -23,9 +23,9 @@ use crate::runtime::{
     PhysicsSyncMode, Pickup, PlatformerController, PlayerController, Polygon2d,
     PostShader, PostVolume, ProceduralSky, QualityProfile, RandomSeed,
     ReflectionProbe, RenderBounds, RenderSettings, ReverbZone, SceneBackground,
-    SceneInstance, ShadowQuality, SkyLight, SlideSound, SoftBlock, SoundCue,
-    SoundId, SpawnGrid, Squash, StateAction, StateTransition, Terrain,
-    TerrainLayer, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
+    SceneInstance, ShadowQuality, SkyLight, SkyShader, SlideSound, SoftBlock,
+    SoundCue, SoundId, SpawnGrid, Squash, StateAction, StateTransition,
+    Terrain, TerrainLayer, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
     TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
@@ -1078,6 +1078,14 @@ crate::reflect! {
         intensity: f32 { unit: "factor", min: 0.0 },
         background: bool { doc: "also draw the image behind the scene" },
         #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+    }
+}
+
+crate::reflect! {
+    struct SkyShader {
+        source: String {
+            doc: "GLSL starting with `#rusting sky 1`; see docs/surface-shaders.md",
+        },
     }
 }
 

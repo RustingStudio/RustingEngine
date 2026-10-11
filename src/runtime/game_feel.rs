@@ -1914,6 +1914,21 @@ pub struct PostShader {
     pub source: String,
 }
 
+/// A `#rusting sky 1` shader that colors the background wherever no
+/// surface was drawn, starting from the [`ProceduralSky`] or background
+/// [`EnvironmentMap`] if there is one. Fog still covers it. See
+/// `docs/surface-shaders.md`. A shader that fails to compile leaves the
+/// built-in background; the error is in `SceneRenderer::sky_shader_error`.
+/// The one on the entity with the lowest ID is used.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct SkyShader {
+    /// GLSL source starting with `#rusting sky 1`.
+    pub source: String,
+}
+
 impl Default for ColorLut {
     fn default() -> Self {
         Self {

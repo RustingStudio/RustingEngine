@@ -1861,7 +1861,9 @@ pub struct SceneRenderer {
     /// by source and sample count, or why it failed to build.
     surface_pipelines: SurfacePipelines,
     /// Source, sample count and tone-map pipeline of the last post shader.
-    post_shader: Option<(String, u32, Result<Arc<GraphicsPipeline>, String>)>,
+    post_shader: ShaderPipeline,
+    /// The same for the sky shader.
+    sky_shader: ShaderPipeline,
     last_physics_tick: u64,
     last_frame_passes: Vec<FramePass>,
     /// Image the next frame is stretched over after it renders, for
@@ -2244,6 +2246,7 @@ impl SceneRenderer {
             condition_shaders: HashMap::new(),
             surface_pipelines: HashMap::new(),
             post_shader: None,
+            sky_shader: None,
             last_physics_tick: 0,
             last_frame_passes: Vec::new(),
             upscale_to: None,
@@ -2828,6 +2831,8 @@ impl SceneRenderer {
         };
         let post_shader =
             self.post_pipeline(&active, samples, &render_world.post_shader);
+        let sky_shader =
+            self.sky_pipeline(&active, samples, &render_world.sky_shader);
         // Resolve attachments are neither cleared nor loaded.
         let clears = |hdr: Option<vulkano::format::ClearValue>, depth| {
             let mut values = vec![None, hdr, depth];
@@ -4712,11 +4717,14 @@ impl SceneRenderer {
             || !fog_volumes.is_empty()
             || sky.is_some()
             || environment_background
+            || sky_shader.is_some()
         {
             // Same layout as the scene pipelines, so their sets and camera
             // stay bound.
             commands
-                .bind_pipeline_graphics(active.sky_pipeline.clone())
+                .bind_pipeline_graphics(
+                    sky_shader.unwrap_or_else(|| active.sky_pipeline.clone()),
+                )
                 .map_err(|error| SceneRenderError(error.to_string()))?;
             count_work(&recorded, 1, 0, 1);
             unsafe {
@@ -7087,37 +7095,49 @@ impl SceneRenderer {
         samples: u32,
         source: &str,
     ) -> Option<Arc<GraphicsPipeline>> {
-        if source.is_empty() {
-            self.post_shader = None;
-            return None;
-        }
-        let cached = self.post_shader.as_ref().is_some_and(
-            |(cached, cached_samples, _)| {
-                cached == source && *cached_samples == samples
-            },
-        );
-        if !cached {
-            let result = post_fragment_glsl(source)
-                .and_then(|glsl| {
-                    compile_glsl(self.queue.device(), "fragment", &glsl)
-                })
-                .and_then(|module| {
-                    create_tonemap_pipeline(
-                        self.queue.clone(),
-                        passes.render_pass.clone(),
-                        Some(passes.tonemap_pipeline.layout().clone()),
-                        Some(module),
-                    )
-                    .map_err(|error| error.0)
-                });
-            if let Err(error) = &result {
-                eprintln!("post shader skipped:\n{error}");
-            }
-            self.post_shader = Some((source.to_owned(), samples, result));
-        }
-        self.post_shader
+        let queue = self.queue.clone();
+        cached_pipeline(&mut self.post_shader, source, samples, |source| {
+            let glsl = post_fragment_glsl(source)?;
+            create_tonemap_pipeline(
+                queue.clone(),
+                passes.render_pass.clone(),
+                Some(passes.tonemap_pipeline.layout().clone()),
+                Some(compile_glsl(queue.device(), "fragment", &glsl)?),
+            )
+            .map_err(|error| error.0)
+        })
+    }
+
+    /// Compiler message of the scene's sky shader if it failed to build;
+    /// the built-in sky then shows instead.
+    #[must_use]
+    pub fn sky_shader_error(&self) -> Option<&str> {
+        self.sky_shader
             .as_ref()
-            .and_then(|(_, _, result)| result.as_ref().ok().cloned())
+            .and_then(|(_, _, result)| result.as_ref().err())
+            .map(String::as_str)
+    }
+
+    /// Sky pipeline running `source`, a sky shader, for `passes` at
+    /// `samples`; `None` without a shader or when it fails to build.
+    fn sky_pipeline(
+        &mut self,
+        passes: &MainPasses,
+        samples: u32,
+        source: &str,
+    ) -> Option<Arc<GraphicsPipeline>> {
+        let queue = self.queue.clone();
+        cached_pipeline(&mut self.sky_shader, source, samples, |source| {
+            let glsl = sky_fragment_glsl(source)?;
+            create_sky_pipeline(
+                &queue,
+                passes.render_pass.clone(),
+                samples,
+                passes.pipeline.layout().clone(),
+                Some(compile_glsl(queue.device(), "fragment", &glsl)?),
+            )
+            .map_err(|error| error.0)
+        })
     }
 
     /// Compiler messages of custom condition shaders that failed to build.
@@ -8967,6 +8987,7 @@ fn create_main_passes(
             render_pass.clone(),
             samples,
             pipeline.layout().clone(),
+            None,
         )?,
         render_pass,
         early_render_pass,
@@ -9176,6 +9197,7 @@ fn create_sky_pipeline(
     render_pass: Arc<RenderPass>,
     samples: u32,
     layout: Arc<PipelineLayout>,
+    fragment: Option<Arc<vulkano::shader::ShaderModule>>,
 ) -> Result<Arc<GraphicsPipeline>, SceneRenderError> {
     let stage = |module: Result<Arc<vulkano::shader::ShaderModule>, _>| {
         module
@@ -9196,7 +9218,10 @@ fn create_sky_pipeline(
         GraphicsPipelineCreateInfo {
             stages: [
                 stage(sky_vertex_shader::load(queue.device().clone()))?,
-                stage(sky_fragment_shader::load(queue.device().clone()))?,
+                stage(fragment.map_or_else(
+                    || sky_fragment_shader::load(queue.device().clone()),
+                    Ok,
+                ))?,
             ]
             .into_iter()
             .collect(),
@@ -9469,6 +9494,37 @@ fn create_pipelines(
         .map_err(|error| SceneRenderError(error.to_string()))
     };
     Ok([create(0)?, create(1)?, create(2)?])
+}
+
+/// Source, sample count and pipeline of the last scene-wide custom shader.
+type ShaderPipeline =
+    Option<(String, u32, Result<Arc<GraphicsPipeline>, String>)>;
+
+/// The pipeline `build` makes for `source` at `samples`, cached in `cache`
+/// until either changes; `None` for an empty source or a failed build,
+/// whose error is printed once and stays in `cache`.
+fn cached_pipeline(
+    cache: &mut ShaderPipeline,
+    source: &str,
+    samples: u32,
+    build: impl FnOnce(&str) -> Result<Arc<GraphicsPipeline>, String>,
+) -> Option<Arc<GraphicsPipeline>> {
+    if source.is_empty() {
+        *cache = None;
+        return None;
+    }
+    if !cache.as_ref().is_some_and(|(cached, cached_samples, _)| {
+        cached == source && *cached_samples == samples
+    }) {
+        let result = build(source);
+        if let Err(error) = &result {
+            eprintln!("shader skipped:\n{error}");
+        }
+        *cache = Some((source.to_owned(), samples, result));
+    }
+    cache
+        .as_ref()
+        .and_then(|(_, _, result)| result.as_ref().ok().cloned())
 }
 
 type SurfacePipelines =
@@ -10070,7 +10126,7 @@ fn surface_fragment_glsl(source: &str) -> Result<String, String> {
         "surface",
         source,
         include_str!("../shaders/fragment/scene.frag"),
-        include_str!("../shaders/surface.glsl"),
+        ("surface.glsl", include_str!("../shaders/surface.glsl")),
     )
 }
 
@@ -10081,18 +10137,32 @@ fn post_fragment_glsl(source: &str) -> Result<String, String> {
         "post",
         source,
         include_str!("../shaders/fragment/tonemap.frag"),
-        include_str!("../shaders/post.glsl"),
+        ("post.glsl", include_str!("../shaders/post.glsl")),
     )
 }
 
-/// `frag` with its `#include "{kind}.glsl"` replaced by `hook` and the
-/// body of `source`, a `#rusting {kind} 1` shader, and its other includes
-/// inlined.
+/// The sky fragment shader with `source`, a `#rusting sky 1` shader, as
+/// its `sky` hook.
+fn sky_fragment_glsl(source: &str) -> Result<String, String> {
+    hooked_glsl(
+        "sky",
+        source,
+        include_str!("../shaders/fragment/sky.frag"),
+        (
+            "sky_shader.glsl",
+            include_str!("../shaders/sky_shader.glsl"),
+        ),
+    )
+}
+
+/// `frag` with the include of `hook`, a file name and its text, replaced
+/// by that text and the body of `source`, a `#rusting {kind} 1` shader,
+/// and its other includes inlined.
 fn hooked_glsl(
     kind: &str,
     source: &str,
     frag: &str,
-    hook: &str,
+    (hook_file, hook): (&str, &str),
 ) -> Result<String, String> {
     let mut lines = source.lines();
     let header = lines
@@ -10129,16 +10199,18 @@ fn hooked_glsl(
         "#define RUSTING_CUSTOM_{}\n{hook}\n{user}\n",
         kind.to_uppercase()
     );
-    let hook_line = format!("#include \"{kind}.glsl\"");
+    let hook_line = format!("#include \"{hook_file}\"");
     if !frag.contains(&hook_line) {
         return Err(format!("the engine shader lost its {hook_line}"));
     }
-    // Every other include is fog.glsl, which only scene.frag uses.
-    Ok(frag.replacen(&hook_line, &hook, 1).replacen(
-        "#include \"fog.glsl\"",
-        include_str!("../shaders/fog.glsl"),
-        1,
-    ))
+    let mut glsl = frag.replacen(&hook_line, &hook, 1);
+    for (file, text) in [
+        ("fog.glsl", include_str!("../shaders/fog.glsl")),
+        ("sky.glsl", include_str!("../shaders/sky.glsl")),
+    ] {
+        glsl = glsl.replacen(&format!("#include \"{file}\""), text, 1);
+    }
+    Ok(glsl)
 }
 
 /// Element `index` of the Halton sequence in `base`, in [0, 1).
@@ -11202,86 +11274,7 @@ mod sky_fragment_shader {
     vulkano_shaders::shader! {
         ty: "fragment",
         include: ["src/shaders"],
-        src: r#"
-#version 450
-layout(location = 0) in vec2 v_ndc;
-layout(location = 0) out vec4 f_color;
-layout(push_constant) uniform Camera {
-    mat4 view_projection;
-    vec4 eye;
-    vec4 ambient;
-    vec4 ground_ambient;
-    uvec4 light_info;
-} camera;
-struct Light {
-    vec4 position_kind;
-    vec4 direction_range;
-    vec4 color_intensity;
-    vec4 spot_angles;
-    vec4 cookie;
-};
-layout(set = 0, binding = 2) readonly buffer Lights {
-    Light data[];
-} lights;
-layout(set = 2, binding = 0) uniform sampler2DShadow shadow_map;
-layout(set = 2, binding = 1) readonly buffer Shadow {
-    vec4 environment;
-    vec4 scene_color;
-    vec4 viewport;
-    vec4 probes[8];
-    mat4 inverse_view_projection;
-    vec4 fog;
-    vec4 fog_shape;
-    vec4 ambient_occlusion;
-    mat4 cascades[6];
-    vec4 cascade_far;
-    vec4 cascade_forward;
-    vec4 cascade_info;
-    vec4 cluster_view;
-    vec4 cluster_depth;
-    vec4 fog_shafts;
-    mat4 fog_volumes[8];
-    vec4 fog_volume_colors[8];
-    vec4 sky[3];
-} shadow;
-layout(set = 2, binding = 2) uniform sampler2D environment_map;
-#include "fog.glsl"
-#include "sky.glsl"
-void main() {
-    vec4 fog = fog_sky(v_ndc);
-    if (shadow.sky[2].w < 0.5) {
-        f_color = fog;
-        return;
-    }
-    // The sky replaces the background under the fog.
-    vec3 start = fog_unproject(v_ndc, 0.0);
-    vec3 direction = normalize(fog_unproject(v_ndc, 0.5) - start);
-    if (shadow.sky[2].w > 1.5) {
-        // The environment map, laid out as the scene shader reads it.
-        vec2 uv = vec2(
-            atan(direction.z, direction.x) / 6.2831853 + 0.5,
-            acos(clamp(direction.y, -1.0, 1.0)) / 3.14159265
-        );
-        vec3 map = textureLod(environment_map, uv, 0.0).rgb
-            * shadow.environment.y;
-        f_color = vec4(fog.rgb + fog.a * map, 0.0);
-        return;
-    }
-    vec3 sun = shadow.sky[0].xyz;
-    vec3 sun_color = shadow.sky[1].rgb;
-    float haze = shadow.sky[1].w;
-    vec3 sky = sky_radiance(direction, sun, sun_color, haze,
-        shadow.sky[2].rgb);
-    // The sun disc: its sunlight spread over its solid angle.
-    float cos_radius = shadow.sky[0].w;
-    if (cos_radius < 1.0 && dot(direction, sun) > cos_radius
-        && direction.y > 0.0) {
-        sky += sky_sunlight(sun, sun_color, haze)
-            / (6.2831853 * (1.0 - cos_radius));
-    }
-    f_color = vec4(fog.rgb + fog.a * sky, 0.0);
-}
-"#
+        path: "src/shaders/fragment/sky.frag"
     }
 }
 
@@ -20260,6 +20253,13 @@ mod tests {
         assert!(!glsl.contains("#include"), "includes are inlined");
         let error = super::post_fragment_glsl(hook).unwrap_err();
         assert!(error.contains("post"), "{error}");
+        let sky = "void sky(SkyInput i, inout vec3 color) {}";
+        let glsl = super::sky_fragment_glsl(&format!("#rusting sky 1\n{sky}"))
+            .unwrap();
+        assert!(
+            glsl.contains("#define RUSTING_CUSTOM_SKY") && glsl.contains(sky)
+        );
+        assert!(!glsl.contains("#include"), "includes are inlined");
     }
 
     #[test]
@@ -20382,6 +20382,89 @@ mod tests {
                 .any(|error| error.contains(":3:") && error.contains("oops")),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn sky_shaders_paint_only_the_background() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{ExtractedRenderable, GlobalTransform};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A grey quad on pixels 4 to 11; the rest is background.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mesh = scene.assets.meshes.insert(MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[x, y]| MeshVertex {
+                position: [x, y, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        let grey = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            ..MaterialAsset::default()
+        });
+        scene.render_world.renderables = vec![ExtractedRenderable {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            transform: GlobalTransform {
+                matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                    .into(),
+            },
+            mesh,
+            material: grey,
+            cast_shadows: false,
+            receive_shadows: false,
+            bounds: None,
+        }];
+        scene.render_world.renderables_revision += 1;
+        let plain = [8, 24].map(|x| render_pixel(&mut scene, [x, 16]));
+        let sky = |scene: &mut SlabScene, body: &str| {
+            scene.render_world.sky_shader = format!(
+                "#rusting sky 1\n\
+                 void sky(SkyInput i, inout vec3 color) {{\n{body}\n}}"
+            );
+        };
+        // The camera looks along -z, so the background turns blue and the
+        // quad stays as it was.
+        sky(&mut scene, "color = max(-i.direction, 0.0);");
+        let quad = render_pixel(&mut scene, [8, 16]);
+        let back = render_pixel(&mut scene, [24, 16]);
+        assert_eq!(scene.renderer.sky_shader_error(), None);
+        assert_eq!(quad, plain[0], "surfaces cover the sky");
+        assert!(back[2] > 200 && back[0] < 20, "{back:?} {plain:?}");
+        // `i.time` is the render world's clock.
+        sky(&mut scene, "color = vec3(i.time);");
+        scene.render_world.elapsed_seconds = 0.1;
+        let early = render_pixel(&mut scene, [24, 16]);
+        scene.render_world.elapsed_seconds = 0.9;
+        let late = render_pixel(&mut scene, [24, 16]);
+        assert!(late[0] > early[0] + 60, "{early:?} {late:?}");
+        // Broken shaders leave the built-in background and say why.
+        scene.render_world.sky_shader = "#rusting sky 2\n".into();
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain[1]);
+        let error = scene.renderer.sky_shader_error().unwrap_or_default();
+        assert!(error.contains("version"), "{error}");
+        sky(&mut scene, "color = oops;");
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain[1]);
+        let error = scene.renderer.sky_shader_error().unwrap_or_default();
+        assert!(error.contains(":3:") && error.contains("oops"), "{error}");
+        scene.render_world.sky_shader.clear();
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain[1]);
+        assert_eq!(scene.renderer.sky_shader_error(), None);
     }
 
     #[test]

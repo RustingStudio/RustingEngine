@@ -838,6 +838,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"source": "#rusting post 1\nvoid post(PostInput i, inout vec3 color) { color = 1.0 - color; }"}),
     },
     ComponentSection {
+        key: "rusting.sky_shader",
+        summary: "GLSL that colors the background wherever no surface was drawn. source starts with `#rusting sky 1` and defines `void sky(SkyInput i, inout vec3 color)`; i has direction (unit, world space) and time, and color arrives as the rusting.procedural_sky or background rusting.environment_map, black without one. Fog still covers it; reflections and lighting do not see it. A shader that fails to compile leaves the built-in background. See guide/surface-shaders. The first one found is used.",
+        gpu: "one full-screen pass over the background, plus the shader's own cost per pixel",
+        example: || json!({"source": "#rusting sky 1\nvoid sky(SkyInput i, inout vec3 color) { color = mix(vec3(0.1, 0.0, 0.2), vec3(1.0, 0.4, 0.2), max(i.direction.y, 0.0)); }"}),
+    },
+    ComponentSection {
         key: "rusting.light_cookie",
         summary: "On an object with a spot_light: projects an image under assets/ through the light's outer cone, like a slide in a projector (window frames, leaves, a logo). The light's color is multiplied by the image; its top points along the light's up (+Y). At most four cookie spot lights per frame, the first in entity order; others light without their image.",
         gpu: "one texture sample per lit pixel for each cookie light that reaches it",
