@@ -5597,7 +5597,7 @@ pub fn run_project_headless<P: Plugin>(
         elapsed.as_secs_f64() * 1000.0 / f64::from(ticks.max(1))
     );
     if let Some(path) = std::env::var_os(crate::project::FINAL_SCENE_OUT_ENV) {
-        crate::runtime::save_scene(
+        crate::runtime::save_scene_state(
             runtime.world_mut(),
             path,
             format!("after tick {ticks}"),

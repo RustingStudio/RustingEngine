@@ -2007,3 +2007,38 @@ fn samples_pass_lint_scenarios_fuzz_and_strength_check() {
         }
     }
 }
+
+#[test]
+#[ignore = "builds and runs every template and sample game for many minutes"]
+fn every_template_and_sample_builds_and_runs_headless() {
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/samples");
+    let parent = std::env::temp_dir()
+        .join(format!("rusting-templates-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&parent).unwrap();
+    let mut roots = Vec::new();
+    for template in rusting_engine::project::ProjectTemplate::ALL {
+        let name = format!("Template {}", template.name());
+        let (output, created) = run(&[
+            "new",
+            parent.to_str().unwrap(),
+            &name,
+            "--template",
+            template.name(),
+        ]);
+        assert!(output.status.success(), "{created}");
+        roots.push(parent.join(name));
+    }
+    let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+    roots.extend(SAMPLE_STRENGTH.map(|row| samples.join(row.0)));
+    for root in roots {
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(["run", root.to_str().unwrap(), "--ticks", "120", "--json"])
+            .env("CARGO_TARGET_DIR", &target)
+            .output()
+            .unwrap();
+        let run: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{}: {run}", root.display());
+        assert_eq!(run["data"]["headless_ticks"], 120, "{run}");
+    }
+    let _ = std::fs::remove_dir_all(parent);
+}

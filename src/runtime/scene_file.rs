@@ -2049,11 +2049,27 @@ pub fn save_scene(
     path: impl AsRef<Path>,
     name: impl Into<String>,
 ) -> Result<(), SceneIoError> {
-    let mut document = scene_document(world, name)?;
+    write_scene(scene_document(world, name)?, path.as_ref())
+}
+
+/// Like [`save_scene`], but keeps an entity whose mesh or textures were made
+/// in code without its `mesh_renderer`, as [`scene_document_lenient`] does.
+/// For a snapshot of state to query, never for a scene to load and edit.
+pub fn save_scene_state(
+    world: &mut World,
+    path: impl AsRef<Path>,
+    name: impl Into<String>,
+) -> Result<(), SceneIoError> {
+    write_scene(scene_document_lenient(world, name)?, path.as_ref())
+}
+
+fn write_scene(
+    mut document: SceneDocument,
+    path: &Path,
+) -> Result<(), SceneIoError> {
     // Instance members come back from their source file on the next load,
     // with the overrides this writes.
     super::scene_instance::fold_instance_members(&mut document)?;
-    let path = path.as_ref();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         relativize_scene_assets(&mut document, parent)?;
@@ -3302,6 +3318,42 @@ mod tests {
             panic!("expected an inline material");
         };
         assert_eq!(material.base_color_texture, None);
+    }
+
+    #[test]
+    fn a_state_save_keeps_objects_whose_mesh_was_made_in_code() {
+        // `rusting run --ticks` saves the end state for `scene query`; a
+        // render target or generated mesh must not fail that save.
+        let mut app = scene_app();
+        let (mesh, material) = {
+            let mut assets = app.world_mut().resource_mut::<AssetServer>();
+            let copy =
+                assets.meshes.get(assets.fallback_mesh).cloned().unwrap();
+            (assets.meshes.insert(copy), assets.fallback_material)
+        };
+        app.spawn((
+            SceneId::new(),
+            Name("Screen".into()),
+            MeshRenderer {
+                mesh,
+                material,
+                cast_shadows: true,
+                receive_shadows: true,
+            },
+        ));
+        let folder = std::env::temp_dir()
+            .join(format!("rusting-state-save-{}", Uuid::new_v4()));
+        let path = folder.join("final.rscene");
+        assert!(matches!(
+            save_scene(app.world_mut(), &path, "Main"),
+            Err(SceneIoError::UnsavedMesh(_))
+        ));
+        save_scene_state(app.world_mut(), &path, "Main").unwrap();
+        let document: SceneDocument =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document.entities[0].name.as_deref(), Some("Screen"));
+        assert!(document.entities[0].mesh_renderer.is_none());
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

@@ -4108,7 +4108,7 @@ Depends on: Milestones 3, 4, and 21.
 - [ ] Navigation baking, re-baking budget, and agent avoidance.
 - [ ] Networking RPC, replication, prediction, and rollback over loopback with simulated loss.
 - [ ] Export smoke test for every supported platform preset.
-- [ ] Every demo project and template builds and runs headless.
+- [x] Every demo project and template builds and runs headless. Done 2026-10-11: new ignored `tests/cli.rs` `every_template_and_sample_builds_and_runs_headless` creates every `ProjectTemplate::ALL` (15) with `rusting new --template`, then runs `rusting run <root> --ticks 120 --json` on each template and on the 13 sample games, asserting success and `headless_ticks` 120. It passed here (`cargo test --test cli every_template_and_sample_builds_and_runs_headless -- --ignored`, 171 s with the engine already built). Its first run found a bug: `forever_bear_booth` exited with `UnsavedTexture`, because the end-of-run save of `build/final.rscene` refused a mesh or texture made in code (its render-to-texture screens). That file is only read back by `scene query`, so the save now uses new `runtime::save_scene_state`, which keeps such an object without its `mesh_renderer`, as `scene_document_lenient` does; `save_scene` still refuses it. Evidence: unit test `runtime::scene_file::tests::a_state_save_keeps_objects_whose_mesh_was_made_in_code`. The engine examples under `src/examples` open a window, so they are built by clippy `--all-targets`, not run. Full check: fmt, clippy (default, no-default-features, gpu-tests), rustdoc, tests (lib 896, 1013 with gpu-tests; cli 34, 35 with gpu-tests) green.
 
 ### Determinism tests
 
