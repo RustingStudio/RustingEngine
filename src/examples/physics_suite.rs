@@ -1,4 +1,4 @@
-//! Standard physics quality scenes, headless on the CPU solver.
+//! Standard physics quality scenes, headless on the CPU solvers.
 //!
 //! ```sh
 //! cargo run --release --example physics_suite
@@ -14,6 +14,8 @@ fn main() {
         (SuiteScene::StackingStability, 20, 600),
         (SuiteScene::JointChain, 20, 600),
         (SuiteScene::CcdBullets, 400, 60),
+        (SuiteScene::ClothHang, 40, 300),
+        (SuiteScene::FluidDrop, 1000, 300),
     ] {
         let score = scene.run(size, steps);
         println!(

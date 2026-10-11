@@ -1,4 +1,4 @@
-//! Standard physics quality scenes, run headless on the CPU solver.
+//! Standard physics quality scenes, run headless on the CPU solvers.
 //!
 //! Each [`SuiteScene`] builds the same bodies every run, steps them at
 //! 60 Hz and returns a [`SuiteScore`]: the mean wall time of a step and one
@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use bevy_ecs::entity::Entity;
 
 use super::{
-    Collider, ColliderShape, Joint, JointKind, PhysicsBody, RigidBody,
-    RigidBodyKind,
+    Cloth, ClothSettings, Collider, ColliderShape, Fluid, FluidSettings, Joint,
+    JointKind, PhysicsBody, RigidBody, RigidBodyKind,
 };
 use crate::{App, Transform};
 
@@ -28,6 +28,15 @@ pub enum SuiteScene {
     /// `size` 5 cm spheres shot at 300 m/s into a 10 cm wall; the error is
     /// the share that came out the far side.
     CcdBullets,
+    /// A `size` by `size` cell sheet, 5 cm cells, hung by its two top
+    /// corners; the error is the most any edge stretched past its rest
+    /// length in any step, as a fraction of it.
+    ClothHang,
+    /// A cube of about `size` fluid particles dropped 1 m into a column
+    /// that fits it and left to settle; the error is how much lower its
+    /// mean particle height ends than at rest spacing, as a fraction of
+    /// that height (compression; negative is expansion).
+    FluidDrop,
 }
 
 /// What one run of a [`SuiteScene`] measured.
@@ -43,8 +52,13 @@ pub struct SuiteScore {
 const DT: f64 = 1.0 / 60.0;
 
 impl SuiteScene {
-    pub const ALL: [Self; 3] =
-        [Self::StackingStability, Self::JointChain, Self::CcdBullets];
+    pub const ALL: [Self; 5] = [
+        Self::StackingStability,
+        Self::JointChain,
+        Self::CcdBullets,
+        Self::ClothHang,
+        Self::FluidDrop,
+    ];
 
     #[must_use]
     pub fn name(self) -> &'static str {
@@ -52,6 +66,8 @@ impl SuiteScene {
             Self::StackingStability => "stacking_stability",
             Self::JointChain => "joint_chain",
             Self::CcdBullets => "ccd_bullets",
+            Self::ClothHang => "cloth_hang",
+            Self::FluidDrop => "fluid_drop",
         }
     }
 
@@ -62,6 +78,8 @@ impl SuiteScene {
             Self::StackingStability => "max drift (m)",
             Self::JointChain => "max joint gap (m)",
             Self::CcdBullets => "tunnelled share",
+            Self::ClothHang => "max edge strain",
+            Self::FluidDrop => "height loss",
         }
     }
 
@@ -70,10 +88,10 @@ impl SuiteScene {
     pub fn run(self, size: usize, steps: u32) -> SuiteScore {
         let mut app = App::new();
         let mut elapsed = Duration::ZERO;
-        let mut step = |app: &mut App| {
+        let step = |app: &mut App, elapsed: &mut Duration| {
             let start = Instant::now();
             app.update(Duration::from_secs_f64(DT)).unwrap();
-            elapsed += start.elapsed();
+            *elapsed += start.elapsed();
         };
         let error = match self {
             Self::StackingStability => {
@@ -100,7 +118,7 @@ impl SuiteScene {
                     })
                     .collect();
                 for _ in 0..steps {
-                    step(&mut app);
+                    step(&mut app, &mut elapsed);
                 }
                 cubes
                     .iter()
@@ -136,7 +154,7 @@ impl SuiteScene {
                 }
                 let mut widest = 0.0_f32;
                 for _ in 0..steps {
-                    step(&mut app);
+                    step(&mut app, &mut elapsed);
                     for &(link, previous) in &links {
                         let anchor = point(&app, link, [-HALF, 0.0, 0.0]);
                         let target = previous.map_or([0.0, 10.0, 0.0], |p| {
@@ -176,13 +194,70 @@ impl SuiteScene {
                     })
                     .collect();
                 for _ in 0..steps {
-                    step(&mut app);
+                    step(&mut app, &mut elapsed);
                 }
                 let through = bullets
                     .iter()
                     .filter(|&&bullet| position(&app, bullet)[2] < -0.05)
                     .count();
                 through as f32 / size.max(1) as f32
+            }
+            Self::ClothHang => {
+                const SPACING: f32 = 0.05;
+                let cells = size.max(1) as u32;
+                let mut cloth = Cloth::grid(
+                    [0.0, 2.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [cells; 2],
+                    SPACING,
+                    0.2,
+                )
+                .unwrap();
+                cloth.pin(0);
+                cloth.pin(cells as usize);
+                let edges = cloth.edges().to_vec();
+                let rests: Vec<f32> = edges
+                    .iter()
+                    .map(|&[a, b]| edge_length(&cloth.positions, a, b))
+                    .collect();
+                let settings = ClothSettings {
+                    floor: None,
+                    ..ClothSettings::default()
+                };
+                let mut worst = 0.0_f32;
+                for _ in 0..steps {
+                    let start = Instant::now();
+                    cloth.step(&settings, DT as f32);
+                    elapsed += start.elapsed();
+                    for (&[a, b], rest) in edges.iter().zip(&rests) {
+                        let length = edge_length(&cloth.positions, a, b);
+                        worst = worst.max(length / rest - 1.0);
+                    }
+                }
+                worst
+            }
+            Self::FluidDrop => {
+                let side = (size as f32).cbrt().ceil().max(2.0) as u32;
+                let spacing = FluidSettings::default().spacing;
+                let width = (side - 1) as f32 * spacing;
+                let settings = FluidSettings {
+                    bounds: ([0.0; 3], [width, 4.0 * width + 1.0, width]),
+                    ..FluidSettings::default()
+                };
+                let mut fluid =
+                    Fluid::block([0.0, 1.0, 0.0], [side; 3], spacing);
+                for _ in 0..steps {
+                    let start = Instant::now();
+                    fluid.step(&settings, DT as f32);
+                    elapsed += start.elapsed();
+                }
+                // The column fits the block, so settled at rest spacing its
+                // particles average half the block's height.
+                let mean_height =
+                    fluid.positions.iter().map(|p| p[1]).sum::<f32>()
+                        / fluid.positions.len() as f32;
+                1.0 - mean_height / (width / 2.0)
             }
         };
         SuiteScore {
@@ -228,6 +303,10 @@ fn point(app: &App, entity: Entity, local: [f32; 3]) -> [f32; 3] {
     (nalgebra::Vector3::from(transform.position) + rotated).into()
 }
 
+fn edge_length(points: &[[f32; 3]], a: u32, b: u32) -> f32 {
+    distance(points[a as usize], points[b as usize])
+}
+
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     (nalgebra::Vector3::from(a) - nalgebra::Vector3::from(b)).norm()
 }
@@ -248,5 +327,11 @@ mod tests {
         assert!(chain.error < 0.5, "{chain:?}");
         let bullets = SuiteScene::CcdBullets.run(25, 30);
         assert_eq!(bullets.error, 0.0, "{bullets:?}");
+        let cloth = SuiteScene::ClothHang.run(10, 120);
+        assert!(cloth.error < 0.05, "{cloth:?}");
+        let fluid = SuiteScene::FluidDrop.run(216, 120);
+        // Baseline, not a goal: four density iterations let a 6-particle
+        // column sink about a third (1000 particles: a fifth).
+        assert!(fluid.error.abs() < 0.4, "{fluid:?}");
     }
 }

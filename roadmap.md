@@ -2370,7 +2370,8 @@ Depends on: Milestones 5, 6, and 10. Deformable and fluid tooling follows Milest
     - A trace shows each cube tilting a few milliradians while it settles; partial sleep then freezes the lower cubes, and the wake at about step 200 drops the tower 20 cm.
 
     The root cause is the sequential-impulse contact solve tilting cubes as they settle. Look at symmetric manifold ordering or a contact-point reduction, and at position correction (0.8 of the overlap per step is aggressive). The chain does not improve with iterations; look at its joint rows. Then tighten the test bounds.
-  - [ ] 100K pile (GPU; `physics_bench` times it but does not score it), ragdoll count, vehicle stress, cloth, fluid and fracture scenes.
+  - [x] Cloth and fluid. `SuiteScene::ClothHang` hangs a `size` by `size` sheet of 5 cm cells by its two top corners and scores the largest edge strain seen in any step. `SuiteScene::FluidDrop` drops a cube of about `size` particles 1 m into a column that fits it and scores how much lower its mean height settles than at rest spacing. Measured (release, this machine): a 40 by 40 sheet stretches 25% at its pinned corners (9.2 ms per step); 1000 fluid particles lose 21% of their height (2.1 ms per step). Evidence: the same test holds a 10 by 10 sheet under 5% strain (it reaches 2.4%) and a 216-particle drop under 40% height loss (it loses 33%, a baseline: four density iterations are soft). fmt, all three clippy configurations, `cargo test --workspace` (lib 901) and the gpu-tests run (lib 1020) pass.
+  - [ ] 100K pile (GPU; `physics_bench` times it but does not score it), ragdoll count, vehicle stress and fracture scenes.
 - [ ] Reference implementations of the same scenes on Jolt, PhysX, Rapier, and Godot Physics, run by the same harness.
 - [ ] Publish results with hardware, driver, and settings; regressions against stored baselines fail CI.
 
