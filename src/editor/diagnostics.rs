@@ -6,7 +6,7 @@ use super::gui_elements::EditorTheme;
 use super::inspector::widgets::{checkbox, choice, drag, section, value};
 use crate::rendering::scene_renderer::{
     resolve_quality, CullingStats, RenderCapacityDiagnostics, RenderCounters,
-    RendererCapabilities,
+    RendererCapabilities, ShaderErrors,
 };
 use crate::runtime::{
     Antialiasing, PhysicsBackendStatus, PhysicsSettings, RenderSettings,
@@ -19,6 +19,7 @@ pub(super) fn draw_render_settings_area(
     capabilities: Option<&RendererCapabilities>,
     culling: Option<&CullingStats>,
     capacity: Option<&RenderCapacityDiagnostics>,
+    shader_errors: Option<&ShaderErrors>,
 ) {
     egui::ScrollArea::vertical()
         .id_salt("render_settings_area")
@@ -140,6 +141,17 @@ pub(super) fn draw_render_settings_area(
                     );
                 }
             });
+            // Shaders rebuild when their source changes, so this list
+            // follows edits made in the Inspector.
+            if let Some(ShaderErrors(errors)) =
+                shader_errors.filter(|errors| !errors.0.is_empty())
+            {
+                section(ui, "Shader errors", false, |ui| {
+                    for error in errors {
+                        ui.colored_label(EditorTheme::ERROR, error);
+                    }
+                });
+            }
         });
 }
 
@@ -302,6 +314,9 @@ mod tests {
                     None,
                     None,
                     Some(&capacity),
+                    Some(&ShaderErrors(vec![
+                        "surface: 3: error: 'oops' : undeclared".into(),
+                    ])),
                 );
                 draw_physics_diagnostics_area(
                     ui,
@@ -325,5 +340,7 @@ mod tests {
         assert!(text.contains("Missing meshes"), "{text}");
         assert!(text.contains("Grid overflow"), "{text}");
         assert!(text.contains("Events dropped"), "{text}");
+        assert!(text.contains("Shader errors"), "{text}");
+        assert!(text.contains("'oops' : undeclared"), "{text}");
     }
 }

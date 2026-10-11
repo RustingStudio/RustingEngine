@@ -159,6 +159,9 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
     let render_capacity = world
         .get_resource::<crate::rendering::scene_renderer::RenderCapacityDiagnostics>()
         .copied();
+    let shader_errors = world
+        .get_resource::<crate::rendering::scene_renderer::ShaderErrors>()
+        .cloned();
     let renderer_capabilities = world
         .get_resource::<crate::rendering::scene_renderer::RendererCapabilities>(
         )
@@ -1249,6 +1252,7 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
                             renderer_capabilities.as_ref(),
                             culling_stats.as_ref(),
                             render_capacity.as_ref(),
+                            shader_errors.as_ref(),
                         );
                     }
                     EditorPanel::PhysicsDiagnostics => {

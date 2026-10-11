@@ -106,10 +106,16 @@ per shape in each key), the Inspector, or game code. The mesh is
 reshaped first and skinned after, on the CPU, each frame a weight
 changes. `samples/vertical_slice/squash_box.gltf` squashes and leans a box.
 
+In the editor and in games run from it, skinning and blend shapes run on
+the GPU: the copy keeps the cooked vertices, and each frame a compute
+shader writes the deformed vertices into the copy's vertex buffer before
+anything draws, so shadows and reflections bend too. Headless renders
+(`rusting capture`, tests) bend on the CPU, the reference the GPU path
+matches.
+
 Limits: four joints per vertex; flat-shaded meshes (no normals in the
-file) keep their face normals while morphing; skinning and blend shapes
-run on the CPU, fine for a few characters of a few thousand vertices
-each.
+file) keep their face normals while morphing; a GPU-bent mesh is never
+frustum culled, and clicking it picks against its unbent shape.
 
 ## In the editor
 

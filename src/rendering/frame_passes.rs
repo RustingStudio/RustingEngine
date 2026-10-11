@@ -72,6 +72,8 @@ pub enum FrameResource {
     DepthPyramid,
     HdrColor,
     /// Mipmapped copy of the opaque `HdrColor` that refraction samples.
+    /// Ambient occlusion reads the previous frame's copy before it is
+    /// replaced.
     SceneColor,
     SceneDepth,
     /// Blurred ambient occlusion per target pixel.
@@ -198,6 +200,8 @@ impl FramePass {
                 const {
                     &[
                         read(SceneDepth, Some(ShaderReadOnlyOptimal)),
+                        // Last frame's copy, for indirect light.
+                        read(SceneColor, Some(ShaderReadOnlyOptimal)),
                         write(AmbientOcclusion, Some(General)),
                     ]
                 }
@@ -347,6 +351,10 @@ mod tests {
                     .iter()
                     .flat_map(|p| p.accesses())
                     .any(|a| a.write && a.resource == access.resource);
+                // Indirect light reads last frame's scene color.
+                let written = written
+                    || (*pass == FramePass::AmbientOcclusion
+                        && access.resource == FrameResource::SceneColor);
                 assert!(written, "{pass:?} reads unwritten {access:?}");
             }
         }
@@ -424,6 +432,12 @@ mod tests {
                 SceneDepth,
                 DepthStencilAttachmentOptimal,
                 ShaderReadOnlyOptimal,
+                FramePass::SceneColor,
+            ),
+            (
+                SceneColor,
+                ShaderReadOnlyOptimal,
+                TransferDstOptimal,
                 FramePass::SceneColor,
             ),
             (

@@ -15,6 +15,7 @@ use super::post_effects::{
     BloomChain, ExposureMeter, OcclusionParams, OcclusionTargets,
     PostPipelines, TemporalHistory,
 };
+use super::sky::{sky_params, SkyBake};
 
 use nalgebra::{
     Matrix4, Orthographic3, Perspective3, Point3, Vector3, Vector4,
@@ -36,7 +37,7 @@ use vulkano::command_buffer::{
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::layout::DescriptorSetLayout;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
-use vulkano::device::{DeviceExtensions, DeviceOwned, Queue};
+use vulkano::device::{Device, DeviceExtensions, DeviceOwned, Queue};
 use vulkano::format::Format;
 use vulkano::image::sampler::{
     BorderColor, Filter, Sampler, SamplerAddressMode, SamplerCreateInfo,
@@ -430,7 +431,7 @@ fn lod_value(camera: [f32; 4], sphere: [f32; 4], screen_size: bool) -> f32 {
 /// One particle, read per instance by the particle pipelines.
 #[repr(C)]
 #[derive(BufferContents, Vertex, Clone, Copy, Debug, PartialEq)]
-struct ParticleVertex {
+pub(super) struct ParticleVertex {
     #[format(R32G32B32_SFLOAT)]
     center: [f32; 3],
     #[format(R32_SFLOAT)]
@@ -476,9 +477,10 @@ struct RenderInstanceUpload {
     surface: [f32; 4],
     /// x: GPU physics index or `u32::MAX`; y: alpha mode (0 opaque, 1 mask,
     /// 2 blend); z: mask cutoff as `f32` bits; w: bit 0 casts shadows, bit 1
-    /// receives shadows.
+    /// receives shadows, bits 8 and up hold the lightmap slot plus one.
     physics: [u32; 4],
-    /// x: transmission; y: index of refraction; z: thickness.
+    /// x: transmission; y: index of refraction; z: thickness; w: 1 for a
+    /// terrain splat material.
     transmission: [f32; 4],
     /// xy: texture repeats per face; zw: texture offset.
     uv_transform: [f32; 4],
@@ -490,8 +492,27 @@ const SSR_MAX_ROUGHNESS: f32 = 0.5;
 
 /// Most reflection probes a frame samples; later ones are ignored.
 const MAX_REFLECTION_PROBES: usize = 4;
+/// Fog volumes the main pass reads; `fog.glsl` declares the same count.
+const MAX_FOG_VOLUMES: usize = 8;
+/// Decals the main pass paints; the fragment shader declares the same
+/// count.
+const MAX_DECALS: usize = 16;
+/// Distinct decal images per frame, in set 2 binding 9.
+const MAX_DECAL_IMAGES: usize = 4;
 /// Side length in texels of each captured probe face.
 const PROBE_FACE_SIZE: u32 = 128;
+/// Most light probes a grid bakes; the fragment shader indexes up to this.
+const MAX_LIGHT_PROBES: usize = 64;
+/// Side length in texels of each face a light probe bakes from.
+const LIGHT_PROBE_FACE_SIZE: u32 = 16;
+/// Rows of the light probe buffer before the probes' ambient cubes: grid
+/// center and probe count, half size and intensity, resolution.
+const LIGHT_PROBE_HEADER: usize = 3;
+/// Light probes the High profile recaptures each frame, round robin, so
+/// moving lights and objects relight the grid within a few frames.
+// ponytail: each recapture blocks on its readback; move the reduction to a
+// compute pass if the stall shows up in frame pacing.
+const LIGHT_PROBES_PER_FRAME: usize = 2;
 /// View direction and up vector of each probe face, in layer order. The
 /// fragment shader's `PROBE_FORWARD` and `PROBE_UP` match.
 const PROBE_FACES: [([f32; 3], [f32; 3]); 6] = [
@@ -526,7 +547,8 @@ struct ShadowUpload {
     /// Fog height, height falloff, sun scatter and sky affect.
     fog_shape: [f32; 4],
     /// x is 1 when binding 6 holds this frame's ambient occlusion; y is 1
-    /// for single-tap hard shadows.
+    /// for single-tap hard shadows; z is 1 when binding 10 holds indirect
+    /// light.
     ambient_occlusion: [f32; 4],
     /// Light-space transform of each cascade of the shadowed light, or of
     /// each cube face of a point light.
@@ -545,6 +567,26 @@ struct ShadowUpload {
     cluster_view: [f32; 4],
     /// Cluster near plane in x and `ln(far / near)` in y.
     cluster_depth: [f32; 4],
+    /// x is how much shadows block the fog's glow toward the sun; y counts
+    /// the fog volumes.
+    fog_shafts: [f32; 4],
+    /// World-to-box matrix of each fog volume; the box spans -1..1.
+    fog_volumes: [[[f32; 4]; 4]; MAX_FOG_VOLUMES],
+    /// Color in rgb and density in w of each fog volume.
+    fog_volume_colors: [[f32; 4]; MAX_FOG_VOLUMES],
+    /// The procedural sky, as `sky::sky_params` lays it out; all zero
+    /// without one. `sky[2].w` is 2 when the environment map is drawn as
+    /// the background instead.
+    sky: [[f32; 4]; 3],
+    /// x counts the decals.
+    decal_info: [f32; 4],
+    /// World-to-box matrix of each decal; the box spans -1..1.
+    decals: [[[f32; 4]; 4]; MAX_DECALS],
+    /// Each decal's projection axis (the box's +Z in world space) and its
+    /// image slot in w, -1 for none.
+    decal_axes: [[f32; 4]; MAX_DECALS],
+    /// Linear RGBA tint of each decal.
+    decal_colors: [[f32; 4]; MAX_DECALS],
 }
 
 /// Side length in texels of the directional shadow map and the view
@@ -926,6 +968,8 @@ struct PreparedMaterial {
     set: Arc<DescriptorSet>,
     /// Views the set was written with; a re-uploaded texture has a new view.
     views: [usize; MATERIAL_TEXTURES],
+    /// The material's surface shader; empty for the built-in one.
+    shader: String,
 }
 
 const MATERIAL_TEXTURES: usize = 5;
@@ -980,6 +1024,10 @@ struct PreparedRenderInstances {
     /// Mesh-space bounds for each instance that `bounds` culls.
     local_bounds: Vec<Option<RenderBounds>>,
     flashes: Vec<(bevy_ecs::entity::Entity, [f32; 4])>,
+    material_overrides:
+        Vec<(bevy_ecs::entity::Entity, crate::runtime::MaterialOverride)>,
+    /// `RenderWorld::lightmaps` the slots in `physics.w` were packed for.
+    lightmaps: Vec<(bevy_ecs::entity::Entity, crate::runtime::Lightmap)>,
     physics_revision: u64,
     material_revisions: Vec<(Handle<MaterialAsset>, u64)>,
     instances: Subbuffer<[RenderInstanceUpload]>,
@@ -1260,6 +1308,40 @@ fn light_cookies(render_world: &RenderWorld) -> Vec<Handle<TextureAsset>> {
         }
     }
     cookies
+}
+
+/// A decal's box-to-world matrix, settings and image slot.
+type FrameDecal<'a> = (&'a [[f32; 4]; 4], &'a crate::runtime::Decal, f32);
+
+/// The decals the main pass paints, at most `limit` in entity order, with
+/// their image slot (-1 for none), and the distinct images in slot order. A
+/// decal whose image finds no free slot is dropped.
+fn frame_decals(
+    render_world: &RenderWorld,
+    limit: usize,
+) -> (Vec<FrameDecal<'_>>, Vec<Handle<TextureAsset>>) {
+    let mut images = Vec::new();
+    let mut decals = Vec::new();
+    for (matrix, decal) in &render_world.decals {
+        if decals.len() == limit {
+            break;
+        }
+        let slot = match decal.handle {
+            None => -1.0,
+            Some(image) => {
+                match images.iter().position(|&slot| slot == image) {
+                    Some(slot) => slot as f32,
+                    None if images.len() < MAX_DECAL_IMAGES => {
+                        images.push(image);
+                        (images.len() - 1) as f32
+                    }
+                    None => continue,
+                }
+            }
+        };
+        decals.push((matrix, decal, slot));
+    }
+    (decals, images)
 }
 
 /// Screen tiles across and down and depth slices of the light clusters.
@@ -1580,12 +1662,25 @@ pub const MAX_LIGHTS: usize = 1024;
 
 /// Capacity and asset fallbacks the renderer took instead of failing the
 /// frame.
+/// Compiler messages of the shaders that failed to build in the latest
+/// frame, each starting with its kind (`surface:`, `sky:`, `particle:`,
+/// `post:` or `condition:`), sorted. Shaders rebuild when their source
+/// changes, so fixing one clears its message on the next frame.
+#[derive(bevy_ecs::prelude::Resource, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShaderErrors(pub Vec<String>);
+
 #[derive(
     bevy_ecs::prelude::Resource, Clone, Copy, Debug, Default, PartialEq, Eq,
 )]
 pub struct RenderCapacityDiagnostics {
     /// Lights beyond [`MAX_LIGHTS`] left out of the latest light upload.
     pub dropped_lights: usize,
+    /// Decals past the quality profile's [`decal_budget`] or without a free
+    /// image slot, left out of the latest frame.
+    pub dropped_decals: usize,
+    /// Particles past the quality profile's [`particle_budget`] left out of
+    /// the latest frame, CPU particles and GPU slots together.
+    pub dropped_particles: usize,
     /// Lights in the latest light upload: directional, point and spot.
     pub lights: usize,
     /// Distinct missing meshes of visible objects; they draw the fallback
@@ -1669,6 +1764,32 @@ pub struct SceneRenderer {
     probe_maps: Arc<ImageView>,
     /// Probes `probe_maps` was captured for.
     probe_keys: Vec<([f32; 3], ReflectionProbe)>,
+    /// Header rows, then six rows of irradiance over pi per light probe
+    /// (+X, -X, +Y, -Y, +Z, -Z); set 2 binding 11.
+    light_probes: Subbuffer<[[f32; 4]]>,
+    /// Grid `light_probes` was baked for.
+    light_probe_key: Option<([f32; 3], crate::runtime::LightProbeGrid)>,
+    /// CPU copy of `light_probes`, patched by real-time relighting.
+    light_probe_rows: Vec<[f32; 4]>,
+    /// Next probe real-time relighting recaptures.
+    light_probe_cursor: usize,
+    /// Buffers of each GPU particle emitter drawn last frame.
+    gpu_particles: HashMap<
+        bevy_ecs::entity::Entity,
+        super::gpu_particles::GpuParticleState,
+    >,
+    gpu_particle_pipeline: Option<Arc<ComputePipeline>>,
+    /// Unchanging inputs of each GPU-skinned copy, by copy key.
+    skin_inputs: HashMap<u64, super::gpu_skinning::SkinInputs>,
+    skinning_pipeline: Option<Arc<ComputePipeline>>,
+    /// `RenderWorld::elapsed_seconds` of the last frame, for particle steps.
+    particle_clock: f32,
+    /// Renderer `capture_faces` reuses while the format and size match.
+    capturer: Option<(Format, u32, Box<SceneRenderer>)>,
+    /// Baked lightmaps; see `lightmap` for the layout.
+    lightmaps: Subbuffer<[[f32; 4]]>,
+    /// Hash of what `lightmaps` was baked from, 0 for nothing.
+    lightmap_key: u64,
     /// Reads `hdr` as the input attachment of the tone-mapping subpass,
     /// and the bloom glow.
     tonemap_set: Arc<DescriptorSet>,
@@ -1680,6 +1801,9 @@ pub struct SceneRenderer {
     exposure: ExposureMeter,
     /// Rebuilt with `depth`.
     occlusion: OcclusionTargets,
+    /// View projection of the frame `scene_color` holds, while it holds
+    /// one; indirect light reprojects into it.
+    scene_color_view_projection: Option<Matrix4<f32>>,
     /// Depth-only opaque pass into `depth` that ambient occlusion traces;
     /// shares the main pipeline layout.
     depth_prepass_pipeline: Arc<GraphicsPipeline>,
@@ -1706,6 +1830,8 @@ pub struct SceneRenderer {
     screens_drawn: Vec<(bevy_ecs::entity::Entity, u64)>,
     /// 1x1 white texture bound in place of every missing material map.
     white_texture: (Arc<ImageView>, Arc<Sampler>),
+    /// The procedural sky's lighting image, made on first use.
+    sky_bake: Option<SkyBake>,
     /// Per-slot stand-ins for a map that is referenced but missing or
     /// malformed: magenta base color, flat normal, white for the rest.
     missing_textures: [(Arc<ImageView>, Arc<Sampler>); MATERIAL_TEXTURES],
@@ -1746,6 +1872,15 @@ pub struct SceneRenderer {
     /// Custom condition shaders by resolved source. `Err` keeps the compiler
     /// message so a broken shader is reported once, not rebuilt every frame.
     condition_shaders: HashMap<String, Result<Arc<ComputePipeline>, String>>,
+    /// Opaque, blended and overlay pipelines of each material surface shader
+    /// by source and sample count, or why it failed to build.
+    surface_pipelines: SurfacePipelines,
+    /// Alpha and additive particle pipelines per particle shader.
+    particle_shaders: ParticlePipelines,
+    /// Source, sample count and tone-map pipeline of the last post shader.
+    post_shader: ShaderPipeline,
+    /// The same for the sky shader.
+    sky_shader: ShaderPipeline,
     last_physics_tick: u64,
     last_frame_passes: Vec<FramePass>,
     /// Image the next frame is stretched over after it renders, for
@@ -1861,6 +1996,12 @@ impl SceneRenderer {
         let scene_color =
             create_scene_color(&memory_allocator, initial_extent)?;
         let probe_maps = create_probe_maps(&memory_allocator, 1, 1)?;
+        let light_probes = create_light_probe_buffer(
+            &memory_allocator,
+            vec![[0.0; 4]; LIGHT_PROBE_HEADER + 6],
+        )?;
+        let lightmaps =
+            create_light_probe_buffer(&memory_allocator, vec![[0.0; 4]])?;
         let scene_color_sampler = Sampler::new(
             queue.device().clone(),
             SamplerCreateInfo {
@@ -2041,6 +2182,7 @@ impl SceneRenderer {
             screen_frame: 0,
             screens_drawn: Vec::new(),
             white_texture,
+            sky_bake: None,
             missing_textures,
             white_material,
             samplers: HashMap::from([(
@@ -2079,11 +2221,24 @@ impl SceneRenderer {
             scene_color_sampler,
             probe_maps,
             probe_keys: Vec::new(),
+            light_probes,
+            light_probe_key: None,
+            light_probe_rows: Vec::new(),
+            light_probe_cursor: 0,
+            capturer: None,
+            gpu_particles: HashMap::new(),
+            gpu_particle_pipeline: None,
+            skin_inputs: HashMap::new(),
+            skinning_pipeline: None,
+            particle_clock: 0.0,
+            lightmaps,
+            lightmap_key: 0,
             tonemap_set,
             post_pipelines,
             bloom_chain,
             exposure,
             occlusion,
+            scene_color_view_projection: None,
             depth_prepass_pipeline,
             depth_prepass_framebuffer,
             depth_extent: initial_extent,
@@ -2108,6 +2263,10 @@ impl SceneRenderer {
             physics_commands_serial: 0,
             queued_read_all: false,
             condition_shaders: HashMap::new(),
+            surface_pipelines: HashMap::new(),
+            particle_shaders: HashMap::new(),
+            post_shader: None,
+            sky_shader: None,
             last_physics_tick: 0,
             last_frame_passes: Vec::new(),
             upscale_to: None,
@@ -2586,6 +2745,13 @@ impl SceneRenderer {
         if self.probe_keys != probes {
             self.capture_probes(probes, render_world, assets)?;
         }
+        if self.light_probe_key != render_world.light_probe_grid {
+            self.bake_light_probes(render_world, assets)?;
+        } else if resolve_quality(render_world.quality, &self.capabilities)
+            == QualityProfile::High
+        {
+            self.relight_light_probes(render_world, assets)?;
+        }
         self.counters = RenderCounters::default();
         let preparation_start = std::time::Instant::now();
         self.prepare_visible_meshes(render_world, assets)?;
@@ -2613,6 +2779,10 @@ impl SceneRenderer {
         self.prepare_gpu_physics(render_world)?;
         self.prepare_lights(render_world)?;
         self.prepare_render_instances(render_world, assets)?;
+        let lightmap_key = lightmap_key(render_world, assets);
+        if self.lightmap_key != lightmap_key {
+            self.bake_lightmaps(lightmap_key, render_world, assets)?;
+        }
         let camera = options.camera.or(render_world.active_camera);
         let steady_clip = view_projection(camera, viewport.extent);
         let taa = options.debug_view == SceneDebugView::Lit
@@ -2679,6 +2849,21 @@ impl SceneRenderer {
             Some(msaa) if samples > 1 => msaa.clone(),
             _ => self.passes.clone(),
         };
+        let post_shader =
+            self.post_pipeline(&active, samples, &render_world.post_shader);
+        let sky_shader = self.sky_pipeline(
+            &active,
+            samples,
+            &render_world.sky_shader,
+            &render_world.fog_shader,
+        );
+        let particle_shaders = particle_pipelines(
+            &mut self.particle_shaders,
+            &self.queue,
+            &active,
+            samples,
+            &render_world.particle_shaders,
+        );
         // Resolve attachments are neither cleared nor loaded.
         let clears = |hdr: Option<vulkano::format::ClearValue>, depth| {
             let mut values = vec![None, hdr, depth];
@@ -2715,16 +2900,24 @@ impl SceneRenderer {
             };
         }
         self.last_culling_path = path;
+        let quality = resolve_quality(render_world.quality, &self.capabilities);
+        let (decal_limit, particle_limit) =
+            (decal_budget(quality), particle_budget(quality));
         self.prepare_materials(
             assets,
             render_world
                 .environment
-                .map(|(texture, _)| texture)
+                .map(|(texture, ..)| texture)
                 .into_iter()
                 .chain(light_cookies(render_world))
+                .chain(frame_decals(render_world, decal_limit).1)
                 .chain(render_world.color_lut.map(|(texture, _)| texture))
                 .collect(),
         )?;
+        let particle_steps = self.prepare_gpu_particles(render_world)?;
+        let skin_steps = self.prepare_skinning(render_world, assets)?;
+        let particle_total = particle_total(render_world);
+        let particle_share = particle_share(particle_total, particle_limit);
 
         let carry = self.prepared_physics.as_mut().unwrap().carry.take();
         let physics = self.prepared_physics.as_ref().unwrap();
@@ -2822,7 +3015,13 @@ impl SceneRenderer {
             } else {
                 [eye[0], eye[1], eye[2], 1.0]
             },
-            ambient: lights.ambient,
+            // w: seconds since start, a surface shader's `i.time`.
+            ambient: [
+                lights.ambient[0],
+                lights.ambient[1],
+                lights.ambient[2],
+                render_world.elapsed_seconds,
+            ],
             ground_ambient: lights.ground_ambient,
             // y: shadowed light index plus one, or 0 for none.
             light_info: [
@@ -2978,12 +3177,20 @@ impl SceneRenderer {
         );
         let lit = options.debug_view == SceneDebugView::Lit;
         // ponytail: refraction still needs the copy even with reflections off.
-        let split = lit && (refraction || (reflections && glossy));
+        let mut split = lit && (refraction || (reflections && glossy));
         // Atmosphere belongs to the lit look; debug views show raw shading.
         let effects = options.effects;
         let fog = render_world
             .fog
             .filter(|fog| lit && effects.fog && fog.density > 0.0);
+        let (decals, decal_images) = frame_decals(render_world, decal_limit);
+        self.capacity.dropped_decals = render_world.decals.len() - decals.len();
+        let fog_volumes: &[_] = if lit && effects.fog {
+            let volumes = &render_world.fog_volumes;
+            &volumes[..volumes.len().min(MAX_FOG_VOLUMES)]
+        } else {
+            &[]
+        };
         let bloom = render_world
             .bloom
             .filter(|bloom| lit && effects.bloom && bloom.intensity > 0.0);
@@ -3042,7 +3249,9 @@ impl SceneRenderer {
                 strength: motion_blur.map_or(0.0, |blur| blur.intensity),
             };
         let fxaa = lit && render_world.antialiasing == Antialiasing::Fxaa;
+        // A post shader may read any pixel through `scene_at`.
         let sampled = fxaa
+            || post_shader.is_some()
             || taa
             || grade.chromatic_aberration > 0.0
             || grade.color_bleed > 0.0
@@ -3059,14 +3268,59 @@ impl SceneRenderer {
                     && occlusion.radius > 0.0
                     && occlusion.intensity > 0.0
             });
-        let environment =
-            render_world.environment.and_then(|(texture, intensity)| {
+        // Indirect light gathers from last frame's opaque copy, so these
+        // frames make one; High only.
+        let indirect_light = ambient_occlusion
+            .map(|occlusion| occlusion.indirect.max(0.0))
+            .filter(|&strength| {
+                strength > 0.0 && quality == QualityProfile::High
+            });
+        split |= indirect_light.is_some();
+        // The copy made this frame, if any, is the one next frame reads.
+        let previous_view_projection =
+            indirect_light.and(self.scene_color_view_projection);
+        if split {
+            self.scene_color_view_projection = Some(clip);
+        }
+        let sky = render_world
+            .procedural_sky
+            .filter(|_| lit)
+            .map(|sky| sky_params(&sky, &render_world.directional_lights));
+        let environment = render_world
+            .environment
+            .and_then(|(texture, intensity, background)| {
                 let prepared = self.prepared_textures.get(&texture.key())?;
                 Some((
                     (prepared.view.clone()?, prepared.sampler.clone()),
                     intensity,
+                    background && lit,
                 ))
-            });
+            })
+            .map(Ok)
+            .or_else(|| {
+                // Without an environment map, the sky lights the scene.
+                sky?;
+                let bake = match &mut self.sky_bake {
+                    Some(bake) => bake,
+                    None => match SkyBake::new(
+                        &self.queue,
+                        &self.memory_allocator,
+                        &self.descriptor_allocator,
+                    ) {
+                        Ok(bake) => self.sky_bake.insert(bake),
+                        Err(error) => return Some(Err(error)),
+                    },
+                };
+                Some(Ok((
+                    (bake.view.clone(), bake.sampler.clone()),
+                    1.0,
+                    false,
+                )))
+            })
+            .transpose()?;
+        let environment_background = environment
+            .as_ref()
+            .is_some_and(|(.., background)| *background);
         let shadow_upload = self.frame_contexts[self.frame_index]
             .transient
             .allocate_sized::<ShadowUpload>()
@@ -3079,7 +3333,7 @@ impl SceneRenderer {
                 environment: {
                     let mut row = environment.as_ref().map_or(
                         [0.0; 4],
-                        |((view, _), intensity)| {
+                        |((view, _), intensity, _)| {
                             let last_mip = view.image().mip_levels() - 1;
                             [1.0, *intensity, last_mip as f32, 0.0]
                         },
@@ -3136,7 +3390,7 @@ impl SceneRenderer {
                 ambient_occlusion: [
                     f32::from(u8::from(ambient_occlusion.is_some())),
                     f32::from(u8::from(render_world.hard_shadows)),
-                    0.0,
+                    f32::from(u8::from(previous_view_projection.is_some())),
                     0.0,
                 ],
                 cascades: std::array::from_fn(|index| {
@@ -3176,6 +3430,58 @@ impl SceneRenderer {
                     0.0,
                     0.0,
                 ],
+                fog_shafts: [
+                    fog.map_or(0.0, |fog| fog.light_shafts.clamp(0.0, 1.0)),
+                    fog_volumes.len() as f32,
+                    0.0,
+                    0.0,
+                ],
+                fog_volumes: std::array::from_fn(|index| {
+                    fog_volumes
+                        .get(index)
+                        .and_then(|(matrix, _)| {
+                            Matrix4::from(*matrix).try_inverse()
+                        })
+                        .unwrap_or_else(Matrix4::identity)
+                        .into()
+                }),
+                fog_volume_colors: std::array::from_fn(|index| {
+                    fog_volumes.get(index).map_or([0.0; 4], |(_, volume)| {
+                        let [r, g, b] = volume.color;
+                        [r.max(0.0), g.max(0.0), b.max(0.0), volume.density]
+                    })
+                }),
+                sky: {
+                    let mut rows = sky.unwrap_or_default();
+                    if environment_background {
+                        rows[2][3] = 2.0;
+                    }
+                    rows
+                },
+                decal_info: [decals.len() as f32, 0.0, 0.0, 0.0],
+                decals: std::array::from_fn(|index| {
+                    decals
+                        .get(index)
+                        .and_then(|(matrix, ..)| {
+                            Matrix4::from(**matrix).try_inverse()
+                        })
+                        .unwrap_or_else(Matrix4::identity)
+                        .into()
+                }),
+                decal_axes: std::array::from_fn(|index| {
+                    decals.get(index).map_or([0.0; 4], |(matrix, _, slot)| {
+                        let axis = Matrix4::from(**matrix)
+                            .transform_vector(&Vector3::z())
+                            .try_normalize(0.0)
+                            .unwrap_or_else(Vector3::z);
+                        [axis.x, axis.y, axis.z, *slot]
+                    })
+                }),
+                decal_colors: std::array::from_fn(|index| {
+                    decals.get(index).map_or([0.0; 4], |(_, decal, _)| {
+                        decal.color.map(|channel| channel.max(0.0))
+                    })
+                }),
             };
         let cluster_list = build_light_clusters(
             &self.prepared_lights.as_ref().unwrap().local,
@@ -3206,7 +3512,7 @@ impl SceneRenderer {
                 {
                     let (view, sampler) = environment.map_or_else(
                         || self.white_texture.clone(),
-                        |(texture, _)| texture,
+                        |(texture, ..)| texture,
                     );
                     WriteDescriptorSet::image_view_sampler(2, view, sampler)
                 },
@@ -3249,6 +3555,8 @@ impl SceneRenderer {
                     WriteDescriptorSet::image_view_sampler(6, view, sampler)
                 },
                 WriteDescriptorSet::buffer(7, light_clusters),
+                WriteDescriptorSet::buffer(11, self.light_probes.clone()),
+                WriteDescriptorSet::buffer(12, self.lightmaps.clone()),
                 WriteDescriptorSet::image_view_sampler_array(8, 0, {
                     let cookies = self
                         .prepared_lights
@@ -3269,6 +3577,35 @@ impl SceneRenderer {
                             .unwrap_or_else(|| self.white_texture.clone())
                     })
                 }),
+                {
+                    let (view, sampler) = if previous_view_projection.is_some()
+                    {
+                        (
+                            self.occlusion.indirect.clone(),
+                            self.post_pipelines.nearest.clone(),
+                        )
+                    } else {
+                        self.white_texture.clone()
+                    };
+                    WriteDescriptorSet::image_view_sampler(10, view, sampler)
+                },
+                WriteDescriptorSet::image_view_sampler_array(
+                    9,
+                    0,
+                    (0..MAX_DECAL_IMAGES).map(|slot| {
+                        decal_images
+                            .get(slot)
+                            .and_then(|image| {
+                                let prepared =
+                                    self.prepared_textures.get(&image.key())?;
+                                Some((
+                                    prepared.view.clone()?,
+                                    prepared.sampler.clone(),
+                                ))
+                            })
+                            .unwrap_or_else(|| self.white_texture.clone())
+                    }),
+                ),
             ],
             [],
         )
@@ -3305,9 +3642,14 @@ impl SceneRenderer {
                         settings: [
                             settings.radius,
                             settings.intensity,
-                            0.0,
+                            previous_view_projection
+                                .and(indirect_light)
+                                .unwrap_or(0.0),
                             0.0,
                         ],
+                        previous_view_projection: previous_view_projection
+                            .unwrap_or_else(Matrix4::identity)
+                            .into(),
                     };
                 Ok::<_, SceneRenderError>(upload)
             })
@@ -3744,6 +4086,9 @@ impl SceneRenderer {
             timestamps,
             passes: Vec::new(),
         };
+        if let (Some(params), Some(bake)) = (sky, &mut self.sky_bake) {
+            bake.record(&mut commands, params)?;
+        }
         let uploads =
             !self.pending_texture_uploads.is_empty() || carry.is_some();
         if uploads {
@@ -4005,6 +4350,16 @@ impl SceneRenderer {
             }
             Ok(())
         };
+        self.record_compute(
+            &mut commands,
+            self.skinning_pipeline.as_ref(),
+            &skin_steps,
+        )?;
+        self.record_compute(
+            &mut commands,
+            self.gpu_particle_pipeline.as_ref(),
+            &particle_steps,
+        )?;
         if let Some((_, _, set)) = cull_sets.first() {
             passes.begin(&mut commands, FramePass::Culling)?;
             let phase = if occlusion {
@@ -4125,6 +4480,27 @@ impl SceneRenderer {
             .end_render_pass(Default::default())
             .map_err(|error| SceneRenderError(error.to_string()))?;
         passes.end(&mut commands)?;
+        let surface = surface_pipelines(
+            &mut self.surface_pipelines,
+            &self.queue,
+            &active,
+            samples,
+            &self.prepared_materials,
+            &render_world.fog_shader,
+        );
+        // `pipeline`, or the material's surface shader pipeline for `pass`.
+        let surface_pipeline =
+            |material: Handle<MaterialAsset>,
+             pass: Option<usize>,
+             pipeline: &Arc<GraphicsPipeline>| {
+                pass.and_then(|pass| {
+                    surface
+                        .get(&material.key())
+                        .map(|pipelines| &pipelines[pass])
+                })
+                .unwrap_or(pipeline)
+                .clone()
+            };
         let texture_set = |material: Handle<MaterialAsset>| {
             self.prepared_materials
                 .get(&material.key())
@@ -4173,6 +4549,16 @@ impl SceneRenderer {
                 .set_scissor(0, [scene_scissor].into_iter().collect())
                 .map_err(|error| SceneRenderError(error.to_string()))?;
             let mut bound_texture: Option<Arc<DescriptorSet>> = None;
+            // Surface shaders replace the opaque and overlay pipelines; the
+            // depth prepass keeps the built-in one.
+            let pass = if Arc::ptr_eq(pipeline, &active.pipeline) {
+                Some(0)
+            } else if Arc::ptr_eq(pipeline, &active.reflection_pipeline) {
+                Some(2)
+            } else {
+                None
+            };
+            let mut bound_pipeline = pipeline.clone();
             let instance_total = render_instances.cull_source.len() as u32;
             for (group, batch) in render_instances.batches.iter().enumerate() {
                 if only.is_some_and(|only| !only.contains(&group)) {
@@ -4206,6 +4592,16 @@ impl SceneRenderer {
                     else {
                         continue;
                     };
+                    let wanted =
+                        surface_pipeline(batch.material, pass, pipeline);
+                    if !Arc::ptr_eq(&wanted, &bound_pipeline) {
+                        commands
+                            .bind_pipeline_graphics(wanted.clone())
+                            .map_err(|error| {
+                                SceneRenderError(error.to_string())
+                            })?;
+                        bound_pipeline = wanted;
+                    }
                     let set = texture_set(batch.material);
                     if !bound_texture
                         .as_ref()
@@ -4273,6 +4669,7 @@ impl SceneRenderer {
                 &self.descriptor_allocator,
                 &self.post_pipelines,
                 &self.depth,
+                (self.scene_color.clone(), self.scene_color_sampler.clone()),
                 params,
             )?;
             count_work(&recorded, 0, dispatches, 0);
@@ -4384,11 +4781,18 @@ impl SceneRenderer {
         passes.begin(&mut commands, scene_pass)?;
         let mut bound_texture =
             draw_batches(&mut commands, gpu_cull, &active.pipeline, None)?;
-        if fog.is_some_and(|fog| fog.sky_affect > 0.0) {
+        if fog.is_some_and(|fog| fog.sky_affect > 0.0)
+            || !fog_volumes.is_empty()
+            || sky.is_some()
+            || environment_background
+            || sky_shader.is_some()
+        {
             // Same layout as the scene pipelines, so their sets and camera
             // stay bound.
             commands
-                .bind_pipeline_graphics(active.sky_pipeline.clone())
+                .bind_pipeline_graphics(
+                    sky_shader.unwrap_or_else(|| active.sky_pipeline.clone()),
+                )
                 .map_err(|error| SceneRenderError(error.to_string()))?;
             count_work(&recorded, 1, 0, 1);
             unsafe {
@@ -4486,11 +4890,23 @@ impl SceneRenderer {
             commands
                 .bind_pipeline_graphics(active.blend_pipeline.clone())
                 .map_err(|error| SceneRenderError(error.to_string()))?;
+            let mut bound_pipeline = active.blend_pipeline.clone();
             for item in blended {
                 let Some(mesh) = self.prepared_meshes.get(&item.mesh_key)
                 else {
                     continue;
                 };
+                let wanted = surface_pipeline(
+                    item.material,
+                    Some(1),
+                    &active.blend_pipeline,
+                );
+                if !Arc::ptr_eq(&wanted, &bound_pipeline) {
+                    commands
+                        .bind_pipeline_graphics(wanted.clone())
+                        .map_err(|error| SceneRenderError(error.to_string()))?;
+                    bound_pipeline = wanted;
+                }
                 let set = texture_set(item.material);
                 if !bound_texture
                     .as_ref()
@@ -4521,9 +4937,15 @@ impl SceneRenderer {
                 )?;
             }
         }
+        let mut particles_drawn = 0;
         if !render_world.particles.is_empty() {
-            let (vertices, draws) =
-                particle_draws(&render_world.particles, eye, forward);
+            let (vertices, draws) = particle_draws(
+                &render_world.particles,
+                eye,
+                forward,
+                particle_share,
+            );
+            particles_drawn += vertices.len();
             let upload = self.frame_contexts[self.frame_index]
                 .transient
                 .allocate_slice::<ParticleVertex>(vertices.len() as u64)
@@ -4540,9 +4962,12 @@ impl SceneRenderer {
                 .map_err(|error| SceneRenderError(error.to_string()))?
                 .bind_vertex_buffers(0, upload)
                 .map_err(|error| SceneRenderError(error.to_string()))?;
-            for (additive, sprite, first, count) in draws {
-                let pipeline =
-                    active.particle_pipelines[usize::from(additive)].clone();
+            for (additive, sprite, first, count, entity) in draws {
+                let pipeline = entity
+                    .and_then(|entity| particle_shaders.get(&entity))
+                    .unwrap_or(&active.particle_pipelines)
+                    [usize::from(additive)]
+                .clone();
                 commands
                     .bind_pipeline_graphics(pipeline.clone())
                     .map_err(|error| SceneRenderError(error.to_string()))?
@@ -4559,7 +4984,12 @@ impl SceneRenderer {
                                 0.0,
                             ],
                             up: [camera_up[0], camera_up[1], camera_up[2], 0.0],
-                            params: [sprite, 0, 0, 0],
+                            params: [
+                                sprite,
+                                render_world.elapsed_seconds.to_bits(),
+                                0,
+                                0,
+                            ],
                         },
                     )
                     .map_err(|error| SceneRenderError(error.to_string()))?;
@@ -4571,6 +5001,61 @@ impl SceneRenderer {
                 }
             }
         }
+        for batch in &render_world.gpu_particles {
+            let Some(state) = self.gpu_particles.get(&batch.entity) else {
+                continue;
+            };
+            // Each slot owns a run of billboards (its head, then trail
+            // points); a prefix of slots keeps whole trails.
+            let slots = batch.max_particles as u64;
+            let kept = particles_kept(slots as usize, particle_share) as u64;
+            particles_drawn += kept as usize;
+            let billboards = kept * (state.billboards.len() / slots.max(1));
+            let additive =
+                batch.blend == crate::runtime::ParticleBlend::Additive;
+            let pipeline = particle_shaders
+                .get(&batch.entity)
+                .unwrap_or(&active.particle_pipelines)[usize::from(additive)]
+            .clone();
+            commands
+                .set_viewport(0, [scene_viewport.clone()].into_iter().collect())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .set_scissor(0, [scene_scissor].into_iter().collect())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .bind_vertex_buffers(0, state.billboards.clone())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .bind_pipeline_graphics(pipeline.clone())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .push_constants(
+                    pipeline.layout().clone(),
+                    0,
+                    particle_vertex_shader::Particles {
+                        view_projection: camera.view_projection,
+                        eye: camera.eye,
+                        right: [
+                            camera_right[0],
+                            camera_right[1],
+                            camera_right[2],
+                            0.0,
+                        ],
+                        up: [camera_up[0], camera_up[1], camera_up[2], 0.0],
+                        params: [
+                            batch.sprite as u32,
+                            render_world.elapsed_seconds.to_bits(),
+                            0,
+                            0,
+                        ],
+                    },
+                )
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            count_work(&recorded, 1, 0, billboards * 2);
+            unsafe {
+                commands
+                    .draw(6, billboards as u32, 0, 0)
+                    .map_err(|error| SceneRenderError(error.to_string()))?;
+            }
+        }
+        self.capacity.dropped_particles = particle_total - particles_drawn;
         // Debug views show raw shader output, so they skip the curve.
         let tone = match options.debug_view {
             SceneDebugView::Lit => {
@@ -4703,7 +5188,9 @@ impl SceneRenderer {
             .map_err(|error| SceneRenderError(error.to_string()))?;
         passes.begin(&mut commands, FramePass::ToneMap)?;
         commands
-            .bind_pipeline_graphics(active.tonemap_pipeline.clone())
+            .bind_pipeline_graphics(
+                post_shader.unwrap_or_else(|| active.tonemap_pipeline.clone()),
+            )
             .map_err(|error| SceneRenderError(error.to_string()))?
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
@@ -5086,10 +5573,7 @@ impl SceneRenderer {
     }
 
     /// Renders the six faces of each probe from its center into a new
-    /// `probe_maps`. A temporary renderer draws them, so this renderer's
-    /// caches, GPU physics and occlusion history stay untouched.
-    // ponytail: the temporary renderer builds every pipeline again, so a
-    // probe moved every frame stutters; keep one around if probes animate.
+    /// `probe_maps`.
     // Faces are tone mapped with Linear, so captured light clamps at 1.
     fn capture_probes(
         &mut self,
@@ -5109,78 +5593,14 @@ impl SceneRenderer {
             6 * probes.len() as u32,
             size,
         )?;
-        let mut capturer = SceneRenderer::new(
-            self.queue.clone(),
-            self.memory_allocator.clone(),
+        let centers = probes.iter().map(|(center, _)| *center);
+        let faces = self.capture_faces(
+            centers,
+            size,
             HDR_COLOR_FORMAT,
-            [size; 2],
+            render_world,
+            assets,
         )?;
-        let mut world = render_world.clone();
-        world.reflection_probes.clear();
-        world.physics_enabled = false;
-        world.physics_tick = 0;
-        world.gpu_physics_commands.clear();
-        world.gpu_physics_command_ticks.clear();
-        world.tone_mapping = None;
-        // The scene adds its own bloom over the reflection, and occlusion
-        // at the probe's viewpoint would not match the reflected surface.
-        // Fog stays: it is part of what the surroundings look like.
-        world.bloom = None;
-        world.auto_exposure = None;
-        world.ambient_occlusion = None;
-        world.depth_of_field = None;
-        world.motion_blur = None;
-        // Each face would blend in the face before it.
-        if world.antialiasing == Antialiasing::Taa {
-            world.antialiasing = Antialiasing::Off;
-        }
-        // Occlusion would test each face against the previous face's depth.
-        world.culling = CullingMode::Frustum;
-        let device = self.queue.device().clone();
-        // Faces render into their own images: vulkano cannot track a
-        // framebuffer view of one layer of a mipmapped array.
-        let mut faces = Vec::new();
-        for (center, _) in probes {
-            for &basis in &PROBE_FACES {
-                world.active_camera = Some(crate::runtime::ExtractedCamera {
-                    entity: bevy_ecs::entity::Entity::PLACEHOLDER,
-                    transform: probe_face_transform(*center, basis),
-                    projection: Projection::Perspective {
-                        vertical_fov_radians: std::f32::consts::FRAC_PI_2,
-                        near: 0.05,
-                        far: 1_000.0,
-                    },
-                    priority: 0,
-                });
-                let face = Image::new(
-                    self.memory_allocator.clone(),
-                    ImageCreateInfo {
-                        format: HDR_COLOR_FORMAT,
-                        extent: [size, size, 1],
-                        usage: ImageUsage::COLOR_ATTACHMENT
-                            | ImageUsage::TRANSFER_SRC,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo::default(),
-                )
-                .map_err(|e| error(&e))?;
-                capturer
-                    .render(
-                        vulkano::sync::now(device.clone()).boxed(),
-                        ImageView::new_default(face.clone())
-                            .map_err(|e| error(&e))?,
-                        [size; 2],
-                        SceneRenderOptions::game([size; 2]),
-                        &world,
-                        assets,
-                    )?
-                    .then_signal_fence_and_flush()
-                    .map_err(|e| error(&e))?
-                    .wait(None)
-                    .map_err(|e| error(&e))?;
-                faces.push(face);
-            }
-        }
         let mut commands = AutoCommandBufferBuilder::primary(
             self.command_allocator.clone(),
             self.queue.queue_family_index(),
@@ -5206,7 +5626,644 @@ impl SceneRenderer {
                 .map_err(|e| error(&e))?;
         }
         record_mip_chain(&mut commands, maps.image())?;
-        vulkano::sync::now(device)
+        self.submit_and_wait(commands)?;
+        self.probe_maps = maps;
+        Ok(())
+    }
+
+    /// Bakes `render_world.light_probe_grid` into `light_probes`: six faces
+    /// per probe, read back and reduced to an ambient cube on the CPU.
+    fn bake_light_probes(
+        &mut self,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<(), SceneRenderError> {
+        // Set first, so a failed bake is not retried every frame.
+        self.light_probe_key = render_world.light_probe_grid;
+        self.light_probe_rows.clear();
+        let Some((center, grid)) = render_world.light_probe_grid else {
+            self.light_probes = create_light_probe_buffer(
+                &self.memory_allocator,
+                vec![[0.0; 4]; LIGHT_PROBE_HEADER + 6],
+            )?;
+            return Ok(());
+        };
+        let resolution = light_probe_resolution(grid.resolution);
+        let positions = light_probe_positions(center, grid.extents, resolution);
+        let [rx, ry, rz] = resolution;
+        let mut rows = vec![
+            [center[0], center[1], center[2], positions.len() as f32],
+            [
+                grid.extents[0],
+                grid.extents[1],
+                grid.extents[2],
+                grid.intensity,
+            ],
+            [rx as f32, ry as f32, rz as f32, 0.0],
+        ];
+        rows.extend(self.light_probe_cubes(
+            &positions,
+            render_world,
+            assets,
+        )?);
+        self.light_probes =
+            create_light_probe_buffer(&self.memory_allocator, rows.clone())?;
+        self.light_probe_rows = rows;
+        self.light_probe_cursor = 0;
+        Ok(())
+    }
+
+    /// Recaptures the next `LIGHT_PROBES_PER_FRAME` probes of the baked
+    /// grid, so its light follows moving lights and objects.
+    fn relight_light_probes(
+        &mut self,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<(), SceneRenderError> {
+        let Some((center, grid)) = render_world.light_probe_grid else {
+            return Ok(());
+        };
+        let positions = light_probe_positions(
+            center,
+            grid.extents,
+            light_probe_resolution(grid.resolution),
+        );
+        // Nothing to patch after a failed bake.
+        if self.light_probe_rows.len()
+            != LIGHT_PROBE_HEADER + 6 * positions.len()
+        {
+            return Ok(());
+        }
+        let picked = (0..LIGHT_PROBES_PER_FRAME.min(positions.len()))
+            .map(|step| (self.light_probe_cursor + step) % positions.len())
+            .collect::<Vec<_>>();
+        self.light_probe_cursor =
+            (self.light_probe_cursor + picked.len()) % positions.len();
+        let picked_positions = picked
+            .iter()
+            .map(|&probe| positions[probe])
+            .collect::<Vec<_>>();
+        let cubes =
+            self.light_probe_cubes(&picked_positions, render_world, assets)?;
+        for (&probe, cube) in picked.iter().zip(cubes.chunks(6)) {
+            let first = LIGHT_PROBE_HEADER + 6 * probe;
+            self.light_probe_rows[first..first + 6].copy_from_slice(cube);
+        }
+        // A fresh buffer, so frames still in flight keep reading the old one.
+        self.light_probes = create_light_probe_buffer(
+            &self.memory_allocator,
+            self.light_probe_rows.clone(),
+        )?;
+        Ok(())
+    }
+
+    /// Captures six faces at each of `positions`, reads them back and
+    /// reduces each probe to six ambient cube rows.
+    fn light_probe_cubes(
+        &mut self,
+        positions: &[[f32; 3]],
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<Vec<[f32; 4]>, SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        let size = LIGHT_PROBE_FACE_SIZE;
+        // 32-bit floats, so the CPU reads the texels directly.
+        let faces = self.capture_faces(
+            positions.iter().copied(),
+            size,
+            Format::R32G32B32A32_SFLOAT,
+            render_world,
+            assets,
+        )?;
+        let texels = (size * size) as usize;
+        let readback = Buffer::new_slice::<[f32; 4]>(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            (texels * faces.len()) as u64,
+        )
+        .map_err(|e| error(&e))?;
+        let mut commands = AutoCommandBufferBuilder::primary(
+            self.command_allocator.clone(),
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .map_err(|e| error(&e))?;
+        for (index, face) in faces.into_iter().enumerate() {
+            let start = (index * texels) as u64;
+            commands
+                .copy_image_to_buffer(
+                    vulkano::command_buffer::CopyImageToBufferInfo::image_buffer(
+                        face,
+                        readback.clone().slice(start..start + texels as u64),
+                    ),
+                )
+                .map_err(|e| error(&e))?;
+        }
+        self.submit_and_wait(commands)?;
+        let texels = readback.read().map_err(|e| error(&e))?;
+        Ok(texels
+            .chunks(6 * (size * size) as usize)
+            .flat_map(|probe| {
+                ambient_cube(probe, size).map(|[r, g, b]| [r, g, b, 0.0])
+            })
+            .collect())
+    }
+
+    /// Prepares one compute step of every GPU particle emitter, creating
+    /// buffers for new emitters and dropping those of vanished ones.
+    // ponytail: steps by frame time, so particles freeze while
+    // `elapsed_seconds` does (an editor scene that is stopped).
+    fn prepare_gpu_particles(
+        &mut self,
+        render_world: &RenderWorld,
+    ) -> Result<Vec<GpuParticleStep>, SceneRenderError> {
+        use super::gpu_particles::{new_spawns, shader, GpuParticleState};
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        let batches = &render_world.gpu_particles;
+        self.gpu_particles.retain(|entity, _| {
+            batches.iter().any(|batch| batch.entity == *entity)
+        });
+        let dt = (render_world.elapsed_seconds - self.particle_clock)
+            .clamp(0.0, 0.1);
+        self.particle_clock = render_world.elapsed_seconds;
+        let mut steps = Vec::new();
+        if batches.is_empty() {
+            return Ok(steps);
+        }
+        let pipeline = match &self.gpu_particle_pipeline {
+            Some(pipeline) => pipeline.clone(),
+            None => {
+                let pipeline = create_compute_pipeline(
+                    &self.queue,
+                    shader::load(self.queue.device().clone()),
+                )?;
+                self.gpu_particle_pipeline = Some(pipeline.clone());
+                pipeline
+            }
+        };
+        let colliders = render_world
+            .gpu_colliders
+            .iter()
+            .map(GpuColliderUpload::from)
+            .collect::<Vec<_>>();
+        let fields = render_world
+            .gpu_force_fields
+            .iter()
+            .map(GpuForceFieldUpload::from)
+            .collect::<Vec<_>>();
+        let transient = &self.frame_contexts[self.frame_index].transient;
+        let collider_buffer = transient
+            .allocate_slice::<GpuColliderUpload>(colliders.len().max(1) as u64)
+            .map_err(|e| error(&e))?;
+        let field_buffer = transient
+            .allocate_slice::<GpuForceFieldUpload>(fields.len().max(1) as u64)
+            .map_err(|e| error(&e))?;
+        collider_buffer.write().map_err(|e| error(&e))?[..colliders.len()]
+            .copy_from_slice(&colliders);
+        field_buffer.write().map_err(|e| error(&e))?[..fields.len()]
+            .copy_from_slice(&fields);
+        self.counters.upload_bytes +=
+            collider_buffer.size() + field_buffer.size();
+        for batch in batches {
+            // A sub-emitter reads its parent's slots, stepped just before.
+            let parent = batch.parent.and_then(|(parent, burst)| {
+                let state = self.gpu_particles.get(&parent)?;
+                Some((state.particles.clone(), burst, 3 + state.trail_points))
+            });
+            let state = match self.gpu_particles.entry(batch.entity) {
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if entry.get().slots == batch.max_particles
+                        && entry.get().trail_points == batch.trail_points =>
+                {
+                    entry.into_mut()
+                }
+                entry => {
+                    let state = GpuParticleState::new(
+                        &self.memory_allocator,
+                        batch.max_particles,
+                        batch.trail_points,
+                    )?;
+                    match entry {
+                        std::collections::hash_map::Entry::Occupied(
+                            mut entry,
+                        ) => {
+                            entry.insert(state);
+                            entry.into_mut()
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(state)
+                        }
+                    }
+                }
+            };
+            let slots = state.slots;
+            let (first, count) = if parent.is_some() {
+                (0, 0)
+            } else {
+                new_spawns(state.spawned, batch.spawned, slots)
+            };
+            state.spawned = batch.spawned;
+            let settings = self.frame_contexts[self.frame_index]
+                .transient
+                .allocate_slice::<[f32; 4]>(batch.rows.len() as u64)
+                .map_err(|e| error(&e))?;
+            settings
+                .write()
+                .map_err(|e| error(&e))?
+                .copy_from_slice(&batch.rows);
+            self.counters.upload_bytes += settings.size();
+            let set = DescriptorSet::new(
+                self.descriptor_allocator.clone(),
+                pipeline.layout().set_layouts()[0].clone(),
+                [
+                    WriteDescriptorSet::buffer(0, state.particles.clone()),
+                    WriteDescriptorSet::buffer(1, state.billboards.clone()),
+                    WriteDescriptorSet::buffer(2, settings.clone()),
+                    WriteDescriptorSet::buffer(
+                        3,
+                        parent.as_ref().map_or(settings, |p| p.0.clone()),
+                    ),
+                    WriteDescriptorSet::buffer(7, collider_buffer.clone()),
+                    WriteDescriptorSet::buffer(14, field_buffer.clone()),
+                ],
+                [],
+            )
+            .map_err(|e| error(&e))?;
+            steps.push((
+                set,
+                shader::Step {
+                    spawn: [first as u32, count, slots, batch.shape],
+                    seed: [
+                        batch.stream as u32,
+                        (batch.stream >> 32) as u32,
+                        colliders.len() as u32,
+                        fields.len() as u32,
+                    ],
+                    time: [
+                        dt,
+                        render_world.elapsed_seconds,
+                        parent.as_ref().map_or(0.0, |p| p.1 as f32),
+                        parent.as_ref().map_or(0.0, |p| p.2 as f32),
+                    ],
+                },
+                slots.div_ceil(64),
+            ));
+        }
+        Ok(steps)
+    }
+
+    /// One dispatch per GPU skin job, writing its copy's prepared vertices.
+    /// A copy whose cooked mesh or vertex buffer is missing is skipped.
+    fn prepare_skinning(
+        &mut self,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<Vec<SkinStep>, SceneRenderError> {
+        use super::gpu_skinning::{shader, SkinInputs};
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        let jobs = &render_world.skin_jobs;
+        self.skin_inputs
+            .retain(|key, _| jobs.iter().any(|job| job.mesh.key() == *key));
+        let mut steps = Vec::new();
+        if jobs.is_empty() {
+            return Ok(steps);
+        }
+        let pipeline = match &self.skinning_pipeline {
+            Some(pipeline) => pipeline.clone(),
+            None => {
+                let pipeline = create_compute_pipeline(
+                    &self.queue,
+                    shader::load(self.queue.device().clone()),
+                )?;
+                self.skinning_pipeline = Some(pipeline.clone());
+                pipeline
+            }
+        };
+        for job in jobs {
+            let (Some(mesh), Some(prepared), Some((skin, morph))) = (
+                assets.meshes.get(job.base),
+                self.prepared_meshes.get(&job.mesh.key()),
+                assets.deformers.cooked(job.base),
+            ) else {
+                continue;
+            };
+            let revision = assets.meshes.revision(job.base).unwrap_or(0);
+            let inputs = match self.skin_inputs.entry(job.mesh.key()) {
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if entry.get().revision == revision =>
+                {
+                    entry.into_mut()
+                }
+                entry => {
+                    let inputs = SkinInputs::new(
+                        &self.memory_allocator,
+                        revision,
+                        mesh,
+                        skin.as_ref(),
+                        morph,
+                    )?;
+                    self.counters.upload_bytes += inputs.base.size()
+                        + inputs.joints.size()
+                        + inputs.weights.size()
+                        + inputs.morph.size();
+                    match entry {
+                        std::collections::hash_map::Entry::Occupied(
+                            mut entry,
+                        ) => {
+                            entry.insert(inputs);
+                            entry.into_mut()
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(inputs)
+                        }
+                    }
+                }
+            };
+            // The copy is prepared from the cooked vertices, so the counts
+            // match unless the cooked mesh changed under it.
+            if prepared.vertices.len() != u64::from(inputs.vertex_count) {
+                continue;
+            }
+            let transient = &self.frame_contexts[self.frame_index].transient;
+            let matrices = transient
+                .allocate_slice::<[[f32; 4]; 4]>(
+                    job.matrices.len().max(1) as u64
+                )
+                .map_err(|e| error(&e))?;
+            matrices.write().map_err(|e| error(&e))?[..job.matrices.len()]
+                .copy_from_slice(&job.matrices);
+            let targets = inputs.target_count as usize;
+            let shape_weights = transient
+                .allocate_slice::<f32>(targets.max(1) as u64)
+                .map_err(|e| error(&e))?;
+            {
+                let mut write = shape_weights.write().map_err(|e| error(&e))?;
+                write.fill(0.0);
+                for (slot, weight) in write.iter_mut().zip(&job.morph_weights) {
+                    *slot = *weight;
+                }
+            }
+            self.counters.upload_bytes +=
+                matrices.size() + shape_weights.size();
+            let set = DescriptorSet::new(
+                self.descriptor_allocator.clone(),
+                pipeline.layout().set_layouts()[0].clone(),
+                [
+                    WriteDescriptorSet::buffer(0, inputs.base.clone()),
+                    WriteDescriptorSet::buffer(1, prepared.vertices.clone()),
+                    WriteDescriptorSet::buffer(2, inputs.joints.clone()),
+                    WriteDescriptorSet::buffer(3, inputs.weights.clone()),
+                    WriteDescriptorSet::buffer(4, inputs.morph.clone()),
+                    WriteDescriptorSet::buffer(5, matrices),
+                    WriteDescriptorSet::buffer(6, shape_weights),
+                ],
+                [],
+            )
+            .map_err(|e| error(&e))?;
+            // Weights beyond the shapes are ignored, as on the CPU.
+            let any_shape =
+                job.morph_weights.iter().any(|&weight| weight != 0.0);
+            let joints = if skin.is_some() {
+                job.matrices.len()
+            } else {
+                0
+            };
+            steps.push((
+                set,
+                shader::Counts {
+                    counts: [
+                        inputs.vertex_count,
+                        joints as u32,
+                        targets as u32,
+                        u32::from(any_shape),
+                    ],
+                },
+                inputs.vertex_count.div_ceil(64),
+            ));
+        }
+        Ok(steps)
+    }
+
+    /// Records compute steps of one pipeline in order: GPU skinning's and
+    /// the GPU particles'.
+    fn record_compute<T: vulkano::buffer::BufferContents + Copy>(
+        &self,
+        commands: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        pipeline: Option<&Arc<ComputePipeline>>,
+        steps: &[(Arc<DescriptorSet>, T, u32)],
+    ) -> Result<(), SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        let Some(pipeline) = pipeline else {
+            return Ok(());
+        };
+        for (set, constants, groups) in steps {
+            commands
+                .bind_pipeline_compute(pipeline.clone())
+                .map_err(|e| error(&e))?
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    pipeline.layout().clone(),
+                    0,
+                    set.clone(),
+                )
+                .map_err(|e| error(&e))?
+                .push_constants(pipeline.layout().clone(), 0, *constants)
+                .map_err(|e| error(&e))?;
+            unsafe { commands.dispatch([*groups, 1, 1]) }
+                .map_err(|e| error(&e))?;
+        }
+        Ok(())
+    }
+
+    /// Lays out and bakes `render_world.lightmaps` into `lightmaps`, one
+    /// compute dispatch and submit per slot so no submit runs long.
+    fn bake_lightmaps(
+        &mut self,
+        key: u64,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<(), SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        // Set first, so a failed bake is not retried every frame.
+        self.lightmap_key = key;
+        let layout = super::lightmap::lightmap_layout(render_world, assets);
+        self.lightmaps =
+            create_light_probe_buffer(&self.memory_allocator, layout.rows)?;
+        let Some(lights) = self.prepared_lights.as_ref() else {
+            return Ok(());
+        };
+        if layout.slots.is_empty() {
+            return Ok(());
+        }
+        let triangle_count = (layout.triangles.len() / 4) as u32;
+        let triangles = create_light_probe_buffer(
+            &self.memory_allocator,
+            layout.triangles,
+        )?;
+        let pipeline = create_compute_pipeline(
+            &self.queue,
+            super::lightmap::bake_shader::load(self.queue.device().clone()),
+        )?;
+        let set = DescriptorSet::new(
+            self.descriptor_allocator.clone(),
+            pipeline.layout().set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, self.lightmaps.clone()),
+                WriteDescriptorSet::buffer(1, triangles),
+                WriteDescriptorSet::buffer(2, lights.buffer.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| error(&e))?;
+        for (slot, texels) in layout.slots {
+            let mut commands = AutoCommandBufferBuilder::primary(
+                self.command_allocator.clone(),
+                self.queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )
+            .map_err(|e| error(&e))?;
+            commands
+                .bind_pipeline_compute(pipeline.clone())
+                .map_err(|e| error(&e))?
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    pipeline.layout().clone(),
+                    0,
+                    set.clone(),
+                )
+                .map_err(|e| error(&e))?
+                .push_constants(
+                    pipeline.layout().clone(),
+                    0,
+                    super::lightmap::bake_shader::Bake {
+                        sky: lights.ambient,
+                        ground: lights.ground_ambient,
+                        info: [slot, lights.count, triangle_count, 0],
+                    },
+                )
+                .map_err(|e| error(&e))?;
+            unsafe { commands.dispatch([texels.div_ceil(64), 1, 1]) }
+                .map_err(|e| error(&e))?;
+            self.submit_and_wait(commands)?;
+        }
+        Ok(())
+    }
+
+    /// Renders six 90-degree faces from each of `centers`, in
+    /// `PROBE_FACES` order, into new `size` square images of `format`. A
+    /// temporary renderer draws them, so this renderer's caches, GPU physics
+    /// and occlusion history stay untouched. Probes, effects and history
+    /// that would not match a static capture are turned off.
+    // ponytail: the temporary renderer builds every pipeline again, so a
+    // probe moved every frame stutters; keep one around if probes animate.
+    fn capture_faces(
+        &mut self,
+        centers: impl IntoIterator<Item = [f32; 3]>,
+        size: u32,
+        format: Format,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<Vec<Arc<Image>>, SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        let mut capturer = match self.capturer.take() {
+            Some((cached_format, cached_size, capturer))
+                if cached_format == format && cached_size == size =>
+            {
+                capturer
+            }
+            _ => Box::new(SceneRenderer::new(
+                self.queue.clone(),
+                self.memory_allocator.clone(),
+                format,
+                [size; 2],
+            )?),
+        };
+        let mut world = render_world.clone();
+        world.reflection_probes.clear();
+        world.light_probe_grid = None;
+        world.physics_enabled = false;
+        world.physics_tick = 0;
+        world.gpu_physics_commands.clear();
+        world.gpu_physics_command_ticks.clear();
+        world.tone_mapping = None;
+        // The scene adds its own bloom over the reflection, and occlusion
+        // at the probe's viewpoint would not match the reflected surface.
+        // Fog stays: it is part of what the surroundings look like.
+        world.bloom = None;
+        world.auto_exposure = None;
+        world.ambient_occlusion = None;
+        world.depth_of_field = None;
+        world.motion_blur = None;
+        // Each face would blend in the face before it.
+        if world.antialiasing == Antialiasing::Taa {
+            world.antialiasing = Antialiasing::Off;
+        }
+        // Occlusion would test each face against the previous face's depth.
+        world.culling = CullingMode::Frustum;
+        let device = self.queue.device().clone();
+        // Faces render into their own images: vulkano cannot track a
+        // framebuffer view of one layer of a mipmapped array.
+        let mut faces = Vec::new();
+        for center in centers {
+            for &basis in &PROBE_FACES {
+                world.active_camera = Some(crate::runtime::ExtractedCamera {
+                    entity: bevy_ecs::entity::Entity::PLACEHOLDER,
+                    transform: probe_face_transform(center, basis),
+                    projection: Projection::Perspective {
+                        vertical_fov_radians: std::f32::consts::FRAC_PI_2,
+                        near: 0.05,
+                        far: 1_000.0,
+                    },
+                    priority: 0,
+                });
+                let face = Image::new(
+                    self.memory_allocator.clone(),
+                    ImageCreateInfo {
+                        format,
+                        extent: [size, size, 1],
+                        usage: ImageUsage::COLOR_ATTACHMENT
+                            | ImageUsage::TRANSFER_SRC,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo::default(),
+                )
+                .map_err(|e| error(&e))?;
+                capturer
+                    .render(
+                        vulkano::sync::now(device.clone()).boxed(),
+                        ImageView::new_default(face.clone())
+                            .map_err(|e| error(&e))?,
+                        [size; 2],
+                        SceneRenderOptions::game([size; 2]),
+                        &world,
+                        assets,
+                    )?
+                    .then_signal_fence_and_flush()
+                    .map_err(|e| error(&e))?
+                    .wait(None)
+                    .map_err(|e| error(&e))?;
+                faces.push(face);
+            }
+        }
+        self.capturer = Some((format, size, capturer));
+        Ok(faces)
+    }
+
+    /// Submits `commands` on the queue and blocks until they finish.
+    fn submit_and_wait(
+        &self,
+        commands: AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    ) -> Result<(), SceneRenderError> {
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        vulkano::sync::now(self.queue.device().clone())
             .then_execute(
                 self.queue.clone(),
                 commands.build().map_err(|e| error(&e))?,
@@ -5215,9 +6272,7 @@ impl SceneRenderer {
             .then_signal_fence_and_flush()
             .map_err(|e| error(&e))?
             .wait(None)
-            .map_err(|e| error(&e))?;
-        self.probe_maps = maps;
-        Ok(())
+            .map_err(|e| error(&e))
     }
 
     fn prepare_visible_meshes(
@@ -5274,7 +6329,18 @@ impl SceneRenderer {
                 .ok_or_else(|| {
                     SceneRenderError("fallback mesh is missing".into())
                 })?;
-            let prepared = self.prepare_mesh(mesh_handle, mesh, revision)?;
+            let mut prepared =
+                self.prepare_mesh(mesh_handle, mesh, revision)?;
+            // A GPU-skinned copy moves without changing its revision, so
+            // its cooked bounds would cull it wrongly.
+            // ponytail: never culled; bound by the joints if that costs.
+            if render_world
+                .skin_jobs
+                .iter()
+                .any(|job| job.mesh == mesh_handle)
+            {
+                prepared.bounds = None;
+            }
             let name = asset_name(
                 "Mesh",
                 mesh_handle.key(),
@@ -5433,11 +6499,12 @@ impl SceneRenderer {
             let views = textures
                 .each_ref()
                 .map(|(view, _)| Arc::as_ptr(view) as usize);
-            if self
-                .prepared_materials
-                .get(&handle.key())
-                .is_some_and(|prepared| prepared.views == views)
-            {
+            if self.prepared_materials.get(&handle.key()).is_some_and(
+                |prepared| {
+                    prepared.views == views
+                        && prepared.shader == material.shader
+                },
+            ) {
                 continue;
             }
             let set = create_material_set(
@@ -5445,8 +6512,15 @@ impl SceneRenderer {
                 &self.passes.pipeline.layout().set_layouts()[1],
                 textures,
             )?;
-            self.prepared_materials
-                .insert(handle.key(), PreparedMaterial { handle, set, views });
+            self.prepared_materials.insert(
+                handle.key(),
+                PreparedMaterial {
+                    handle,
+                    set,
+                    views,
+                    shader: material.shader.clone(),
+                },
+            );
         }
         self.prepared_materials.retain(|_, prepared| {
             assets.materials.contains(prepared.handle)
@@ -5687,6 +6761,9 @@ impl SceneRenderer {
         screens.sort_unstable();
         let unchanged = |prepared: &PreparedRenderInstances| {
             prepared.flashes == render_world.flashes
+                && prepared.material_overrides
+                    == render_world.material_overrides
+                && prepared.lightmaps == render_world.lightmaps
                 && prepared.lod_signature == lod_signature
                 && prepared.screens == screens
                 && prepared.physics_revision
@@ -5825,7 +6902,7 @@ impl SceneRenderer {
             let material = assets.materials.get(renderable.material);
             let mut color = material
                 .map_or([1.0, 0.0, 1.0, 1.0], |material| material.base_color);
-            let (mut emissive, surface) =
+            let (mut emissive, mut surface) =
                 material.map_or(([0.0, 0.0, 0.0, 1.0], [0.0; 4]), |material| {
                     let unlit = material.model == MaterialModel::Unlit;
                     (
@@ -5845,6 +6922,30 @@ impl SceneRenderer {
                         ],
                     )
                 });
+            let mut uv_transform =
+                material.map_or([1.0, 1.0, 0.0, 0.0], |material| {
+                    let [x, y] = material.uv_scale;
+                    let [u, v] = material.uv_offset;
+                    [x, y, u, v]
+                });
+            if let Ok(found) = render_world
+                .material_overrides
+                .binary_search_by_key(&renderable.entity, |(entity, _)| *entity)
+            {
+                let values = &render_world.material_overrides[found].1;
+                color = values.base_color.unwrap_or(color);
+                if let Some([r, g, b]) = values.emissive {
+                    emissive[..3].copy_from_slice(&[r, g, b]);
+                }
+                surface[0] = values.metallic.unwrap_or(surface[0]);
+                surface[1] = values.roughness.unwrap_or(surface[1]);
+                if let Some([x, y]) = values.uv_scale {
+                    uv_transform[..2].copy_from_slice(&[x, y]);
+                }
+                if let Some([u, v]) = values.uv_offset {
+                    uv_transform[2..].copy_from_slice(&[u, v]);
+                }
+            }
             if let Ok(found) = render_world
                 .flashes
                 .binary_search_by_key(&renderable.entity, |(entity, _)| *entity)
@@ -5879,24 +6980,18 @@ impl SceneRenderer {
                     alpha_mode,
                     f32::to_bits(cutoff),
                     u32::from(renderable.cast_shadows)
-                        | u32::from(renderable.receive_shadows) << 1,
+                        | u32::from(renderable.receive_shadows) << 1
+                        | lightmap_slot(render_world, renderable.entity) << 8,
                 ],
                 transmission: material.map_or([0.0; 4], |material| {
                     [
                         material.transmission,
                         material.ior,
                         material.thickness,
-                        0.0,
+                        f32::from(u8::from(material.splat)),
                     ]
                 }),
-                uv_transform: material.map_or(
-                    [1.0, 1.0, 0.0, 0.0],
-                    |material| {
-                        let [x, y] = material.uv_scale;
-                        let [u, v] = material.uv_offset;
-                        [x, y, u, v]
-                    },
-                ),
+                uv_transform,
             });
         }
         // ponytail: GPU-physics bodies sort by their last CPU transform;
@@ -6042,6 +7137,8 @@ impl SceneRenderer {
             sources,
             local_bounds,
             flashes: render_world.flashes.clone(),
+            material_overrides: render_world.material_overrides.clone(),
+            lightmaps: render_world.lightmaps.clone(),
             physics_revision: render_world.gpu_physics_revision,
             material_revisions,
             refractive,
@@ -6196,6 +7293,117 @@ impl SceneRenderer {
             let _ = pending.fence.wait(None);
         }
         self.collect_physics_readbacks();
+    }
+
+    /// Compiler messages of material surface shaders that failed to build.
+    /// Their materials draw with the built-in surface instead.
+    #[must_use]
+    pub fn surface_shader_errors(&self) -> Vec<&str> {
+        self.surface_pipelines
+            .values()
+            .filter_map(|result| result.as_ref().err().map(String::as_str))
+            .collect()
+    }
+
+    /// Every shader error of the latest frame; see [`ShaderErrors`].
+    #[must_use]
+    pub fn shader_errors(&self) -> ShaderErrors {
+        let mut errors: Vec<String> = [
+            ("surface", self.surface_shader_errors()),
+            ("sky", self.sky_shader_error().into_iter().collect()),
+            ("particle", self.particle_shader_errors()),
+            ("post", self.post_shader_error().into_iter().collect()),
+            ("condition", self.condition_shader_errors()),
+        ]
+        .into_iter()
+        .flat_map(|(kind, errors)| {
+            errors
+                .into_iter()
+                .map(move |error| format!("{kind}: {error}"))
+        })
+        .collect();
+        errors.sort();
+        ShaderErrors(errors)
+    }
+
+    /// Compiler messages of particle shaders that failed to build. Their
+    /// emitters draw with the built-in particle look instead.
+    #[must_use]
+    pub fn particle_shader_errors(&self) -> Vec<&str> {
+        self.particle_shaders
+            .values()
+            .filter_map(|result| result.as_ref().err().map(String::as_str))
+            .collect()
+    }
+
+    /// Compiler message of the scene's post shader if it failed to build;
+    /// the image then shows without it.
+    #[must_use]
+    pub fn post_shader_error(&self) -> Option<&str> {
+        self.post_shader
+            .as_ref()
+            .and_then(|(_, _, result)| result.as_ref().err())
+            .map(String::as_str)
+    }
+
+    /// Tone-map pipeline running `source`, a post shader, for `passes` at
+    /// `samples`; `None` without a shader or when it fails to build.
+    fn post_pipeline(
+        &mut self,
+        passes: &MainPasses,
+        samples: u32,
+        source: &str,
+    ) -> Option<Arc<GraphicsPipeline>> {
+        let queue = self.queue.clone();
+        cached_pipeline(&mut self.post_shader, source, samples, |source| {
+            let glsl = post_fragment_glsl(source)?;
+            create_tonemap_pipeline(
+                queue.clone(),
+                passes.render_pass.clone(),
+                Some(passes.tonemap_pipeline.layout().clone()),
+                Some(compile_glsl(queue.device(), "fragment", &glsl)?),
+            )
+            .map_err(|error| error.0)
+        })
+    }
+
+    /// Compiler message of the scene's sky shader if it failed to build;
+    /// the built-in sky then shows instead.
+    #[must_use]
+    pub fn sky_shader_error(&self) -> Option<&str> {
+        self.sky_shader
+            .as_ref()
+            .and_then(|(_, _, result)| result.as_ref().err())
+            .map(String::as_str)
+    }
+
+    /// Sky pipeline running `sky`, a sky shader, and `fog`, a fog shader,
+    /// for `passes` at `samples`; `None` without either or when it fails to
+    /// build.
+    fn sky_pipeline(
+        &mut self,
+        passes: &MainPasses,
+        samples: u32,
+        sky: &str,
+        fog: &str,
+    ) -> Option<Arc<GraphicsPipeline>> {
+        let queue = self.queue.clone();
+        let key = if sky.is_empty() && fog.is_empty() {
+            String::new()
+        } else {
+            format!("{sky}\0{fog}")
+        };
+        cached_pipeline(&mut self.sky_shader, &key, samples, |_| {
+            let glsl = sky_fragment_glsl(sky, fog)?;
+            create_sky_pipeline(
+                &queue,
+                passes.render_pass.clone(),
+                samples,
+                passes.pipeline.layout().clone(),
+                Some(compile_glsl(queue.device(), "fragment", &glsl)?),
+            )
+            .map_err(|error| error.0)
+        })
     }
 
     /// Compiler messages of custom condition shaders that failed to build.
@@ -6599,10 +7807,11 @@ impl SceneRenderer {
         mesh: &MeshAsset,
         source_revision: u64,
     ) -> Result<PreparedMesh, SceneRenderError> {
+        // Storage too: GPU skinning writes deformed copies in place.
         let vertices = Buffer::from_iter(
             self.memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
+                usage: BufferUsage::VERTEX_BUFFER | BufferUsage::STORAGE_BUFFER,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -6698,6 +7907,7 @@ impl SceneRenderer {
             )?;
             self.occlusion =
                 OcclusionTargets::new(&self.memory_allocator, extent)?;
+            self.scene_color_view_projection = None;
             self.depth_prepass_framebuffer = create_depth_prepass_framebuffer(
                 &self.depth_prepass_pipeline,
                 &self.depth,
@@ -6746,13 +7956,22 @@ fn lod_groups(assets: &AssetServer) -> HashMap<u64, &LodGroupAsset> {
 }
 
 /// What a draw needs from a material besides the per-instance data: its
-/// textures and whether screen-space reflections draw it. Materials that
-/// agree share a batch, so a scene of many flat colors draws once per mesh.
-type MaterialGroup = ([Option<u64>; MATERIAL_TEXTURES], bool);
+/// textures, whether screen-space reflections draw it, and a hash of its
+/// surface shader (0 for none). Materials that agree share a batch, so a
+/// scene of many flat colors draws once per mesh.
+type MaterialGroup = ([Option<u64>; MATERIAL_TEXTURES], bool, u64);
 
 fn material_group(material: Option<&MaterialAsset>) -> MaterialGroup {
+    use std::hash::{Hash, Hasher};
     let Some(material) = material else {
-        return ([None; MATERIAL_TEXTURES], false);
+        return ([None; MATERIAL_TEXTURES], false, 0);
+    };
+    let shader = if material.shader.is_empty() {
+        0
+    } else {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        material.shader.hash(&mut hasher);
+        hasher.finish() | 1
     };
     let key = |texture: &Option<Handle<TextureAsset>>| texture.map(Handle::key);
     (
@@ -6765,6 +7984,7 @@ fn material_group(material: Option<&MaterialAsset>) -> MaterialGroup {
         ],
         material.model == MaterialModel::Pbr
             && material.roughness < SSR_MAX_ROUGHNESS,
+        shader,
     )
 }
 
@@ -7091,7 +8311,7 @@ fn pass_time(
 /// bound range. The slice start stands in for `firstInstance`, which
 /// indirect draws may not set without `drawIndirectFirstInstance`.
 /// Fills mips 1 and up of `image`, each a linear downscale of the one above.
-fn record_mip_chain(
+pub(super) fn record_mip_chain(
     commands: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     image: &Arc<Image>,
 ) -> Result<(), SceneRenderError> {
@@ -7285,12 +8505,17 @@ fn create_texture(
     pending: &mut Vec<PendingTextureUpload>,
 ) -> Result<Arc<ImageView>, SceneRenderError> {
     let [width, height] = texture.size;
+    let (format, texel_bytes) = match texture.color_space {
+        TextureColorSpace::Srgb => (Format::R8G8B8A8_SRGB, 4),
+        TextureColorSpace::Linear => (Format::R8G8B8A8_UNORM, 4),
+        TextureColorSpace::Hdr => (Format::R16G16B16A16_SFLOAT, 8),
+    };
     if width == 0
         || height == 0
-        || texture.rgba8.len() != width as usize * height as usize * 4
+        || texture.rgba8.len() != width as usize * height as usize * texel_bytes
     {
         return Err(SceneRenderError(format!(
-            "texture of {width}x{height} has {} bytes of RGBA8 data",
+            "texture of {width}x{height} has {} bytes of {format:?} data",
             texture.rgba8.len()
         )));
     }
@@ -7311,10 +8536,7 @@ fn create_texture(
     let image = Image::new(
         memory_allocator.clone(),
         ImageCreateInfo {
-            format: match texture.color_space {
-                TextureColorSpace::Srgb => Format::R8G8B8A8_SRGB,
-                TextureColorSpace::Linear => Format::R8G8B8A8_UNORM,
-            },
+            format,
             extent: [width, height, 1],
             mip_levels: 32 - width.max(height).leading_zeros(),
             // Transfer source for the mip chain blits.
@@ -7604,6 +8826,165 @@ fn create_probe_maps(
     .map_err(|error| SceneRenderError(error.to_string()))
 }
 
+/// Storage buffer holding the light probe rows.
+fn create_light_probe_buffer(
+    allocator: &Arc<StandardMemoryAllocator>,
+    rows: Vec<[f32; 4]>,
+) -> Result<Subbuffer<[[f32; 4]]>, SceneRenderError> {
+    Buffer::from_iter(
+        allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::STORAGE_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        rows,
+    )
+    .map_err(|error| SceneRenderError(error.to_string()))
+}
+
+/// Lightmap slot plus one of `entity`, 0 without one.
+fn lightmap_slot(
+    render_world: &RenderWorld,
+    entity: bevy_ecs::entity::Entity,
+) -> u32 {
+    render_world
+        .lightmaps
+        .binary_search_by_key(&entity, |(entity, _)| *entity)
+        .ok()
+        .filter(|&slot| slot < super::lightmap::MAX_LIGHTMAPS)
+        .map_or(0, |slot| slot as u32 + 1)
+}
+
+/// Hash of everything a lightmap bake reads: the lightmapped objects, their
+/// meshes and materials, and the lights. 0 when nothing is lightmapped.
+fn lightmap_key(render_world: &RenderWorld, assets: &AssetServer) -> u64 {
+    use std::hash::{Hash, Hasher};
+    if render_world.lightmaps.is_empty() {
+        return 0;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    render_world.lightmaps.len().hash(&mut hasher);
+    for renderable in &render_world.renderables {
+        let Some(slot) = render_world
+            .lightmaps
+            .binary_search_by_key(&renderable.entity, |(entity, _)| *entity)
+            .ok()
+        else {
+            continue;
+        };
+        slot.hash(&mut hasher);
+        render_world.lightmaps[slot].1.resolution.hash(&mut hasher);
+        renderable
+            .transform
+            .matrix
+            .as_flattened()
+            .iter()
+            .for_each(|value| {
+                value.to_bits().hash(&mut hasher);
+            });
+        renderable.mesh.key().hash(&mut hasher);
+        assets.meshes.revision(renderable.mesh).hash(&mut hasher);
+        renderable.material.key().hash(&mut hasher);
+        assets
+            .materials
+            .revision(renderable.material)
+            .hash(&mut hasher);
+    }
+    format!(
+        "{:?}",
+        (
+            &render_world.directional_lights,
+            &render_world.point_lights,
+            &render_world.spot_lights,
+            render_world.ambient_light,
+            render_world.sky_light,
+        )
+    )
+    .hash(&mut hasher);
+    hasher.finish().max(1)
+}
+
+/// Probes per axis: each clamped to 1..=8, then the largest axis shrunk
+/// until there are at most `MAX_LIGHT_PROBES`.
+fn light_probe_resolution(resolution: [u32; 3]) -> [u32; 3] {
+    let mut resolution = resolution.map(|count| count.clamp(1, 8));
+    while resolution.iter().product::<u32>() as usize > MAX_LIGHT_PROBES {
+        let largest = (0..3).max_by_key(|&axis| resolution[axis]).unwrap_or(0);
+        resolution[largest] -= 1;
+    }
+    resolution
+}
+
+/// World position of each probe, x fastest, then y, then z; the fragment
+/// shader's `probe_light` indexes the same way. One probe on an axis sits
+/// at the center, more spread from wall to wall.
+fn light_probe_positions(
+    center: [f32; 3],
+    extents: [f32; 3],
+    resolution: [u32; 3],
+) -> Vec<[f32; 3]> {
+    let along = |axis: usize, index: u32| {
+        if resolution[axis] == 1 {
+            center[axis]
+        } else {
+            center[axis] - extents[axis]
+                + 2.0 * extents[axis] * index as f32
+                    / (resolution[axis] - 1) as f32
+        }
+    };
+    let mut positions = Vec::new();
+    for z in 0..resolution[2] {
+        for y in 0..resolution[1] {
+            for x in 0..resolution[0] {
+                positions.push([along(0, x), along(1, y), along(2, z)]);
+            }
+        }
+    }
+    positions
+}
+
+/// Irradiance over pi toward +X, -X, +Y, -Y, +Z and -Z from the six
+/// `size` square faces of one probe in `PROBE_FACES` order (rgba texels,
+/// row 0 at the top of each face).
+fn ambient_cube(texels: &[[f32; 4]], size: u32) -> [[f32; 3]; 6] {
+    let axes = PROBE_FACES.map(|(forward, _)| Vector3::from(forward));
+    let mut sums = [Vector3::zeros(); 6];
+    let face_texels = (size * size) as usize;
+    for (face, &(forward, up)) in PROBE_FACES.iter().enumerate() {
+        let forward = Vector3::from(forward);
+        let up = Vector3::from(up);
+        let right = forward.cross(&up);
+        for (index, texel) in texels[face * face_texels..][..face_texels]
+            .iter()
+            .enumerate()
+        {
+            let column = (index as u32 % size) as f32 + 0.5;
+            let row = (index as u32 / size) as f32 + 0.5;
+            let x = 2.0 * column / size as f32 - 1.0;
+            let y = 2.0 * row / size as f32 - 1.0;
+            let direction = forward + right * x - up * y;
+            let length = direction.norm();
+            // Solid angle of a texel on the unit cube face.
+            let solid_angle =
+                (2.0 / size as f32).powi(2) / (length * length * length);
+            let radiance = Vector3::new(texel[0], texel[1], texel[2])
+                .map(|channel| if channel.is_finite() { channel } else { 0.0 });
+            for (axis, sum) in axes.iter().zip(&mut sums) {
+                let cosine = direction.dot(axis) / length;
+                if cosine > 0.0 {
+                    *sum += radiance * cosine * solid_angle;
+                }
+            }
+        }
+    }
+    sums.map(|sum| (sum / std::f32::consts::PI).into())
+}
+
 /// Camera transform at `center` looking along `forward`, the camera's -Z.
 fn probe_face_transform(
     center: [f32; 3],
@@ -7845,11 +9226,18 @@ fn create_main_passes(
         render_pass.clone(),
         samples,
         shared.map(|passes| passes.pipeline.layout().clone()),
+        None,
     )?;
     Ok(MainPasses {
         particle_pipelines: [
-            create_particle_pipeline(queue, &render_pass, samples, false)?,
-            create_particle_pipeline(queue, &render_pass, samples, true)?,
+            create_particle_pipeline(
+                queue,
+                &render_pass,
+                samples,
+                false,
+                None,
+            )?,
+            create_particle_pipeline(queue, &render_pass, samples, true, None)?,
         ],
         debug_pipeline: create_debug_pipeline(
             queue.clone(),
@@ -7865,12 +9253,14 @@ fn create_main_passes(
             queue.clone(),
             render_pass.clone(),
             shared.map(|passes| passes.tonemap_pipeline.layout().clone()),
+            None,
         )?,
         sky_pipeline: create_sky_pipeline(
             queue,
             render_pass.clone(),
             samples,
             pipeline.layout().clone(),
+            None,
         )?,
         render_pass,
         early_render_pass,
@@ -7930,11 +9320,13 @@ fn sample_count(samples: u32) -> Result<SampleCount, SceneRenderError> {
     })
 }
 
-/// Fullscreen pass in subpass 1 that maps `hdr` into the output format.
+/// Fullscreen pass in subpass 1 that maps `hdr` into the output format,
+/// with `fragment` in place of the built-in tone-map shader if given.
 fn create_tonemap_pipeline(
     queue: Arc<Queue>,
     render_pass: Arc<RenderPass>,
     layout: Option<Arc<PipelineLayout>>,
+    fragment: Option<Arc<vulkano::shader::ShaderModule>>,
 ) -> Result<Arc<GraphicsPipeline>, SceneRenderError> {
     let vertex = tonemap_vertex_shader::load(queue.device().clone())
         .map_err(|error| SceneRenderError(error.to_string()))?
@@ -7942,7 +9334,11 @@ fn create_tonemap_pipeline(
         .ok_or_else(|| {
             SceneRenderError("tonemap vertex entry point is missing".into())
         })?;
-    let fragment = tonemap_fragment_shader::load(queue.device().clone())
+    let fragment = fragment
+        .map_or_else(
+            || tonemap_fragment_shader::load(queue.device().clone()),
+            Ok,
+        )
         .map_err(|error| SceneRenderError(error.to_string()))?
         .entry_point("main")
         .ok_or_else(|| {
@@ -8074,6 +9470,7 @@ fn create_sky_pipeline(
     render_pass: Arc<RenderPass>,
     samples: u32,
     layout: Arc<PipelineLayout>,
+    fragment: Option<Arc<vulkano::shader::ShaderModule>>,
 ) -> Result<Arc<GraphicsPipeline>, SceneRenderError> {
     let stage = |module: Result<Arc<vulkano::shader::ShaderModule>, _>| {
         module
@@ -8094,7 +9491,10 @@ fn create_sky_pipeline(
         GraphicsPipelineCreateInfo {
             stages: [
                 stage(sky_vertex_shader::load(queue.device().clone()))?,
-                stage(sky_fragment_shader::load(queue.device().clone()))?,
+                stage(fragment.map_or_else(
+                    || sky_fragment_shader::load(queue.device().clone()),
+                    Ok,
+                ))?,
             ]
             .into_iter()
             .collect(),
@@ -8240,12 +9640,14 @@ fn create_depth_prepass_framebuffer(
 
 /// Creates the opaque/mask, alpha-blend and reflection overlay pipelines.
 /// They share one layout so descriptor sets and push constants stay bound
-/// between them.
+/// between them. `fragment` replaces the built-in scene fragment shader,
+/// for a material's surface shader.
 fn create_pipelines(
     queue: Arc<Queue>,
     render_pass: Arc<RenderPass>,
     samples: u32,
     layout: Option<Arc<PipelineLayout>>,
+    fragment: Option<Arc<vulkano::shader::ShaderModule>>,
 ) -> Result<[Arc<GraphicsPipeline>; 3], SceneRenderError> {
     let vertex = vertex_shader::load(queue.device().clone())
         .map_err(|error| SceneRenderError(error.to_string()))?
@@ -8253,8 +9655,11 @@ fn create_pipelines(
         .ok_or_else(|| {
             SceneRenderError("scene vertex entry point is missing".into())
         })?;
-    let fragment_module = fragment_shader::load(queue.device().clone())
-        .map_err(|error| SceneRenderError(error.to_string()))?;
+    let fragment_module = match fragment {
+        Some(module) => module,
+        None => fragment_shader::load(queue.device().clone())
+            .map_err(|error| SceneRenderError(error.to_string()))?,
+    };
     // `PASS` in the fragment shader.
     let stages = |pass: u32| {
         let fragment = fragment_module
@@ -8362,6 +9767,142 @@ fn create_pipelines(
         .map_err(|error| SceneRenderError(error.to_string()))
     };
     Ok([create(0)?, create(1)?, create(2)?])
+}
+
+/// Source, sample count and pipeline of the last scene-wide custom shader.
+type ShaderPipeline =
+    Option<(String, u32, Result<Arc<GraphicsPipeline>, String>)>;
+
+/// The pipeline `build` makes for `source` at `samples`, cached in `cache`
+/// until either changes; `None` for an empty source or a failed build,
+/// whose error is printed once and stays in `cache`.
+fn cached_pipeline(
+    cache: &mut ShaderPipeline,
+    source: &str,
+    samples: u32,
+    build: impl FnOnce(&str) -> Result<Arc<GraphicsPipeline>, String>,
+) -> Option<Arc<GraphicsPipeline>> {
+    if source.is_empty() {
+        *cache = None;
+        return None;
+    }
+    if !cache.as_ref().is_some_and(|(cached, cached_samples, _)| {
+        cached == source && *cached_samples == samples
+    }) {
+        let result = build(source);
+        if let Err(error) = &result {
+            eprintln!("shader skipped:\n{error}");
+        }
+        *cache = Some((source.to_owned(), samples, result));
+    }
+    cache
+        .as_ref()
+        .and_then(|(_, _, result)| result.as_ref().ok().cloned())
+}
+
+/// Pipelines per surface shader, fog shader and sample count.
+type SurfacePipelines =
+    HashMap<(String, String, u32), Result<[Arc<GraphicsPipeline>; 3], String>>;
+
+/// Opaque, blended and overlay pipelines per material key for materials
+/// with a working surface shader, built for `passes` at `samples`. With
+/// `fog`, the scene's fog shader, every material gets them, running that
+/// fog. Shaders no prepared material uses any more leave the cache.
+fn surface_pipelines(
+    cache: &mut SurfacePipelines,
+    queue: &Arc<Queue>,
+    passes: &MainPasses,
+    samples: u32,
+    materials: &HashMap<u64, PreparedMaterial>,
+    fog: &str,
+) -> HashMap<u64, [Arc<GraphicsPipeline>; 3]> {
+    cache.retain(|(source, cached_fog, _), _| {
+        cached_fog == fog
+            && materials
+                .values()
+                .any(|material| material.shader == *source)
+    });
+    materials
+        .iter()
+        .filter(|(_, material)| !material.shader.is_empty() || !fog.is_empty())
+        .filter_map(|(&key, material)| {
+            cache
+                .entry((material.shader.clone(), fog.to_owned(), samples))
+                .or_insert_with(|| {
+                    let result = surface_fragment_glsl(&material.shader, fog)
+                        .and_then(|glsl| {
+                            compile_glsl(queue.device(), "fragment", &glsl)
+                        })
+                        .and_then(|module| {
+                            create_pipelines(
+                                queue.clone(),
+                                passes.render_pass.clone(),
+                                samples,
+                                Some(passes.pipeline.layout().clone()),
+                                Some(module),
+                            )
+                            .map_err(|error| error.0)
+                        });
+                    if let Err(error) = &result {
+                        eprintln!("surface shader skipped:\n{error}");
+                    }
+                    result
+                })
+                .as_ref()
+                .ok()
+                .map(|pipelines| (key, pipelines.clone()))
+        })
+        .collect()
+}
+
+type ParticlePipelines =
+    HashMap<(String, u32), Result<[Arc<GraphicsPipeline>; 2], String>>;
+
+/// Alpha and additive particle pipelines per emitter of `shaders`, an
+/// emitter's particle shader source, built for `passes` at `samples`.
+/// Emitters whose shader fails to build are left out. Shaders no emitter
+/// uses any more leave the cache.
+fn particle_pipelines(
+    cache: &mut ParticlePipelines,
+    queue: &Arc<Queue>,
+    passes: &MainPasses,
+    samples: u32,
+    shaders: &HashMap<bevy_ecs::entity::Entity, String>,
+) -> HashMap<bevy_ecs::entity::Entity, [Arc<GraphicsPipeline>; 2]> {
+    cache.retain(|(source, _), _| shaders.values().any(|s| s == source));
+    shaders
+        .iter()
+        .filter_map(|(&entity, source)| {
+            cache
+                .entry((source.clone(), samples))
+                .or_insert_with(|| {
+                    let result = particle_fragment_glsl(source)
+                        .and_then(|glsl| {
+                            compile_glsl(queue.device(), "fragment", &glsl)
+                        })
+                        .and_then(|module| {
+                            let build = |additive| {
+                                create_particle_pipeline(
+                                    queue,
+                                    &passes.render_pass,
+                                    samples,
+                                    additive,
+                                    Some(module.clone()),
+                                )
+                                .map_err(|error| error.0)
+                            };
+                            Ok([build(false)?, build(true)?])
+                        });
+                    if let Err(error) = &result {
+                        eprintln!("particle shader skipped:\n{error}");
+                    }
+                    result
+                })
+                .as_ref()
+                .ok()
+                .map(|pipelines| (entity, pipelines.clone()))
+        })
+        .collect()
 }
 
 /// Pipeline, framebuffer, shadow map, and comparison sampler.
@@ -8513,6 +10054,7 @@ fn create_particle_pipeline(
     render_pass: &Arc<RenderPass>,
     samples: u32,
     additive: bool,
+    fragment: Option<Arc<vulkano::shader::ShaderModule>>,
 ) -> Result<Arc<GraphicsPipeline>, SceneRenderError> {
     let device = queue.device().clone();
     let vertex = particle_vertex_shader::load(device.clone())
@@ -8521,7 +10063,8 @@ fn create_particle_pipeline(
         .ok_or_else(|| {
             SceneRenderError("particle vertex entry point is missing".into())
         })?;
-    let fragment = particle_fragment_shader::load(device.clone())
+    let fragment = fragment
+        .map_or_else(|| particle_fragment_shader::load(device.clone()), Ok)
         .map_err(|error| SceneRenderError(error.to_string()))?
         .entry_point("main")
         .ok_or_else(|| {
@@ -8600,17 +10143,31 @@ fn create_particle_pipeline(
     .map_err(|error| SceneRenderError(error.to_string()))
 }
 
+/// One GPU particle emitter's compute step: descriptor set, push
+/// constants and workgroups.
+type GpuParticleStep =
+    (Arc<DescriptorSet>, super::gpu_particles::shader::Step, u32);
+
+/// One GPU skin job's compute step: descriptor set, push constants and
+/// workgroups.
+type SkinStep = (Arc<DescriptorSet>, super::gpu_skinning::shader::Counts, u32);
+
 /// One instanced particle draw: additive, sprite, first instance, count.
-type ParticleDraw = (bool, u32, u32, u32);
+type ParticleDraw = (bool, u32, u32, u32, Option<bevy_ecs::entity::Entity>);
 
 /// Particle instances of every batch, alpha batches far to near and each
 /// one's particles far to near, then additive batches. Returns the vertices
 /// and, per draw, whether it is additive, its sprite, first instance and
 /// count.
+/// Each batch draws its first [`particles_kept`] particles at `share`: the
+/// oldest, so the kept set holds still from frame to frame.
+// ponytail: a prefix leans toward old particles; keep by spawn number if
+// thinned emitters look lopsided.
 fn particle_draws(
     batches: &[crate::runtime::ParticleBatch],
     eye: [f32; 3],
     forward: [f32; 3],
+    share: f64,
 ) -> (Vec<ParticleVertex>, Vec<ParticleDraw>) {
     use crate::runtime::{ParticleBlend, ParticleSprite};
     let depth = |p: [f32; 3]| {
@@ -8635,7 +10192,8 @@ fn particle_draws(
     let mut draws = Vec::new();
     for (additive, _, batch) in order {
         let first = vertices.len() as u32;
-        let mut instances = batch.instances.clone();
+        let kept = particles_kept(batch.instances.len(), share);
+        let mut instances = batch.instances[..kept].to_vec();
         if !additive {
             instances.sort_by(|a, b| {
                 depth(b.position).total_cmp(&depth(a.position))
@@ -8653,7 +10211,13 @@ fn particle_draws(
             ParticleSprite::Disc => 1,
             ParticleSprite::Square => 2,
         };
-        draws.push((additive, sprite, first, instances.len() as u32));
+        draws.push((
+            additive,
+            sprite,
+            first,
+            instances.len() as u32,
+            batch.entity,
+        ));
     }
     (vertices, draws)
 }
@@ -8827,8 +10391,6 @@ fn compile_condition_shader(
     queue: &Arc<Queue>,
     source: &str,
 ) -> Result<Arc<ComputePipeline>, String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
     let glsl = format!(
         "#version 450\nlayout(local_size_x = 256) in;\n{}\n\
          layout(set = 0, binding = 14) readonly buffer ConditionParams \
@@ -8842,10 +10404,23 @@ fn compile_condition_shader(
          }}\n",
         include_str!("../shaders/physics_abi.glsl")
     );
+    let module = compile_glsl(queue.device(), "compute", &glsl)?;
+    create_compute_pipeline(queue, Ok(module)).map_err(|error| error.0)
+}
+
+/// Compiles GLSL for `stage` ("compute", "fragment") with the system
+/// `glslc`, or the compiler `RUSTING_GLSLC` names. Errors are its messages.
+fn compile_glsl(
+    device: &Arc<Device>,
+    stage: &str,
+    glsl: &str,
+) -> Result<Arc<vulkano::shader::ShaderModule>, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
     let compiler =
         std::env::var_os("RUSTING_GLSLC").unwrap_or_else(|| "glslc".into());
     let mut child = Command::new(&compiler)
-        .args(["-fshader-stage=compute", "-o", "-", "-"])
+        .args([&format!("-fshader-stage={stage}"), "-o", "-", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -8867,14 +10442,167 @@ fn compile_condition_shader(
     let words = vulkano::shader::spirv::bytes_to_words(&output.stdout)
         .map_err(|error| error.to_string())?;
     // Safety: the SPIR-V comes straight from glslc, which only emits valid
-    // modules, and vulkano validates the entry point and layout below.
-    let module = unsafe {
+    // modules, and vulkano validates entry points and layouts when the
+    // pipeline is built.
+    unsafe {
         vulkano::shader::ShaderModule::new(
-            queue.device().clone(),
+            device.clone(),
             vulkano::shader::ShaderModuleCreateInfo::new(&words),
         )
-    };
-    create_compute_pipeline(queue, module).map_err(|error| error.0)
+    }
+    .map_err(|error| error.to_string())
+}
+
+/// Version of the Rusting shader language (`#rusting surface 1`,
+/// `#rusting post 1`) this engine speaks; see `src/shaders/surface.glsl`
+/// and `src/shaders/post.glsl`.
+pub const SHADER_VERSION: u32 = 1;
+
+/// The fog hook: `source`, a `#rusting fog 1` shader, or empty for none.
+fn fog_hook(source: &str) -> Hook<'_> {
+    (
+        "fog",
+        source,
+        (
+            "fog_shader.glsl",
+            include_str!("../shaders/fog_shader.glsl"),
+        ),
+    )
+}
+
+/// The scene fragment shader with `source`, a material's
+/// `#rusting surface 1` shader, as its `surface` hook and `fog`, the
+/// scene's fog shader, as its `fog` hook; either may be empty.
+fn surface_fragment_glsl(source: &str, fog: &str) -> Result<String, String> {
+    hooked_glsl(
+        include_str!("../shaders/fragment/scene.frag"),
+        &[
+            (
+                "surface",
+                source,
+                ("surface.glsl", include_str!("../shaders/surface.glsl")),
+            ),
+            fog_hook(fog),
+        ],
+    )
+}
+
+/// The tone-map fragment shader with `source`, a `#rusting post 1`
+/// shader, as its `post` hook.
+fn post_fragment_glsl(source: &str) -> Result<String, String> {
+    hooked_glsl(
+        include_str!("../shaders/fragment/tonemap.frag"),
+        &[(
+            "post",
+            source,
+            ("post.glsl", include_str!("../shaders/post.glsl")),
+        )],
+    )
+}
+
+/// The sky fragment shader with `source`, a `#rusting sky 1` shader, as
+/// its `sky` hook and `fog`, the scene's fog shader, as its `fog` hook;
+/// either may be empty.
+fn sky_fragment_glsl(source: &str, fog: &str) -> Result<String, String> {
+    hooked_glsl(
+        include_str!("../shaders/fragment/sky.frag"),
+        &[
+            (
+                "sky",
+                source,
+                (
+                    "sky_shader.glsl",
+                    include_str!("../shaders/sky_shader.glsl"),
+                ),
+            ),
+            fog_hook(fog),
+        ],
+    )
+}
+
+/// The particle fragment shader with `source`, a `#rusting particle 1`
+/// shader, as its `particle` hook.
+fn particle_fragment_glsl(source: &str) -> Result<String, String> {
+    hooked_glsl(
+        include_str!("../shaders/fragment/particle.frag"),
+        &[(
+            "particle",
+            source,
+            (
+                "particle_shader.glsl",
+                include_str!("../shaders/particle_shader.glsl"),
+            ),
+        )],
+    )
+}
+
+/// A hook of an engine shader: its kind, the user's `#rusting {kind} 1`
+/// source (empty keeps the built-in default), and the hook's file name and
+/// text.
+type Hook<'a> = (&'a str, &'a str, (&'a str, &'a str));
+
+/// `frag` with its includes inlined and the include of each hook's file
+/// replaced by that file's text and the body of the hook's source.
+fn hooked_glsl(frag: &str, hooks: &[Hook<'_>]) -> Result<String, String> {
+    let mut glsl = frag.to_owned();
+    for (file, text) in [
+        ("fog.glsl", include_str!("../shaders/fog.glsl")),
+        ("sky.glsl", include_str!("../shaders/sky.glsl")),
+    ] {
+        glsl = glsl.replacen(&format!("#include \"{file}\""), text, 1);
+    }
+    for &(kind, source, (hook_file, hook)) in hooks {
+        let hook_line = format!("#include \"{hook_file}\"");
+        if !glsl.contains(&hook_line) {
+            return Err(format!("the engine shader lost its {hook_line}"));
+        }
+        let text = if source.is_empty() {
+            hook.to_owned()
+        } else {
+            format!(
+                "#define RUSTING_CUSTOM_{}\n{hook}\n{}\n",
+                kind.to_uppercase(),
+                hook_body(kind, source)?
+            )
+        };
+        glsl = glsl.replacen(&hook_line, &text, 1);
+    }
+    Ok(glsl)
+}
+
+/// The body of `source`, a `#rusting {kind} 1` shader, after its header,
+/// with a `#line` so compiler messages count lines of `source`.
+fn hook_body(kind: &str, source: &str) -> Result<String, String> {
+    let mut lines = source.lines();
+    let header = lines
+        .by_ref()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    let mut words = header.split_whitespace();
+    if words.next() != Some("#rusting") || words.next() != Some(kind) {
+        return Err(format!(
+            "a {kind} shader starts with `#rusting {kind} {SHADER_VERSION}`, \
+             not {header:?}"
+        ));
+    }
+    match words.next().map(str::parse::<u32>) {
+        Some(Ok(SHADER_VERSION)) if words.next().is_none() => {}
+        _ => {
+            return Err(format!(
+                "this engine runs {kind} shader version {SHADER_VERSION}, \
+                 not {header:?}"
+            ));
+        }
+    }
+    let header_line = source
+        .lines()
+        .position(|line| line == header)
+        .unwrap_or_default();
+    Ok(format!(
+        "#line {}\n{}",
+        header_line + 2,
+        lines.collect::<Vec<_>>().join("\n")
+    ))
 }
 
 /// Element `index` of the Halton sequence in `base`, in [0, 1).
@@ -9412,6 +11140,56 @@ pub fn light_budget(profile: QualityProfile) -> usize {
     }
 }
 
+/// Particles drawn per frame for a resolved profile, CPU and GPU emitters
+/// together; past it every emitter draws the same share of its particles.
+pub fn particle_budget(profile: QualityProfile) -> usize {
+    let most = crate::runtime::MAX_GPU_PARTICLES as usize;
+    match profile {
+        QualityProfile::Eco => most / 8,
+        QualityProfile::Balanced => most / 2,
+        QualityProfile::High | QualityProfile::Auto => most,
+    }
+}
+
+/// Decals painted per frame for a resolved profile; later ones are dropped.
+pub fn decal_budget(profile: QualityProfile) -> usize {
+    match profile {
+        QualityProfile::Eco => MAX_DECALS / 4,
+        QualityProfile::Balanced => MAX_DECALS / 2,
+        QualityProfile::High | QualityProfile::Auto => MAX_DECALS,
+    }
+}
+
+/// The frame's CPU particles and GPU emitter slots.
+fn particle_total(render_world: &RenderWorld) -> usize {
+    render_world
+        .particles
+        .iter()
+        .map(|batch| batch.instances.len())
+        .chain(
+            render_world
+                .gpu_particles
+                .iter()
+                .map(|batch| batch.max_particles as usize),
+        )
+        .sum()
+}
+
+/// Share of each emitter's particles drawn: all of them when
+/// [`particle_total`] fits in `budget`, else budget / total.
+fn particle_share(total: usize, budget: usize) -> f64 {
+    if total <= budget {
+        1.0
+    } else {
+        budget as f64 / total as f64
+    }
+}
+
+/// How many of `count` particles an emitter draws at `share`.
+fn particles_kept(count: usize, share: f64) -> usize {
+    (count as f64 * share) as usize
+}
+
 /// Caps one frame's transient uploads at half the largest device-local heap,
 /// leaving the rest for meshes, images, and other applications.
 // ponytail: static heap size, not live usage; query VK_EXT_memory_budget if
@@ -9551,525 +11329,7 @@ mod fragment_shader {
     vulkano_shaders::shader! {
                             ty: "fragment",
                             include: ["src/shaders"],
-                            src: r#"
-#version 450
-layout(location = 0) in vec3 v_normal;
-layout(location = 1) in vec4 v_color;
-layout(location = 2) in vec3 v_world_position;
-layout(location = 3) flat in uvec3 v_alpha;
-layout(location = 4) in vec2 v_uv;
-layout(location = 5) in vec4 v_tangent;
-layout(location = 6) flat in vec4 v_emissive;
-layout(location = 7) flat in vec4 v_surface;
-layout(location = 8) flat in vec4 v_transmission;
-layout(location = 0) out vec4 f_color;
-layout(set = 1, binding = 0) uniform sampler2D base_color_texture;
-layout(set = 1, binding = 1) uniform sampler2D normal_texture;
-layout(set = 1, binding = 2) uniform sampler2D metallic_roughness_texture;
-layout(set = 1, binding = 3) uniform sampler2D occlusion_texture;
-layout(set = 1, binding = 4) uniform sampler2D emissive_texture;
-const float PI = 3.14159265;
-layout(push_constant) uniform Camera {
-    mat4 view_projection;
-    vec4 eye;
-    vec4 ambient;
-    vec4 ground_ambient;
-    uvec4 light_info;
-} camera;
-struct Light {
-    vec4 position_kind;
-    vec4 direction_range;
-    vec4 color_intensity;
-    vec4 spot_angles;
-    vec4 cookie;
-};
-layout(set = 0, binding = 2) readonly buffer Lights {
-    Light data[];
-} lights;
-layout(set = 2, binding = 0) uniform sampler2DShadow shadow_map;
-layout(set = 2, binding = 1) readonly buffer Shadow {
-    vec4 environment;
-    vec4 scene_color;
-    vec4 viewport;
-    vec4 probes[8];
-    mat4 inverse_view_projection;
-    vec4 fog;
-    vec4 fog_shape;
-    vec4 ambient_occlusion;
-    mat4 cascades[6];
-    vec4 cascade_far;
-    vec4 cascade_forward;
-    vec4 cascade_info;
-    vec4 cluster_view;
-    vec4 cluster_depth;
-} shadow;
-layout(set = 2, binding = 2) uniform sampler2D environment_map;
-layout(set = 2, binding = 3) uniform sampler2D scene_color;
-// Mip 0 of the depth pyramid: the opaque depth the reflection march tests.
-layout(set = 2, binding = 4) uniform sampler2D scene_depth;
-// Six faces per reflection probe; see PROBE_FACES.
-layout(set = 2, binding = 5) uniform sampler2DArray probe_maps;
-// Screen-space ambient occlusion per target pixel when
-// shadow.ambient_occlusion.x is 1.
-layout(set = 2, binding = 6) uniform sampler2D ambient_occlusion;
-// Per light cluster an (offset, count) pair, then the light indices; see
-// `build_light_clusters`.
-layout(set = 2, binding = 7) readonly buffer Clusters {
-    uint data[];
-} clusters;
-// Spot light cookie images; Light.cookie.w picks one. Matches
-// MAX_LIGHT_COOKIES.
-layout(set = 2, binding = 8) uniform sampler2D cookies[4];
-// The cookie image in `slot` at `uv`. Constant indices only: the slot is
-// not uniform across a draw.
-vec3 cookie_at(int slot, vec2 uv) {
-    if (slot == 0) return texture(cookies[0], uv).rgb;
-    if (slot == 1) return texture(cookies[1], uv).rgb;
-    if (slot == 2) return texture(cookies[2], uv).rgb;
-    return texture(cookies[3], uv).rgb;
-}
-#include "fog.glsl"
-// 0 opaque, 1 blended, 2 screen-space reflection overlay on opaque surfaces.
-layout(constant_id = 0) const uint PASS = 0u;
-// Matches SSR_MAX_ROUGHNESS.
-const float SSR_MAX_ROUGHNESS = 0.5;
-// Light arriving from `direction`: the equirectangular environment map at
-// mip `lod` (image top is +Y), else the ambient hemisphere.
-vec3 environment(vec3 direction, float lod) {
-    if (shadow.environment.x > 0.5) {
-        vec2 uv = vec2(
-            atan(direction.z, direction.x) / (2.0 * PI) + 0.5,
-            acos(clamp(direction.y, -1.0, 1.0)) / PI
-        );
-        // Keep the poles off the opposite edge a repeating sampler wraps to,
-        // measured on the coarser of the two mips a trilinear lookup blends.
-        float half_texel =
-            0.5 / float(textureSize(environment_map, int(ceil(lod))).y);
-        uv.y = clamp(uv.y, half_texel, 1.0 - half_texel);
-        return textureLod(environment_map, uv, lod).rgb * shadow.environment.y;
-    }
-    return mix(
-        camera.ground_ambient.rgb,
-        camera.ambient.rgb,
-        direction.y * 0.5 + 0.5
-    );
-}
-const vec3 PROBE_FORWARD[6] = vec3[](
-    vec3(1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0),
-    vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, -1.0)
-);
-const vec3 PROBE_UP[6] = vec3[](
-    vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0),
-    vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0)
-);
-// Light arriving at `position` from `direction`: the environment at mip
-// `lod`, overlaid by the reflection probes whose box holds the position.
-// Each probe traces `direction` to its box wall and looks up the captured
-// face toward that point; `rough` in 0..1 picks the probe mip.
-vec3 surroundings(vec3 position, vec3 direction, float lod, float rough) {
-    vec3 sky = environment(direction, lod);
-    vec4 sum = vec4(0.0);
-    for (int i = 0; i < int(shadow.environment.w); ++i) {
-        vec3 center = shadow.probes[2 * i].xyz;
-        vec3 extents = shadow.probes[2 * i + 1].xyz;
-        vec3 local = position - center;
-        vec3 inside = extents - abs(local);
-        float margin = min(inside.x, min(inside.y, inside.z));
-        if (margin <= 0.0) {
-            continue;
-        }
-        vec3 toward = step(0.0, direction) * 2.0 - 1.0;
-        vec3 wall = (extents - local * toward)
-            / max(abs(direction), vec3(1e-5));
-        vec3 d = local + direction * min(wall.x, min(wall.y, wall.z));
-        vec3 a = abs(d);
-        int face = a.x >= a.y && a.x >= a.z ? (d.x > 0.0 ? 0 : 1)
-            : a.y >= a.z ? (d.y > 0.0 ? 2 : 3)
-            : (d.z > 0.0 ? 4 : 5);
-        vec3 forward = PROBE_FORWARD[face];
-        vec3 up = PROBE_UP[face];
-        vec2 uv = vec2(dot(d, cross(forward, up)), -dot(d, up))
-            / dot(d, forward) * 0.5 + 0.5;
-        vec3 light = textureLod(
-            probe_maps,
-            vec3(uv, float(6 * i + face)),
-            rough * shadow.probes[2 * i + 1].w
-        ).rgb * shadow.probes[2 * i].w;
-        // Fades in over the outer tenth of the box.
-        float weight = clamp(
-            margin / (0.1 * min(extents.x, min(extents.y, extents.z))),
-            0.0,
-            1.0
-        );
-        sum += vec4(light * weight, weight);
-    }
-    return sum.w > 0.0 ? mix(sky, sum.rgb / sum.w, min(sum.w, 1.0)) : sky;
-}
-// Target pixel of a point in normalized device coordinates.
-vec2 screen_pixel(vec2 ndc) {
-    return shadow.viewport.xy + (ndc * 0.5 + 0.5) * shadow.viewport.zw;
-}
-float scene_depth_at(vec2 ndc) {
-    return texelFetch(scene_depth, ivec2(screen_pixel(ndc)), 0).r;
-}
-// Screen-space reflection: marches `direction` from the fragment through the
-// opaque depth copy. Returns the opaque color copy where the ray crosses the
-// depth surface, weighted down near the screen edge, at the end of the
-// march, and toward SSR_MAX_ROUGHNESS; weight 0 on a miss.
-// ponytail: linear march with growing steps and a binary refine; march the
-// depth pyramid (Hi-Z) if long rays skip thin objects.
-vec4 trace_reflection(vec3 direction, float roughness) {
-    const int STEPS = 64;
-    vec3 position = v_world_position;
-    vec4 start = camera.view_projection * vec4(position, 1.0);
-    float previous = start.z / start.w;
-    float step_length = 0.02 * max(start.w, 1.0);
-    for (int i = 0; i < STEPS; ++i) {
-        vec3 next = position + direction * step_length;
-        vec4 clip = camera.view_projection * vec4(next, 1.0);
-        if (clip.w <= 0.0) {
-            break;
-        }
-        vec3 ndc = clip.xyz / clip.w;
-        if (any(greaterThan(abs(ndc.xy), vec2(1.0))) || ndc.z < 0.0
-            || ndc.z > 1.0) {
-            break;
-        }
-        float scene = scene_depth_at(ndc.xy);
-        // A hit crosses the depth surface within this step; a ray that is
-        // far behind it passed behind a foreground object and marches on.
-        if (i > 0 && ndc.z > scene
-            && ndc.z - scene <= 2.0 * (ndc.z - previous) + 1e-5) {
-            vec3 low = position;
-            vec3 high = next;
-            for (int j = 0; j < 5; ++j) {
-                vec3 middle = (low + high) * 0.5;
-                vec4 c = camera.view_projection * vec4(middle, 1.0);
-                if (c.z / c.w > scene_depth_at(c.xy / c.w)) {
-                    high = middle;
-                } else {
-                    low = middle;
-                }
-            }
-            vec4 c = camera.view_projection * vec4(high, 1.0);
-            vec2 hit = clamp(c.xy / c.w, -1.0, 1.0);
-            vec2 edge = 1.0 - smoothstep(0.8, 1.0, abs(hit));
-            float weight = edge.x * edge.y
-                * (1.0 - smoothstep(0.75, 1.0, float(i) / float(STEPS)))
-                * (1.0 - smoothstep(0.5 * SSR_MAX_ROUGHNESS, SSR_MAX_ROUGHNESS,
-                    roughness));
-            vec3 color = textureLod(
-                scene_color,
-                screen_pixel(hit) / vec2(textureSize(scene_color, 0)),
-                roughness * shadow.scene_color.y
-            ).rgb;
-            return vec4(color, weight);
-        }
-        previous = ndc.z;
-        position = next;
-        step_length *= 1.08;
-    }
-    return vec4(0.0);
-}
-float shadow_factor(vec3 surface_normal) {
-    // Directional lights pick the first cascade that reaches this depth,
-    // point lights the cube face along the major axis away from the light;
-    // each view is one tile of the atlas.
-    int count = int(shadow.cascade_info.x);
-    int tiles = int(shadow.cascade_info.y);
-    int cascade = 0;
-    if (count == 0) {
-        return 1.0;
-    }
-    if (shadow.cascade_info.z > 0.5) {
-        vec3 away = v_world_position - shadow.cascade_forward.xyz;
-        vec3 size = abs(away);
-        if (size.x >= size.y && size.x >= size.z) {
-            cascade = away.x > 0.0 ? 0 : 1;
-        } else if (size.y >= size.z) {
-            cascade = away.y > 0.0 ? 2 : 3;
-        } else {
-            cascade = away.z > 0.0 ? 4 : 5;
-        }
-    } else {
-        float depth = dot(v_world_position, shadow.cascade_forward.xyz)
-            - shadow.cascade_forward.w;
-        while (cascade < count - 1 && depth > shadow.cascade_far[cascade]) {
-            cascade += 1;
-        }
-        if (depth > shadow.cascade_far[count - 1]) {
-            return 1.0;
-        }
-    }
-    // One texel in the cascade's own 0..1 coordinates.
-    vec2 texel = float(tiles) / vec2(textureSize(shadow_map, 0));
-    // Normal offset: sample from two shadow texels off the surface. The PCF
-    // taps reach one texel sideways, where a sloped surface's own depth is
-    // nearer the light; without the offset it shadows itself in stripes.
-    // Row 0 of the light matrix scales world units to clip x; dividing by
-    // w (1 for the orthographic sun, the distance for a spot light) gives
-    // the texel size at this surface.
-    mat4 light = shadow.cascades[cascade];
-    vec4 surface_clip = light * vec4(v_world_position, 1.0);
-    if (surface_clip.w <= 0.0) {
-        return 1.0;
-    }
-    float texel_world = 2.0 * texel.x * surface_clip.w
-        / length(vec3(light[0][0], light[1][0], light[2][0]));
-    vec3 position = v_world_position + surface_normal * 2.0 * texel_world;
-    vec4 clip = light * vec4(position, 1.0);
-    vec3 coords = clip.xyz / clip.w;
-    if (coords.z > 1.0) {
-        return 1.0;
-    }
-    vec2 uv = coords.xy * 0.5 + 0.5;
-    vec2 tile = vec2(cascade % tiles, cascade / tiles);
-    // Taps stay half a texel inside the tile, off its neighbours.
-    #define SHADOW_TAP(offset) texture(shadow_map, vec3( \
-        (tile + clamp(uv + (offset) * texel, texel * 0.5, 1.0 - texel * 0.5)) \
-            / float(tiles), coords.z))
-    if (shadow.ambient_occlusion.y > 0.5) {
-        return SHADOW_TAP(vec2(0.0));
-    }
-    float lit = 0.0;
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            lit += SHADOW_TAP(vec2(x, y));
-        }
-    }
-    return lit / 9.0;
-}
-void main() {
-    vec4 base_color = v_color * texture(base_color_texture, v_uv);
-    // Flat shading's face normal, taken before any discard or branch:
-    // derivatives are undefined once a pixel of the 2x2 quad has left, and
-    // some drivers then return garbage.
-    vec3 face = cross(dFdx(v_world_position), dFdy(v_world_position));
-    if (v_alpha.x == 1u && base_color.a < uintBitsToFloat(v_alpha.y)) {
-        discard;
-    }
-    float alpha = v_alpha.x == 2u ? base_color.a : 1.0;
-    // Opacity 0 draws nothing: reflections are not scaled by alpha, so a
-    // fully clear surface would otherwise still show a faint mirror.
-    if (v_alpha.x == 2u && alpha <= 0.0 && v_transmission.x <= 0.0) {
-        discard;
-    }
-    // Transmitted light comes from the opaque scene copy when the frame has
-    // one; without it, transmission only makes the surface see-through.
-    float transmission = v_transmission.x;
-    bool refracts = transmission > 0.0 && shadow.scene_color.x > 0.5;
-    alpha = refracts ? 1.0 : alpha * (1.0 - transmission);
-    // light_info.z is the SceneDebugView: 1 unshaded, 2 normals.
-    bool unlit = v_emissive.w > 0.5 && camera.light_info.z != 2u;
-    if (unlit || camera.light_info.z == 1u) {
-        // Fog is off in debug views.
-        vec4 haze = fog_at(v_world_position);
-        f_color = vec4(base_color.rgb * alpha * haze.a + haze.rgb * alpha, alpha);
-        return;
-    }
-    vec3 normal = normalize(v_normal);
-    // Flat shading: the triangle's face normal, turned to the side the
-    // vertex normal points to. A sliver too thin to give one keeps the
-    // vertex normal instead of normalizing zero into NaN.
-    if (v_surface.w > 0.5 && dot(face, face) > 1e-20) {
-        face = normalize(face);
-        normal = dot(face, normal) < 0.0 ? -face : face;
-    }
-    if (v_surface.z > 0.5) {
-        vec3 tangent = normalize(
-            v_tangent.xyz - normal * dot(normal, v_tangent.xyz)
-        );
-        vec3 bitangent = cross(normal, tangent) * v_tangent.w;
-        vec3 sampled = texture(normal_texture, v_uv).xyz * 2.0 - 1.0;
-        normal = normalize(mat3(tangent, bitangent, normal) * sampled);
-    }
-    if (camera.light_info.z == 2u) {
-        f_color = vec4((normal * 0.5 + 0.5) * alpha, alpha);
-        return;
-    }
-    // glTF packs roughness in green and metallic in blue.
-    vec4 packed = texture(metallic_roughness_texture, v_uv);
-    float metallic = clamp(v_surface.x * packed.b, 0.0, 1.0);
-    float roughness = clamp(v_surface.y * packed.g, 0.04, 1.0);
-    float occlusion = texture(occlusion_texture, v_uv).r;
-    // Blended surfaces are not in the depth the occlusion was traced from.
-    if (PASS != 1u && shadow.ambient_occlusion.x > 0.5) {
-        occlusion *= texelFetch(ambient_occlusion, ivec2(gl_FragCoord.xy), 0).r;
-    }
-    vec3 view_dir = camera.eye.w > 0.5
-        ? normalize(camera.eye.xyz - v_world_position)
-        : normalize(camera.eye.xyz);
-    float n_dot_v = max(dot(normal, view_dir), 0.0001);
-    vec3 f0 = mix(vec3(0.04), base_color.rgb, metallic);
-    // Premultiplied by alpha; specular is not, see the blend pipeline.
-    vec3 diffuse_color = base_color.rgb * (1.0 - metallic) * alpha
-        * (refracts ? 1.0 - transmission : 1.0);
-    float a2 = roughness * roughness * roughness * roughness;
-    float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
-    // Hemisphere environment: diffuse from the normal, specular from the
-    // reflection direction with roughness-aware Fresnel.
-    // ponytail: without an environment map, a two-color hemisphere. With
-    // one, mip levels stand in for prefiltered radiance and irradiance.
-    vec3 reflected = reflect(-view_dir, normal);
-    vec3 env_fresnel = f0 + (max(vec3(1.0 - roughness), f0) - f0)
-        * pow(1.0 - n_dot_v, 5.0);
-    float last_mip = shadow.environment.z;
-    vec3 reflection = surroundings(
-        v_world_position, reflected, roughness * last_mip, roughness);
-    // Surfaces drawn after the opaque copy see the scene in their
-    // reflections. The overlay adds the difference over the opaque pass.
-    vec4 traced = vec4(0.0);
-    if (PASS != 0u && shadow.scene_color.z > 0.5
-        && roughness < SSR_MAX_ROUGHNESS) {
-        traced = trace_reflection(reflected, roughness);
-    }
-    // The overlay's difference is seen through the same fog as the
-    // opaque surface under it.
-    vec4 haze = fog_at(v_world_position);
-    if (PASS == 2u) {
-        f_color = vec4(
-            (traced.rgb - reflection) * traced.a * env_fresnel * occlusion
-                * haze.a,
-            0.0
-        );
-        return;
-    }
-    reflection = mix(reflection, traced.rgb, traced.a);
-    vec3 result = (surroundings(
-            v_world_position, normal, max(last_mip - 1.0, 0.0), 1.0)
-            * diffuse_color * (1.0 - env_fresnel)
-        + reflection * env_fresnel)
-        * occlusion;
-    // Directional lights (the first light_info.w) light every pixel; point
-    // and spot lights come from this pixel's cluster.
-    vec2 cell = (gl_FragCoord.xy - shadow.viewport.xy) / shadow.viewport.zw;
-    uvec2 tile = min(uvec2(max(cell, 0.0) * vec2(16.0, 9.0)), uvec2(15u, 8u));
-    float view_depth = dot(v_world_position, shadow.cluster_view.xyz)
-        - shadow.cluster_view.w;
-    uint slice = view_depth <= shadow.cluster_depth.x ? 0u : min(
-        uint(log(view_depth / shadow.cluster_depth.x)
-            / shadow.cluster_depth.y * 24.0),
-        23u
-    );
-    uint cluster = (slice * 9u + tile.y) * 16u + tile.x;
-    uint cluster_first = clusters.data[2u * cluster];
-    uint directional = camera.light_info.w;
-    uint light_count = directional + clusters.data[2u * cluster + 1u];
-    for (uint step = 0; step < light_count; ++step) {
-        uint index = step < directional
-            ? step
-            : clusters.data[cluster_first + step - directional];
-        Light light = lights.data[index];
-        float kind = light.position_kind.w;
-        vec3 to_light;
-        float attenuation = 1.0;
-        vec3 tint = vec3(1.0);
-        // Sphere lights light specular from the point of the sphere
-        // nearest the reflection ray, with the lobe widened to keep its
-        // energy (Karis 2013, representative point).
-        vec3 specular_dir;
-        float lobe_energy = 1.0;
-        if (kind < 0.5) {
-            to_light = normalize(-light.direction_range.xyz);
-            specular_dir = to_light;
-        } else {
-            vec3 delta = light.position_kind.xyz - v_world_position;
-            float distance_to_light = length(delta);
-            to_light = distance_to_light > 0.0001
-                ? delta / distance_to_light
-                : vec3(0.0, 1.0, 0.0);
-            float range_fade = clamp(
-                1.0 - distance_to_light / light.direction_range.w,
-                0.0,
-                1.0
-            );
-            attenuation = range_fade * range_fade;
-            float source_radius = light.spot_angles.z;
-            specular_dir = to_light;
-            if (source_radius > 0.0) {
-                vec3 to_ray = dot(delta, reflected) * reflected - delta;
-                vec3 nearest = delta + to_ray
-                    * clamp(source_radius / max(length(to_ray), 0.0001),
-                        0.0, 1.0);
-                specular_dir = normalize(nearest);
-                float lobe = roughness * roughness;
-                float widened = clamp(
-                    lobe + source_radius / (2.0 * max(distance_to_light, 0.0001)),
-                    0.0, 1.0);
-                lobe_energy = (lobe / widened) * (lobe / widened);
-            }
-            if (kind > 1.5) {
-                vec3 axis = normalize(light.direction_range.xyz);
-                float cone = dot(-to_light, axis);
-                attenuation *= smoothstep(
-                    light.spot_angles.y,
-                    light.spot_angles.x,
-                    cone
-                );
-                if (light.cookie.w > -0.5 && cone > 0.0) {
-                    // Projected like a slide: the outer cone spans the
-                    // image, its top along the light's up.
-                    vec3 right = light.cookie.xyz;
-                    vec3 up = cross(right, axis);
-                    vec2 spread = vec2(dot(-to_light, right),
-                        dot(-to_light, up)) / (cone * light.spot_angles.w);
-                    tint = cookie_at(int(light.cookie.w + 0.5),
-                        vec2(0.5 + 0.5 * spread.x, 0.5 - 0.5 * spread.y));
-                }
-            }
-        }
-        if (index + 1u == camera.light_info.y && (v_alpha.z & 2u) != 0u) {
-            attenuation *= shadow_factor(normalize(v_normal));
-        }
-        float n_dot_l = max(dot(normal, to_light), 0.0);
-        if (n_dot_l <= 0.0) {
-            continue;
-        }
-        // Cook-Torrance: GGX distribution, Smith-Schlick geometry,
-        // Schlick Fresnel.
-        vec3 half_dir = normalize(specular_dir + view_dir);
-        float n_dot_h = max(dot(normal, half_dir), 0.0);
-        float v_dot_h = max(dot(view_dir, half_dir), 0.0);
-        float d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-        float distribution = a2 / (PI * d * d) * lobe_energy;
-        float geometry = n_dot_v / (n_dot_v * (1.0 - k) + k)
-            * n_dot_l / (n_dot_l * (1.0 - k) + k);
-        vec3 fresnel = f0 + (1.0 - f0) * pow(1.0 - v_dot_h, 5.0);
-        vec3 specular = distribution * geometry * fresnel
-            / (4.0 * n_dot_v * n_dot_l + 0.0001);
-        vec3 radiance = light.color_intensity.rgb
-            * light.color_intensity.w * attenuation * tint;
-        // Light intensity is scaled so a white Lambert surface facing a
-        // unit light reflects 1, hence the PI on the specular lobe.
-        result += ((1.0 - fresnel) * diffuse_color + specular * PI)
-            * radiance * n_dot_l;
-    }
-    if (refracts) {
-        // What is behind, seen along the ray bent at the surface after it
-        // crosses `thickness`, tinted by the base color and blurred by
-        // roughness.
-        // ponytail: one refraction at the entry face, no exit face, and
-        // blended objects behind are missing from the copy.
-        vec3 refracted = refract(-view_dir, normal, 1.0 / v_transmission.y);
-        vec4 clip = camera.view_projection
-            * vec4(v_world_position + refracted * v_transmission.z, 1.0);
-        vec2 pixel = shadow.viewport.xy
-            + (clip.xy / clip.w * 0.5 + 0.5) * shadow.viewport.zw;
-        vec3 behind = textureLod(
-            scene_color,
-            pixel / vec2(textureSize(scene_color, 0)),
-            roughness * shadow.scene_color.y
-        ).rgb;
-        result += behind * base_color.rgb * transmission * (1.0 - env_fresnel);
-    }
-    result += v_emissive.rgb * texture(emissive_texture, v_uv).rgb * alpha;
-    // Premultiplied like the rest: blended surfaces add fog by coverage.
-    // ponytail: refracted and screen-space reflected light comes from the
-    // fogged opaque copy, so it is fogged twice over the stretch in front of
-    // this surface; trace the fog per sample if dense fog shows it.
-    f_color = vec4(result * haze.a + haze.rgb * alpha, alpha);
-}
-"#
+                            path: "src/shaders/fragment/scene.frag"
                         }
 }
 
@@ -10189,6 +11449,7 @@ layout(location = 4) in float rotation;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_corner;
 layout(location = 2) flat out uint v_sprite;
+layout(location = 3) flat out float v_time;
 layout(push_constant) uniform Particles {
     mat4 view_projection;
     // w = 1: xyz is the camera position. w = 0: xyz points toward an
@@ -10196,6 +11457,7 @@ layout(push_constant) uniform Particles {
     vec4 eye;
     vec4 right;
     vec4 up;
+    // x: sprite, y: seconds since the game started as float bits.
     uvec4 params;
 } particles;
 const vec2 CORNERS[6] = vec2[](
@@ -10228,42 +11490,17 @@ void main() {
     v_color = color;
     v_corner = corner;
     v_sprite = particles.params.x;
+    v_time = uintBitsToFloat(particles.params.y);
 }
 "
     }
 }
 
-#[rustfmt::skip]
 mod particle_fragment_shader {
     vulkano_shaders::shader! {
         ty: "fragment",
-        src: r"
-#version 450
-layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec2 v_corner;
-layout(location = 2) flat in uint v_sprite;
-layout(location = 0) out vec4 f_color;
-void main() {
-    float r = length(v_corner);
-    float shape;
-    if (v_sprite == 0u) {
-        // Soft: bright core, smooth fall to the edge.
-        float edge = clamp(1.0 - r, 0.0, 1.0);
-        shape = edge * edge * (3.0 - 2.0 * edge);
-    } else if (v_sprite == 1u) {
-        float width = max(fwidth(r), 1e-4);
-        shape = 1.0 - smoothstep(1.0 - width, 1.0, r);
-    } else {
-        shape = 1.0;
-    }
-    float alpha = clamp(v_color.a, 0.0, 1.0) * shape;
-    if (alpha <= 0.0) {
-        discard;
-    }
-    // Premultiplied. Additive pipelines ignore the alpha output.
-    f_color = vec4(v_color.rgb * alpha, alpha);
-}
-"
+        include: ["src/shaders"],
+        path: "src/shaders/fragment/particle.frag"
     }
 }
 
@@ -10375,250 +11612,8 @@ void main() {
 mod tonemap_fragment_shader {
     vulkano_shaders::shader! {
         ty: "fragment",
-        src: r"
-#version 450
-layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput scene;
-// Mip 0 of the bloom chain, half the target size.
-layout(set = 0, binding = 1) uniform sampler2D bloom;
-// mapper follows ToneMapper: 0 Linear, 1 Reinhard, 2 ACES. bloom is the
-// glow's intensity, 0 when the frame has none; inv_extent is one over the
-// target size in pixels.
-// contrast, saturation, shadows, highlights and vignette follow
-// ColorGrading; the defaults leave the color unchanged.
-// A copy of the HDR image in `scene`, for effects that read other pixels;
-// up to date only when `sampled` is 1.
-layout(set = 0, binding = 2) uniform sampler2D scene_image;
-// Factor auto exposure adapted to; read only when auto_exposure is 1.
-layout(set = 0, binding = 3) readonly buffer Exposure { float value; } adapted;
-// The ColorLut strip, lut_size squares of lut_size x lut_size texels; read
-// only when lut > 0, its intensity.
-layout(set = 1, binding = 0) uniform sampler2D lut_strip;
-// Opaque depth, up to date only when blur or motion strength is above 0.
-layout(set = 1, binding = 1) uniform sampler2D scene_depth;
-// MotionBlur: reproject takes this frame's clip space to last frame's;
-// strength is the intensity, 0 when off.
-layout(set = 1, binding = 2) readonly buffer Motion {
-    mat4 reproject;
-    float strength;
-} motion;
-// film: grain, chromatic aberration, scanlines, color bleed. tape: noise
-// band, distortion, seconds and frame number from the fixed tick. flags bit
-// 0 is set when scene_image may be read, bit 1 for auto exposure, bit 2 for
-// FXAA. focus and
-// blur follow DepthOfField; depth holds the projection entries [2][2],
-// [2][3], [3][2] and [3][3] (row, column) that undo stored depth.
-layout(push_constant) uniform ToneMap {
-    float exposure;
-    uint mapper;
-    float bloom;
-    float contrast;
-    vec2 inv_extent;
-    float saturation;
-    float vignette;
-    vec4 shadows;
-    vec4 highlights;
-    vec4 film;
-    vec4 tape;
-    uint flags;
-    float lut;
-    float focus;
-    float blur;
-    vec4 depth;
-} tone;
-layout(location = 0) out vec4 f_color;
-// Uniform 0..1 from a pixel and a frame number, the same on every GPU.
-float noise(uvec2 pixel, uint frame) {
-    uint h = pixel.x * 1973u + pixel.y * 9277u + frame * 26699u;
-    h = (h ^ 61u) ^ (h >> 16u);
-    h *= 9u;
-    h ^= h >> 4u;
-    h *= 0x27d4eb2du;
-    h ^= h >> 15u;
-    return float(h) / 4294967295.0;
-}
-vec3 hdr_at(vec2 uv) {
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
-        return vec3(0.0);
-    }
-    vec3 c = textureLod(scene_image, uv, 0.0).rgb;
-    if (tone.bloom > 0.0) {
-        c += textureLod(bloom, uv, 0.0).rgb * tone.bloom;
-    }
-    return c;
-}
-// Blur radius at uv as a fraction of the screen height.
-float blur_at(vec2 uv) {
-    float d = textureLod(scene_depth, uv, 0.0).r;
-    float z = (tone.depth.y - d * tone.depth.w) / (d * tone.depth.z - tone.depth.x);
-    return min(tone.blur * abs(1.0 - tone.focus / max(-z, 1e-4)), tone.blur);
-}
-// Gathers a disc the size of this pixel's blur. Nearer samples sharper than
-// it would reach this pixel stay out, so focused edges do not smear over a
-// blurred background.
-// ponytail: blurred foreground does not spread over a sharp background;
-// a scatter or tiled max-blur pass would add that.
-vec3 defocus(vec2 uv) {
-    float radius = blur_at(uv);
-    float depth = textureLod(scene_depth, uv, 0.0).r;
-    vec2 to_uv = vec2(tone.inv_extent.x / tone.inv_extent.y, 1.0);
-    vec3 sum = hdr_at(uv);
-    float weight = 1.0;
-    if (radius / tone.inv_extent.y < 0.5) {
-        return sum;
-    }
-    for (int i = 0; i < 32; i++) {
-        // Golden-angle spiral, evenly covering the disc.
-        float r = sqrt((float(i) + 0.5) / 32.0) * radius;
-        float a = float(i) * 2.39996;
-        vec2 at = uv + vec2(cos(a), sin(a)) * r * to_uv;
-        float reach = blur_at(at);
-        float w = textureLod(scene_depth, at, 0.0).r < depth
-            ? clamp((reach - r) / tone.inv_extent.y + 1.0, 0.0, 1.0)
-            : 1.0;
-        sum += hdr_at(at) * w;
-        weight += w;
-    }
-    return sum / weight;
-}
-float luma_of(vec3 c) {
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
-}
-// Perceived brightness after exposure, roughly as the tone curve shows it,
-// so edges between bright areas count as much as dark ones.
-float edge_luma(vec2 uv) {
-    float l = luma_of(hdr_at(uv)) * tone.exposure;
-    return sqrt(l / (1.0 + l));
-}
-// FXAA in the style of Lottes' console version: four diagonal lumas give
-// the edge direction, then two short and two long taps along the edge
-// blend it; the long blend is dropped when it leaves the local luma range.
-vec3 fxaa(vec2 uv) {
-    vec2 px = tone.inv_extent;
-    float nw = edge_luma(uv + vec2(-0.5, -0.5) * px);
-    float ne = edge_luma(uv + vec2(0.5, -0.5) * px);
-    float sw = edge_luma(uv + vec2(-0.5, 0.5) * px);
-    float se = edge_luma(uv + vec2(0.5, 0.5) * px);
-    vec3 center = hdr_at(uv);
-    float m = sqrt(luma_of(center) * tone.exposure / (1.0 + luma_of(center) * tone.exposure));
-    float lo = min(m, min(min(nw, ne), min(sw, se)));
-    float hi = max(m, max(max(nw, ne), max(sw, se)));
-    if (hi - lo < max(0.0625, hi * 0.125)) {
-        return center;
-    }
-    vec2 dir = vec2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
-    float reduce = max((nw + ne + sw + se) * 0.03125, 1.0 / 128.0);
-    dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8.0, 8.0) * px;
-    vec3 near = 0.5 * (hdr_at(uv + dir * (1.0 / 3.0 - 0.5))
-        + hdr_at(uv + dir * (2.0 / 3.0 - 0.5)));
-    vec3 far = near * 0.5 + 0.25 * (hdr_at(uv - dir * 0.5) + hdr_at(uv + dir * 0.5));
-    float l = luma_of(far) * tone.exposure;
-    l = sqrt(l / (1.0 + l));
-    return l < lo || l > hi ? near : far;
-}
-void main() {
-    vec4 hdr = subpassLoad(scene);
-    vec2 uv = gl_FragCoord.xy * tone.inv_extent;
-    if ((tone.flags & 1u) != 0u) {
-        if (tone.tape.y > 0.0) {
-            // Tube bulge, plus rows that sway slowly with time.
-            vec2 centered = uv - 0.5;
-            uv = 0.5 + centered * (1.0 - tone.tape.y * 0.25
-                + tone.tape.y * 0.5 * dot(centered, centered));
-            uv.x += tone.tape.y * 0.004
-                * sin(uv.y * 60.0 + tone.tape.z * 5.0);
-        }
-        hdr.rgb = tone.blur > 0.0 ? defocus(uv)
-            : (tone.flags & 4u) != 0u ? fxaa(uv) : hdr_at(uv);
-        if (motion.strength > 0.0) {
-            // Screen motion since last frame, in uv, centered on the pixel.
-            float d = textureLod(scene_depth, uv, 0.0).r;
-            vec4 last = motion.reproject * vec4(uv * 2.0 - 1.0, d, 1.0);
-            vec2 moved = (uv - (last.xy / last.w * 0.5 + 0.5)) * motion.strength;
-            float pixels = length(moved / tone.inv_extent);
-            // Longer than a sixth of the height is a cut, not motion.
-            if (pixels > 0.5 && pixels * tone.inv_extent.y < 0.17) {
-                vec3 sum = vec3(0.0);
-                for (int i = 0; i < 16; i++) {
-                    sum += hdr_at(uv + moved * (float(i) / 15.0 - 0.5));
-                }
-                hdr.rgb = sum / 16.0;
-            }
-        }
-        if (tone.film.y > 0.0) {
-            vec2 split = (uv - 0.5) * tone.film.y * 0.02;
-            hdr.r = hdr_at(uv + split).r;
-            hdr.b = hdr_at(uv - split).b;
-        }
-        if (tone.film.w > 0.0) {
-            // Color smears to the right; brightness stays sharp.
-            vec2 step_x = vec2(tone.film.w * 8.0 * tone.inv_extent.x, 0.0);
-            vec3 smear = (hdr.rgb + hdr_at(uv - step_x) + hdr_at(uv - 2.0 * step_x)
-                + hdr_at(uv - 3.0 * step_x)) * 0.25;
-            hdr.rgb = max(smear - luma_of(smear) + luma_of(hdr.rgb), 0.0);
-        }
-    } else if (tone.bloom > 0.0) {
-        hdr.rgb += textureLod(bloom, uv, 0.0).rgb * tone.bloom;
-    }
-    float exposure = tone.exposure;
-    if ((tone.flags & 2u) != 0u) {
-        exposure *= adapted.value;
-    }
-    vec3 c = max(hdr.rgb * exposure, 0.0);
-    if (tone.mapper == 1u) {
-        c = c / (1.0 + c);
-    } else if (tone.mapper == 2u) {
-        // Narkowicz 2015 fit of the ACES filmic curve.
-        c = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);
-    }
-    c = clamp(c, 0.0, 1.0);
-    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    c = max(mix(vec3(luma), c, tone.saturation), 0.0);
-    if (tone.contrast != 1.0) {
-        // Contrast in log space around linear mid grey.
-        c = 0.18 * pow(c / 0.18, vec3(tone.contrast));
-    }
-    c *= mix(tone.shadows.rgb, tone.highlights.rgb, smoothstep(0.0, 1.0, luma));
-    if (tone.vignette > 0.0) {
-        vec2 centered = gl_FragCoord.xy * tone.inv_extent - 0.5;
-        c *= 1.0 - tone.vignette * smoothstep(0.25, 0.75, length(centered));
-    }
-    if (tone.lut > 0.0) {
-        // Look up in sRGB, as the strip was authored; the texture decodes
-        // back to linear. Blue blends two neighboring squares.
-        float n = float(textureSize(lut_strip, 0).y);
-        vec3 encoded = mix(12.92 * c, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
-            step(0.0031308, c));
-        vec3 at = clamp(encoded, 0.0, 1.0) * (n - 1.0);
-        float square = min(floor(at.b), n - 2.0);
-        vec2 texel = 1.0 / vec2(n * n, n);
-        vec2 uv = (vec2(at.r + square * n, at.g) + 0.5) * texel;
-        vec3 graded = mix(
-            textureLod(lut_strip, uv, 0.0).rgb,
-            textureLod(lut_strip, uv + vec2(n * texel.x, 0.0), 0.0).rgb,
-            at.b - square
-        );
-        c = mix(c, graded, tone.lut);
-    }
-    uint frame = uint(tone.tape.w);
-    if (tone.film.z > 0.0) {
-        // Every other pixel row darkens.
-        c *= 1.0 - tone.film.z * 0.6 * float(uint(gl_FragCoord.y) & 1u);
-    }
-    if (tone.tape.x > 0.0) {
-        // A band of static an eighth of the height, rolling down once
-        // every four seconds.
-        float row = gl_FragCoord.y * tone.inv_extent.y;
-        float away = abs(fract(row - tone.tape.z * 0.25 + 0.5) - 0.5);
-        float band = tone.tape.x * (1.0 - smoothstep(0.0, 0.0625, away));
-        float hiss = noise(uvec2(gl_FragCoord.xy) / uvec2(2u, 1u), frame + 7u);
-        c = mix(c, vec3(hiss), band * 0.7);
-    }
-    if (tone.film.x > 0.0) {
-        c += tone.film.x * 0.3 * (noise(uvec2(gl_FragCoord.xy), frame) - 0.5);
-    }
-    f_color = vec4(clamp(c, 0.0, 1.0), hdr.a);
-}
-"
+        include: ["src/shaders"],
+        path: "src/shaders/fragment/tonemap.frag"
     }
 }
 
@@ -10648,42 +11643,7 @@ mod sky_fragment_shader {
     vulkano_shaders::shader! {
         ty: "fragment",
         include: ["src/shaders"],
-        src: r#"
-#version 450
-layout(location = 0) in vec2 v_ndc;
-layout(location = 0) out vec4 f_color;
-layout(push_constant) uniform Camera {
-    mat4 view_projection;
-    vec4 eye;
-    vec4 ambient;
-    vec4 ground_ambient;
-    uvec4 light_info;
-} camera;
-struct Light {
-    vec4 position_kind;
-    vec4 direction_range;
-    vec4 color_intensity;
-    vec4 spot_angles;
-    vec4 cookie;
-};
-layout(set = 0, binding = 2) readonly buffer Lights {
-    Light data[];
-} lights;
-layout(set = 2, binding = 1) readonly buffer Shadow {
-    vec4 environment;
-    vec4 scene_color;
-    vec4 viewport;
-    vec4 probes[8];
-    mat4 inverse_view_projection;
-    vec4 fog;
-    vec4 fog_shape;
-    vec4 ambient_occlusion;
-} shadow;
-#include "fog.glsl"
-void main() {
-    f_color = fog_sky(v_ndc);
-}
-"#
+        path: "src/shaders/fragment/sky.frag"
     }
 }
 
@@ -11279,7 +12239,7 @@ mod tests {
         let (order, batches, blended_start) = render_batch_order(
             &renderables,
             |_| false,
-            |m| ([Some(m.key()), None, None, None, None], false),
+            |m| ([Some(m.key()), None, None, None, None], false, 0),
         );
 
         assert_eq!(order.len(), 10_000);
@@ -11365,7 +12325,7 @@ mod tests {
         let (order, batches, blended_start) = render_batch_order(
             &renderables,
             |material| material == glass,
-            |m| ([Some(m.key()), None, None, None, None], false),
+            |m| ([Some(m.key()), None, None, None, None], false, 0),
         );
 
         assert_eq!(blended_start, 2);
@@ -11385,6 +12345,49 @@ mod tests {
         sort_back_to_front(&mut blended, [0.0; 3], [0.0, 0.0, -1.0]);
         assert_eq!(blended[0].position[2], -5.0, "farthest drawn first");
         assert_eq!(blended[1].position[2], -1.0);
+    }
+
+    #[test]
+    fn ambient_cubes_integrate_the_light_from_each_side() {
+        let size = 8;
+        let face = (size * size) as usize;
+        // Uniform radiance: every side receives irradiance pi.
+        let cube = ambient_cube(&vec![[0.5, 1.0, 2.0, 1.0]; 6 * face], size);
+        for [r, g, b] in cube {
+            assert!((r - 0.5).abs() < 0.02, "{r}");
+            assert!((g - 1.0).abs() < 0.02 && (b - 2.0).abs() < 0.04);
+        }
+        // Light only through the +Y face (index 2): +Y gets most, -Y none,
+        // the four sides an equal share.
+        let mut texels = vec![[0.0; 4]; 6 * face];
+        texels[2 * face..3 * face].fill([1.0; 4]);
+        let cube = ambient_cube(&texels, size).map(|[r, ..]| r);
+        assert!(cube[2] > 0.5 && cube[3] == 0.0, "{cube:?}");
+        for side in [0, 1, 4, 5] {
+            assert!((cube[side] - cube[0]).abs() < 1e-4);
+            assert!(cube[side] > 0.0 && cube[side] < cube[2] / 2.0);
+        }
+    }
+
+    #[test]
+    fn light_probe_grids_clamp_and_spread_wall_to_wall() {
+        assert_eq!(light_probe_resolution([0, 3, 99]), [1, 3, 8]);
+        let clamped = light_probe_resolution([8, 8, 8]);
+        assert!(clamped.iter().product::<u32>() as usize <= MAX_LIGHT_PROBES);
+        assert_eq!(clamped, [4, 4, 4]);
+        let positions =
+            light_probe_positions([1.0, 2.0, 3.0], [2.0, 1.0, 1.0], [3, 1, 2]);
+        assert_eq!(
+            positions,
+            [
+                [-1.0, 2.0, 2.0],
+                [1.0, 2.0, 2.0],
+                [3.0, 2.0, 2.0],
+                [-1.0, 2.0, 4.0],
+                [1.0, 2.0, 4.0],
+                [3.0, 2.0, 4.0],
+            ]
+        );
     }
 
     /// Full-screen slabs at the given depths seen by an orthographic camera
@@ -11624,6 +12627,189 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn fog_volumes_fill_only_their_turned_box() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A red box 8 m wide and 1 m tall, turned a quarter around Z, so
+        // it covers the middle columns of the view in front of the white
+        // slab at z = 0, and not the edge column.
+        let volume = |z: f32| {
+            let matrix = Matrix4::new_translation(&Vector3::new(0.0, 0.0, z))
+                * nalgebra::Rotation3::from_axis_angle(
+                    &Vector3::z_axis(),
+                    std::f32::consts::FRAC_PI_2,
+                )
+                .to_homogeneous()
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(4.0, 0.5, 1.5));
+            (
+                matrix.into(),
+                crate::runtime::FogVolume {
+                    color: [1.0, 0.0, 0.0],
+                    density: 4.0,
+                    extents: [4.0, 0.5, 1.5],
+                },
+            )
+        };
+        let mut scene = SlabScene::new(&[(0.0, MaterialAsset::default())]);
+        scene.render_world.fog_volumes = vec![volume(2.5)];
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(r > 150 && g < 30 && b < 30, "inside: {r} {g} {b}");
+        let [r, g, b] = render_pixel(&mut scene, [0, 4]);
+        assert!(r > 100 && g > 100 && b > 100, "beside: {r} {g} {b}");
+        // Behind the slab it hides nothing.
+        scene.render_world.fog_volumes = vec![volume(-2.5)];
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(g > 100 && b > 100, "behind: {r} {g} {b}");
+        // The editor's fog switch turns volumes off too.
+        scene.render_world.fog_volumes = vec![volume(2.5)];
+        scene.effects.fog = false;
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(g > 100 && b > 100, "fog switched off: {r} {g} {b}");
+
+        let mut sky = SlabScene::new(&[]);
+        sky.render_world.fog_volumes = vec![volume(2.5)];
+        let [r, g, b] = render_pixel(&mut sky, [4, 4]);
+        assert!(
+            r > 150 && g < 30 && b < 30,
+            "in front of the sky: {r} {g} {b}"
+        );
+        assert_eq!(render_pixel(&mut sky, [0, 4]), [0, 0, 0]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn the_procedural_sky_follows_the_sun_and_lights_the_scene() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let sun =
+            |toward: Vector3<f32>| crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &-toward.normalize(),
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: 100_000.0,
+                    shadows: false,
+                },
+            };
+        // The camera looks down -Z at the horizon.
+        let mut sky = SlabScene::new(&[]);
+        sky.render_world.procedural_sky =
+            Some(crate::runtime::ProceduralSky::default());
+        sky.render_world.directional_lights = vec![sun(Vector3::y())];
+        let [r, _, b] = render_pixel(&mut sky, [4, 4]);
+        assert!(b > r + 10, "noon: {r} {b}");
+        // Low in front of the camera, the sun reddens the sky.
+        sky.render_world.directional_lights =
+            vec![sun(Vector3::new(0.0, 0.05, -1.0))];
+        let [r, _, b] = render_pixel(&mut sky, [4, 4]);
+        assert!(r > b + 10, "sunset: {r} {b}");
+        // Its disc is far brighter than the sky beside it.
+        sky.render_world.procedural_sky = Some(crate::runtime::ProceduralSky {
+            sun_size: 90.0,
+            ..crate::runtime::ProceduralSky::default()
+        });
+        sky.render_world.directional_lights =
+            vec![sun(Vector3::new(0.0, 0.2, -1.0))];
+        let [r, g, _] = render_pixel(&mut sky, [4, 4]);
+        assert!(r > 250 && g > 150, "sun disc: {r} {g}");
+
+        // Without ambient light, the sky still lights a white slab facing
+        // the horizon.
+        let mut scene = SlabScene::new(&[(0.0, MaterialAsset::default())]);
+        scene.render_world.ambient_light = None;
+        let [r0, g0, b0] = render_pixel(&mut scene, [4, 4]);
+        scene.render_world.procedural_sky =
+            Some(crate::runtime::ProceduralSky::default());
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(
+            r > r0 + 20 && g > g0 + 20 && b > b0 + 20,
+            "sky light: {r} {g} {b}, without: {r0} {g0} {b0}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn light_shafts_keep_fog_in_a_casters_shadow_dark() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // The camera looks down -Z into the sun, which shines up +Z from
+        // under a black slab at z = -3: all fog in view lies in its shadow.
+        let mut scene = SlabScene::new(&[(
+            -3.0,
+            MaterialAsset {
+                base_color: [0.0, 0.0, 0.0, 1.0],
+                ..MaterialAsset::default()
+            },
+        )]);
+        scene.render_world.ambient_light = None;
+        scene.render_world.renderables[0].cast_shadows = true;
+        let direction = Vector3::new(0.1, 0.0, 1.0).normalize();
+        scene.render_world.directional_lights.push(
+            crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &direction,
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: 500_000.0,
+                    shadows: true,
+                },
+            },
+        );
+        let fog = |light_shafts| crate::runtime::Fog {
+            color: [0.0; 3],
+            density: 1.0,
+            height_falloff: 0.0,
+            sun_scatter: 1.0,
+            light_shafts,
+            ..crate::runtime::Fog::default()
+        };
+        let center = [4, 4];
+        scene.render_world.fog = Some(fog(0.0));
+        let [glow, ..] = render_pixel(&mut scene, center);
+        assert!(glow > 150, "fog glows toward the sun, got {glow}");
+        scene.render_world.fog = Some(fog(1.0));
+        let [shaft, ..] = render_pixel(&mut scene, center);
+        assert!(shaft < 30, "shadowed fog stays dark, got {shaft}");
+        // Without a shadow map there is nothing to block the glow.
+        scene.render_world.directional_lights[0].light.shadows = false;
+        scene.render_world.lights_revision += 1;
+        let [unshadowed, ..] = render_pixel(&mut scene, center);
+        assert!(unshadowed > 150, "no shadows, no shafts: {unshadowed}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn auto_exposure_brings_the_scene_to_its_key() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
@@ -11752,6 +12938,66 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn indirect_light_bleeds_a_bright_surface_onto_its_neighbour() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A white wall, and a glowing red slab 0.3 m in front of its left
+        // half.
+        let mut scene = SlabScene::with_extent(
+            &[
+                (0.0, MaterialAsset::default()),
+                (
+                    0.3,
+                    MaterialAsset {
+                        model: MaterialModel::Unlit,
+                        base_color: [4.0, 0.0, 0.0, 1.0],
+                        ..MaterialAsset::default()
+                    },
+                ),
+            ],
+            [32, 32],
+        );
+        scene.render_world.renderables[1].transform.matrix =
+            (Matrix4::new_translation(&Vector3::new(-2.0, 0.0, 0.3))
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    4.0, 4.0, 0.1,
+                )))
+            .into();
+        scene.render_world.quality = QualityProfile::High;
+        // No ambient light, so the wall shows only what bounces onto it.
+        scene.render_world.ambient_light = None;
+        let near = [17, 16];
+        // The first frame makes the copy the second gathers from.
+        let redness = |scene: &mut SlabScene, indirect| {
+            scene.render_world.ambient_occlusion =
+                Some(crate::runtime::AmbientOcclusion {
+                    radius: 1.0,
+                    intensity: 1.0,
+                    indirect,
+                });
+            render_pixel(scene, near);
+            let [r, g, _] = render_pixel(scene, near);
+            i32::from(r) - i32::from(g)
+        };
+        let plain = redness(&mut scene, 0.0);
+        let bled = redness(&mut scene, 2.0);
+        assert!(bled > plain + 20, "red {plain} -> {bled}");
+        assert!(scene
+            .renderer
+            .last_frame_passes()
+            .contains(&FramePass::SceneColor));
+        // Balanced keeps the occlusion but not the indirect light.
+        scene.render_world.quality = QualityProfile::Balanced;
+        assert!(redness(&mut scene, 2.0) <= plain + 2);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn ambient_occlusion_darkens_surfaces_next_to_occluders() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
@@ -11783,6 +13029,7 @@ mod tests {
             Some(crate::runtime::AmbientOcclusion {
                 radius: 0.5,
                 intensity: 1.0,
+                indirect: 0.0,
             });
         let [near, far] = [
             render_pixel(&mut scene, near),
@@ -11857,6 +13104,7 @@ mod tests {
                         Some(crate::runtime::AmbientOcclusion {
                             radius: 0.5,
                             intensity: 1.0,
+                            indirect: 1.0,
                         });
                     // Occlusion culling needs a frame to fill its history.
                     for _ in 0..2 {
@@ -12498,6 +13746,222 @@ mod tests {
                 shadowed < 30,
                 "occluder shadows the floor from {light:?}, got {shadowed}"
             );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn decals_paint_their_image_on_surfaces_facing_the_projection() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // An unlit grey floor under a decal of four colored quadrants that
+        // fills the 2 m view; each screen quadrant shows its image quadrant.
+        let extent = [16, 16];
+        let mut scene = SlabScene::with_extent(
+            &[(
+                0.0,
+                MaterialAsset {
+                    model: MaterialModel::Unlit,
+                    base_color: [0.2, 0.2, 0.2, 1.0],
+                    ..MaterialAsset::default()
+                },
+            )],
+            extent,
+        );
+        let quadrant = |x: u32, y: u32| match (x < 8, y < 8) {
+            (true, true) => [255, 0, 0, 255],
+            (false, true) => [0, 255, 0, 255],
+            (true, false) => [0, 0, 255, 255],
+            (false, false) => [255, 255, 255, 255],
+        };
+        let image = scene.assets.textures.insert(TextureAsset {
+            size: [16, 16],
+            rgba8: (0..16)
+                .flat_map(|y| (0..16).flat_map(move |x| quadrant(x, y)))
+                .collect(),
+            color_space: TextureColorSpace::Srgb,
+            sampler: TextureSampler::default(),
+        });
+        let decal = |matrix: Matrix4<f32>, decal| {
+            let scale = Vector3::new(1.0, 1.0, 0.5);
+            (matrix.prepend_nonuniform_scaling(&scale).into(), decal)
+        };
+        let image_decal = crate::runtime::Decal {
+            handle: Some(image),
+            ..crate::runtime::Decal::default()
+        };
+        let render = |scene: &mut SlabScene| {
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            move |x: u32, y: u32| {
+                let at = ((y * extent[0] + x) * 4) as usize;
+                [pixels[at + 2], pixels[at + 1], pixels[at]]
+            }
+        };
+        let bright = |pixel: [u8; 3]| pixel.map(|c| c > 150);
+
+        scene.render_world.decals =
+            vec![decal(Matrix4::identity(), image_decal.clone())];
+        let pixel = render(&mut scene);
+        assert_eq!(bright(pixel(4, 4)), [true, false, false], "top left");
+        assert_eq!(bright(pixel(11, 4)), [false, true, false], "top right");
+        assert_eq!(bright(pixel(4, 11)), [false, false, true], "bottom left");
+        assert_eq!(bright(pixel(11, 11)), [true; 3], "bottom right");
+
+        // Turned to project up, away from the floor: nothing is painted.
+        scene.render_world.decals = vec![decal(
+            Matrix4::from_euler_angles(std::f32::consts::PI, 0.0, 0.0),
+            image_decal,
+        )];
+        let pixel = render(&mut scene);
+        let grey = pixel(4, 4);
+        assert!(grey.iter().all(|&c| c > 50 && c < 150), "{grey:?}");
+
+        // A plain half-transparent red decal over the right half only.
+        scene.render_world.decals = vec![decal(
+            Matrix4::new_translation(&Vector3::new(1.0, 0.0, 0.0)),
+            crate::runtime::Decal {
+                color: [1.0, 0.0, 0.0, 0.5],
+                ..crate::runtime::Decal::default()
+            },
+        )];
+        let pixel = render(&mut scene);
+        assert_eq!(pixel(4, 8), grey, "left half untouched");
+        let right = pixel(11, 8);
+        assert!(right[0] > grey[0] + 40 && right[1] < grey[1], "{right:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn effect_budgets_shrink_with_the_quality_profile() {
+        use crate::runtime::{
+            gpu_particle_batch, ParticleBatch, ParticleBlend, ParticleEmitter,
+            ParticleInstance, ParticleSimulation, ParticleSprite,
+            ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Six red decals in a row across a grey floor, and more particles
+        // than Eco draws: 140000 empty CPU particles and the last one a
+        // green square above the row, plus an idle GPU emitter's slots.
+        let extent = [32, 32];
+        let mut scene = SlabScene::with_extent(
+            &[(
+                0.0,
+                MaterialAsset {
+                    model: MaterialModel::Unlit,
+                    base_color: [0.2, 0.2, 0.2, 1.0],
+                    ..MaterialAsset::default()
+                },
+            )],
+            extent,
+        );
+        let xs: Vec<f32> = (0..6).map(|i| -0.75 + 0.3 * i as f32).collect();
+        scene.render_world.decals = xs
+            .iter()
+            .map(|&x| {
+                let matrix =
+                    Matrix4::new_translation(&Vector3::new(x, 0.0, 0.0))
+                        .prepend_nonuniform_scaling(&Vector3::new(
+                            0.12, 0.12, 0.5,
+                        ));
+                let decal = crate::runtime::Decal {
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    ..crate::runtime::Decal::default()
+                };
+                (matrix.into(), decal)
+            })
+            .collect();
+        let mut instances = vec![ParticleInstance::default(); 140_000];
+        *instances.last_mut().unwrap() = ParticleInstance {
+            position: [0.0, 0.5, 0.5],
+            size: 0.5,
+            color: [0.0, 1.0, 0.0, 1.0],
+            ..ParticleInstance::default()
+        };
+        scene.render_world.particles = vec![ParticleBatch {
+            entity: None,
+            blend: ParticleBlend::Additive,
+            sprite: ParticleSprite::Square,
+            instances,
+        }];
+        let emitter = ParticleEmitter {
+            simulation: ParticleSimulation::Gpu,
+            max_particles: 1 << 17,
+            ..ParticleEmitter::default()
+        };
+        scene.render_world.gpu_particles = vec![gpu_particle_batch(
+            bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            &emitter,
+            &ParticleSystem::default(),
+            None,
+            None,
+        )];
+        let total = 140_000 + (1 << 17);
+        // Pixels are 1/16 m.
+        let column = |x: f32| ((x + 1.0) * 16.0) as u32;
+        for (quality, decals, particle) in [
+            (QualityProfile::High, 6, true),
+            (QualityProfile::Balanced, 6, true),
+            (QualityProfile::Eco, 4, false),
+        ] {
+            scene.render_world.quality = quality;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            let pixel_at = |x: u32, y: u32| {
+                let at = ((y * extent[0] + x) * 4) as usize;
+                [pixels[at + 2], pixels[at + 1], pixels[at]]
+            };
+            let pixel = |x: u32| pixel_at(x, 16);
+            for (index, &x) in xs.iter().enumerate() {
+                let [r, g, _] = pixel(column(x));
+                assert_eq!(
+                    r > g.saturating_add(40),
+                    index < decals,
+                    "{quality:?}: decal {index}"
+                );
+            }
+            assert_eq!(
+                // y = 0.5 is row 8 or 24, whichever way the view is up.
+                pixel_at(16, 8)[1].max(pixel_at(16, 24)[1]) > 200,
+                particle,
+                "{quality:?}: last CPU particle"
+            );
+            let capacity = scene.renderer.capacity_diagnostics();
+            assert_eq!(capacity.dropped_decals, 6 - decals, "{quality:?}");
+            let budget = particle_budget(quality);
+            let dropped = capacity.dropped_particles;
+            if total <= budget {
+                assert_eq!(dropped, 0, "{quality:?}");
+            } else {
+                // Each emitter rounds its share down.
+                assert!(
+                    (total - budget..=total - budget + 2).contains(&dropped),
+                    "{quality:?}: {dropped} dropped"
+                );
+            }
         }
     }
 
@@ -17740,6 +19204,57 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn hdr_environment_maps_draw_behind_the_scene_brighter_than_white() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Half-float texels: the left half (around -Z) red at `level`, the
+        // right half blue at 1.
+        let hdr = |scene: &mut SlabScene, level: u16| {
+            let [width, height] = [64, 32];
+            let rgba8 = (0..height)
+                .flat_map(|_| 0..width)
+                .flat_map(|column| {
+                    if column < 32 {
+                        [level, 0, 0, 0x3c00]
+                    } else {
+                        [0, 0, 0x3c00, 0x3c00]
+                    }
+                })
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            scene.assets.textures.insert(TextureAsset {
+                size: [width, height],
+                rgba8,
+                color_space: TextureColorSpace::Hdr,
+                sampler: TextureSampler::default(),
+            })
+        };
+        // The camera looks down -Z at the empty background.
+        let mut scene = SlabScene::new(&[]);
+        let dim = hdr(&mut scene, 0x3400); // 0.25
+        scene.render_world.environment = Some((dim, 1.0, false));
+        assert_eq!(render_pixel(&mut scene, [4, 4]), [0, 0, 0]);
+        scene.render_world.environment = Some((dim, 1.0, true));
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(r > 40 && r < 200 && g < 10 && b < 10, "dim: {r} {g} {b}");
+        // 4.0 survives the upload: the background clips to full red.
+        let bright = hdr(&mut scene, 0x4400);
+        scene.render_world.environment = Some((bright, 1.0, true));
+        let [r, g, b] = render_pixel(&mut scene, [4, 4]);
+        assert!(r > 250 && g < 10 && b < 10, "bright: {r} {g} {b}");
+        // With an intensity of 1/16 it lands under the dim one.
+        scene.render_world.environment = Some((bright, 1.0 / 16.0, true));
+        let [r, ..] = render_pixel(&mut scene, [4, 4]);
+        assert!(r > 40 && r < 200, "scaled: {r}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn clear_glass_shows_what_is_behind_it_and_reflects_the_environment() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
@@ -17769,6 +19284,7 @@ mod tests {
         scene.render_world.environment = Some((
             environment_texture(&mut scene, |column, _| column >= 32),
             1.0,
+            false,
         ));
         let before = scene.now();
         scene
@@ -17815,6 +19331,7 @@ mod tests {
         scene.render_world.environment = Some((
             environment_texture(&mut scene, |column, _| column >= 32),
             1.0,
+            false,
         ));
         let before = scene.now();
         scene
@@ -17992,6 +19509,208 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn light_probes_light_a_wall_with_the_red_slab_behind_the_camera() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A white wall faces the camera; a wide unlit red slab hangs behind
+        // the camera, out of view. Only a probe in front of the wall sees it.
+        let mut scene = SlabScene::new(&[
+            (0.0, MaterialAsset::default()),
+            (
+                8.0,
+                MaterialAsset {
+                    model: crate::assets::MaterialModel::Unlit,
+                    base_color: [1.0, 0.0, 0.0, 1.0],
+                    ..MaterialAsset::default()
+                },
+            ),
+        ]);
+        scene.render_world.renderables[1].transform.matrix =
+            (Matrix4::new_translation(&Vector3::new(0.0, 0.0, 8.0))
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    40.0, 40.0, 0.1,
+                )))
+            .into();
+        let mut wall = |center: [f32; 3]| {
+            scene.render_world.light_probe_grid = Some((
+                center,
+                crate::runtime::LightProbeGrid {
+                    extents: [3.0; 3],
+                    resolution: [1, 1, 1],
+                    intensity: 1.0,
+                },
+            ));
+            render_pixel(&mut scene, [4, 4])
+        };
+        let outside = wall([0.0, 0.0, 20.0]);
+        assert!(
+            outside[0] > 40 && outside[0].abs_diff(outside[1]) < 8,
+            "gray from the ambient light outside the grid: {outside:?}"
+        );
+        let inside = wall([0.0, 0.0, 2.0]);
+        assert!(
+            inside[0] > 40 && inside[1] < inside[0] / 3,
+            "red from the probe: {inside:?}"
+        );
+        scene.render_world.light_probe_grid = None;
+        assert_eq!(render_pixel(&mut scene, [4, 4]), outside, "no grid");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn high_quality_relights_light_probes_when_the_red_slab_moves_away() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // The probe test's scene: a probe in front of a white wall sees an
+        // unlit red slab behind the camera. Then the slab moves far away
+        // without the grid changing.
+        let mut scene = SlabScene::new(&[
+            (0.0, MaterialAsset::default()),
+            (
+                8.0,
+                MaterialAsset {
+                    model: crate::assets::MaterialModel::Unlit,
+                    base_color: [1.0, 0.0, 0.0, 1.0],
+                    ..MaterialAsset::default()
+                },
+            ),
+        ]);
+        scene.render_world.light_probe_grid = Some((
+            [0.0, 0.0, 2.0],
+            crate::runtime::LightProbeGrid {
+                extents: [3.0; 3],
+                resolution: [1, 1, 1],
+                intensity: 1.0,
+            },
+        ));
+        let slab_at = |x: f32| -> [[f32; 4]; 4] {
+            (Matrix4::new_translation(&Vector3::new(x, 0.0, 8.0))
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    40.0, 40.0, 0.1,
+                )))
+            .into()
+        };
+        let mut moved = |quality| {
+            scene.render_world.quality = quality;
+            scene
+                .render_world
+                .light_probe_grid
+                .as_mut()
+                .unwrap()
+                .1
+                .intensity += 0.001;
+            scene.render_world.renderables[1].transform.matrix = slab_at(0.0);
+            scene.render_world.renderables_revision += 1;
+            let red = render_pixel(&mut scene, [4, 4]);
+            // Seen edge on from the probe, far off to the side.
+            scene.render_world.renderables[1].transform.matrix = slab_at(500.0);
+            scene.render_world.renderables_revision += 1;
+            (red, render_pixel(&mut scene, [4, 4]))
+        };
+        let (red, relit) = moved(QualityProfile::High);
+        assert!(red[1] < red[0] / 3, "red from the probe: {red:?}");
+        assert!(
+            relit[0] > 40 && relit[0].abs_diff(relit[1]) < 8,
+            "gray once the probe recaptures: {relit:?}"
+        );
+        let (red, stale) = moved(QualityProfile::Balanced);
+        assert!(red[1] < red[0] / 3, "red from the probe: {red:?}");
+        assert_eq!(stale, red, "Balanced keeps the baked probes");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn lightmaps_bounce_a_sunlit_red_slab_onto_the_floor() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A white floor faces the camera with no ambient light. Behind the
+        // camera a wide red slab is lit from below by a sun shining up +z,
+        // which never reaches the floor's top. Only bounce light can.
+        let mut scene = SlabScene::new(&[
+            (0.0, MaterialAsset::default()),
+            (
+                8.0,
+                MaterialAsset {
+                    base_color: [1.0, 0.0, 0.0, 1.0],
+                    ..MaterialAsset::default()
+                },
+            ),
+        ]);
+        scene.render_world.renderables[1].transform.matrix =
+            (Matrix4::new_translation(&Vector3::new(0.0, 0.0, 8.0))
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    40.0, 40.0, 0.1,
+                )))
+            .into();
+        scene.render_world.ambient_light = Some(crate::runtime::AmbientLight {
+            color: [1.0; 3],
+            intensity: 0.0,
+        });
+        scene.render_world.directional_lights.push(
+            crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &Vector3::new(0.0, 0.01, 1.0).normalize(),
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: 2.0
+                        * crate::runtime::DirectionalLight::LUX_PER_UNIT,
+                    shadows: false,
+                },
+            },
+        );
+        let floor = scene.render_world.renderables[0].entity;
+        let slab = scene.render_world.renderables[1].entity;
+        let mut lit = |lightmapped: &[bevy_ecs::entity::Entity]| {
+            scene.render_world.lightmaps = lightmapped
+                .iter()
+                .map(|&entity| {
+                    (entity, crate::runtime::Lightmap { resolution: 4 })
+                })
+                .collect();
+            // In entity order, as extraction sorts them.
+            scene
+                .render_world
+                .lightmaps
+                .sort_by_key(|(entity, _)| *entity);
+            render_pixel(&mut scene, [4, 4])
+        };
+        let dark = lit(&[]);
+        assert!(dark[0] < 10, "no ambient or direct light: {dark:?}");
+        let bounced = lit(&[floor, slab]);
+        assert!(
+            bounced[0] > 60 && bounced[1] < bounced[0] / 4,
+            "red bounce light: {bounced:?}"
+        );
+        // An object without a lightmap neither receives nor casts bounce.
+        assert_eq!(lit(&[floor]), dark, "slab not lightmapped");
+        assert_eq!(lit(&[slab]), dark, "floor not lightmapped");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn transmissive_glass_tints_the_refracted_backdrop() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
@@ -18062,8 +19781,11 @@ mod tests {
                 .into();
         scene.render_world.ambient_light = None;
         // Upper half red (sky), lower half blue (ground).
-        scene.render_world.environment =
-            Some((environment_texture(&mut scene, |_, row| row < 16), 1.0));
+        scene.render_world.environment = Some((
+            environment_texture(&mut scene, |_, row| row < 16),
+            1.0,
+            false,
+        ));
         let look_from = |scene: &mut SlabScene, side: Vector3<f32>| {
             let camera = scene.render_world.active_camera.as_mut().unwrap();
             camera.transform.matrix = (Matrix4::new_translation(&(side * 5.0))
@@ -18478,6 +20200,1393 @@ mod tests {
             "additive adds green: {r} {g} {b}"
         );
         assert_eq!(pixel(16, 2), [0, 0, 0], "background stays clear");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_particles_spawn_move_and_die_on_the_gpu() {
+        use crate::runtime::{
+            gpu_particle_batch, ColorKey, ParticleEmitter, ParticleSimulation,
+            ParticleSprite, ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // One red square particle starts still at x = -0.5; a strong wind
+        // pushes it along +x and it dies after 0.15 s.
+        let emitter = ParticleEmitter {
+            simulation: ParticleSimulation::Gpu,
+            max_particles: 4,
+            speed: [0.0, 0.0],
+            size: [0.5, 0.5],
+            lifetime: [0.15, 0.15],
+            wind: [100.0, 0.0, 0.0],
+            fade_in: 0.0,
+            fade_out: 0.0,
+            color_over_life: vec![ColorKey {
+                t: 0.0,
+                color: [1.0, 0.0, 0.0, 1.0],
+            }],
+            sprite: ParticleSprite::Square,
+            ..ParticleEmitter::default()
+        };
+        let global = crate::runtime::GlobalTransform {
+            matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                .into(),
+        };
+        let system = ParticleSystem {
+            spawned: 1,
+            ..ParticleSystem::default()
+        };
+        let entity = bevy_ecs::entity::Entity::from_raw_u32(1).unwrap();
+        // The orthographic test camera sees 2 units across 32 pixels.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        scene.render_world.gpu_particles = vec![gpu_particle_batch(
+            entity,
+            &emitter,
+            &system,
+            Some(&global),
+            None,
+        )];
+        let mut frame = |elapsed: f32| {
+            scene.render_world.elapsed_seconds = elapsed;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            let red = |x: usize| pixels[(16 * 32 + x) * 4 + 2];
+            let count = pixels.chunks(4).filter(|p| p[2] > 128).count();
+            (red(8), red(24), count)
+        };
+        assert_eq!(frame(0.0), (255, 0, 64), "spawned 8 pixels square");
+        // 0.1 s of 100 m/s² wind: 10 m/s, so 1 m along +x.
+        assert_eq!(frame(0.1), (0, 255, 64), "moved by the wind");
+        assert_eq!(frame(0.2), (0, 0, 0), "dead past its lifetime");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_particles_feel_force_fields_and_stop_at_colliders() {
+        use crate::runtime::{
+            gpu_particle_batch, CollisionLayers, ColorKey, FieldKind,
+            ForceField, GpuCollider, GpuForceField, ParticleEmitter,
+            ParticleSimulation, ParticleSprite, ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A still particle at x = -0.5 is pushed along +x by a 100 m/s²
+        // field; a thick wall from x = 0.6 stops it.
+        let emitter = ParticleEmitter {
+            simulation: ParticleSimulation::Gpu,
+            collide: true,
+            max_particles: 4,
+            speed: [0.0, 0.0],
+            size: [0.5, 0.5],
+            lifetime: [5.0, 5.0],
+            fade_in: 0.0,
+            fade_out: 0.0,
+            color_over_life: vec![ColorKey {
+                t: 0.0,
+                color: [1.0, 0.0, 0.0, 1.0],
+            }],
+            sprite: ParticleSprite::Square,
+            ..ParticleEmitter::default()
+        };
+        let global = crate::runtime::GlobalTransform {
+            matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                .into(),
+        };
+        let system = ParticleSystem {
+            spawned: 1,
+            ..ParticleSystem::default()
+        };
+        let entity = bevy_ecs::entity::Entity::from_raw_u32(1).unwrap();
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        scene.render_world.gpu_particles = vec![gpu_particle_batch(
+            entity,
+            &emitter,
+            &system,
+            Some(&global),
+            None,
+        )];
+        scene.render_world.gpu_force_fields = vec![GpuForceField {
+            model: crate::Transform::new([0.0; 3]).to_matrix(),
+            shape: [0.0, 100.0, 100.0, 100.0],
+            field: ForceField {
+                kind: FieldKind::Directional,
+                strength: 100.0,
+                direction: [1.0, 0.0, 0.0],
+                ..ForceField::default()
+            },
+        }];
+        scene.render_world.gpu_colliders = vec![GpuCollider {
+            model: crate::Transform::new([5.6, 0.0, 0.0]).to_matrix(),
+            shape: [0.0, 5.0, 5.0, 5.0],
+            velocity: [0.0; 3],
+            friction: 0.0,
+            restitution: 0.0,
+            layers: CollisionLayers::default(),
+        }];
+        let mut frame = |elapsed: f32| {
+            scene.render_world.elapsed_seconds = elapsed;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            let red = |x: usize| pixels[(16 * 32 + x) * 4 + 2];
+            (red(8), red(24))
+        };
+        assert_eq!(frame(0.0), (255, 0), "spawned at x = -0.5");
+        // 0.1 s at 100 m/s²: 10 m/s, so 1 m along +x.
+        assert_eq!(frame(0.1), (0, 255), "pushed by the field");
+        // Unstopped it would be 2 m further, off screen.
+        assert_eq!(frame(0.2), (0, 255), "stopped by the wall");
+        assert_eq!(frame(0.3), (0, 255), "still at the wall");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_particle_trails_draw_the_path_behind_each_particle() {
+        use crate::runtime::{
+            gpu_particle_batch, ColorKey, ParticleEmitter, ParticleSimulation,
+            ParticleSprite, ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A particle flies from x = -0.8 along +x at 10 m/s for 0.1 s,
+        // over 6 frames. Returns the red of pixels at x = -0.3 (behind it)
+        // and x = 0.2 (where it ends).
+        let run = |trail: f32| {
+            let emitter = ParticleEmitter {
+                simulation: ParticleSimulation::Gpu,
+                trail,
+                max_particles: 1,
+                direction: [1.0, 0.0, 0.0],
+                spread: 0.0,
+                speed: [10.0, 10.0],
+                size: [0.25, 0.25],
+                lifetime: [5.0, 5.0],
+                fade_in: 0.0,
+                fade_out: 0.0,
+                color_over_life: vec![ColorKey {
+                    t: 0.0,
+                    color: [1.0, 0.0, 0.0, 1.0],
+                }],
+                sprite: ParticleSprite::Square,
+                ..ParticleEmitter::default()
+            };
+            let global = crate::runtime::GlobalTransform {
+                matrix: Matrix4::new_translation(&Vector3::new(-0.8, 0.0, 0.0))
+                    .into(),
+            };
+            let system = ParticleSystem {
+                spawned: 1,
+                ..ParticleSystem::default()
+            };
+            let entity = bevy_ecs::entity::Entity::from_raw_u32(1).unwrap();
+            let mut scene = SlabScene::with_extent(&[], [32, 32]);
+            scene.render_world.gpu_particles = vec![gpu_particle_batch(
+                entity,
+                &emitter,
+                &system,
+                Some(&global),
+                None,
+            )];
+            for frame in 0..6 {
+                scene.render_world.elapsed_seconds = frame as f32 * 0.02;
+                let before = scene.now();
+                scene
+                    .render(before)
+                    .then_signal_fence_and_flush()
+                    .unwrap()
+                    .wait(None)
+                    .unwrap();
+            }
+            let pixels = scene.pixels();
+            let red = |x: usize| pixels[(16 * 32 + x) * 4 + 2];
+            (red(11), red(19))
+        };
+        let (behind, head) = run(0.1);
+        assert_eq!(head, 255, "the particle itself");
+        assert!(behind > 50, "its trail behind it: {behind}");
+        assert_eq!(run(0.0), (0, 255), "no trail without `trail`");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn foliage_copies_lean_in_wind_fields_when_drawn() {
+        use crate::runtime::{
+            Collider, ColliderShape, FieldKind, Foliage, ForceField,
+            MeshRenderer, PhysicsBody, RenderExtractPlugin, RigidBody,
+            RigidBodyKind,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // One copy of a 0.2 x 1.6 m pillar at the origin, extracted through
+        // a real app so the wind comes from the CPU physics fields.
+        let extract = |wind: bool| {
+            let mut app = crate::App::new();
+            app.add_plugin(RenderExtractPlugin).unwrap();
+            let server = AssetServer::default();
+            let renderer = MeshRenderer {
+                mesh: server.fallback_mesh,
+                material: server.fallback_material,
+                cast_shadows: false,
+                receive_shadows: false,
+            };
+            app.insert_resource(server);
+            let pillar = crate::Transform {
+                scale: [0.2, 1.6, 0.2],
+                ..crate::Transform::default()
+            };
+            app.spawn((
+                pillar,
+                renderer,
+                Foliage {
+                    count: 1,
+                    radius: 0.0,
+                    scale_min: 1.0,
+                    scale_max: 1.0,
+                    sway: 0.05,
+                    ..Foliage::default()
+                },
+            ));
+            if wind {
+                app.spawn((
+                    crate::Transform::default(),
+                    PhysicsBody::default(),
+                    RigidBody {
+                        kind: RigidBodyKind::Fixed,
+                        ..RigidBody::default()
+                    },
+                    Collider {
+                        shape: ColliderShape::Box {
+                            half_extents: [3.0; 3],
+                        },
+                        sensor: true,
+                        ..Collider::default()
+                    },
+                    ForceField {
+                        kind: FieldKind::Wind,
+                        strength: 10.0,
+                        direction: [1.0, 0.0, 0.0],
+                        ..ForceField::default()
+                    },
+                ));
+            }
+            for _ in 0..3 {
+                app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                    .unwrap();
+            }
+            app.world().resource::<RenderWorld>().renderables.clone()
+        };
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        // Pixels are 1/16 m; row 4 is 0.72 m up, near the pillar's top.
+        let lit = |pixel: [u8; 3]| pixel.iter().any(|&channel| channel > 40);
+        scene.render_world.renderables = extract(false);
+        assert_eq!(scene.render_world.renderables.len(), 1);
+        let upright = [16, 4];
+        // 0.5 m lean per metre: the top sits 0.36 m to the right.
+        let leaned = [21, 4];
+        assert!(lit(render_pixel(&mut scene, upright)), "still air: upright");
+        assert!(!lit(render_pixel(&mut scene, leaned)));
+        scene.render_world.renderables = extract(true);
+        scene.render_world.renderables_revision += 1;
+        assert!(lit(render_pixel(&mut scene, leaned)), "wind leans the top");
+        assert!(!lit(render_pixel(&mut scene, upright)));
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn meshes_rebuilt_in_place_redraw_where_their_vertices_went() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{ExtractedRenderable, GlobalTransform};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Cloth, soft-body skins and fluid surfaces rewrite their mesh
+        // asset each tick and keep the same handle and renderable. A 0.5 m
+        // quad facing the camera, first left of center, then moved right
+        // by editing its vertices only.
+        let quad = |x: f32| MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[dx, dy]| MeshVertex {
+                position: [x + dx, dy, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+        for culling in [CullingMode::Frustum, CullingMode::FrustumAndOcclusion]
+        {
+            let mut scene = SlabScene::with_extent(&[], [32, 32]);
+            scene.render_world.culling = culling;
+            let mesh = scene.assets.meshes.insert(quad(-0.6));
+            scene.render_world.renderables = vec![ExtractedRenderable {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+                transform: GlobalTransform::default(),
+                mesh,
+                material: scene.assets.fallback_material,
+                cast_shadows: false,
+                receive_shadows: false,
+                bounds: None,
+            }];
+            scene.render_world.renderables_revision += 1;
+            // Pixels are 1/16 m: x = -0.6 m is pixel 6, x = 0.6 m pixel 25.
+            let lit =
+                |pixel: [u8; 3]| pixel.iter().any(|&channel| channel > 40);
+            let (left, right) = ([6, 16], [25, 16]);
+            assert!(
+                lit(render_pixel(&mut scene, left)),
+                "{culling:?}: drawn on the left"
+            );
+            assert!(!lit(render_pixel(&mut scene, right)));
+            *scene.assets.meshes.get_mut(mesh).unwrap() = quad(0.6);
+            // Outside the first mesh box: stale bounds would cull it.
+            assert!(
+                lit(render_pixel(&mut scene, right)),
+                "{culling:?}: follows its vertices"
+            );
+            assert!(
+                !lit(render_pixel(&mut scene, left)),
+                "{culling:?}: old shape gone"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn material_overrides_recolor_one_object_inside_the_shared_batch() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{
+            ExtractedRenderable, GlobalTransform, MaterialOverride,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Two 0.5 m quads at x = -0.5 and 0.5 share one grey unlit
+        // material; the right one gets its own color.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mesh = scene.assets.meshes.insert(MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[x, y]| MeshVertex {
+                position: [x, y, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        let material = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            ..MaterialAsset::default()
+        });
+        let entity = |id| bevy_ecs::entity::Entity::from_raw_u32(id).unwrap();
+        scene.render_world.renderables = [(1, -0.5), (2, 0.5)]
+            .map(|(id, x)| ExtractedRenderable {
+                entity: entity(id),
+                transform: GlobalTransform {
+                    matrix: Matrix4::new_translation(&Vector3::new(
+                        x, 0.0, 0.0,
+                    ))
+                    .into(),
+                },
+                mesh,
+                material,
+                cast_shadows: false,
+                receive_shadows: false,
+                bounds: None,
+            })
+            .to_vec();
+        scene.render_world.renderables_revision += 1;
+        // Pixels are 1/16 m: x = -0.5 is pixel 8, x = 0.5 pixel 24.
+        let frame = |scene: &mut SlabScene| {
+            let left = render_pixel(scene, [8, 16]);
+            let right = render_pixel(scene, [24, 16]);
+            (left, right, scene.renderer.render_counters().draws)
+        };
+        let (left, right, shared) = frame(&mut scene);
+        assert_eq!(left, right, "both grey");
+        let red = |color: [f32; 4]| MaterialOverride {
+            base_color: Some(color),
+            ..MaterialOverride::default()
+        };
+        scene.render_world.material_overrides =
+            vec![(entity(2), red([1.0, 0.0, 0.0, 1.0]))];
+        let (grey, right, draws) = frame(&mut scene);
+        assert_eq!(grey, left, "the other object keeps the material");
+        assert!(right[0] > 200 && right[1] < 40, "overridden: {right:?}");
+        assert_eq!(draws, shared, "still one batch");
+        // A changed override redraws without a renderables change.
+        scene.render_world.material_overrides =
+            vec![(entity(2), red([0.0, 0.0, 1.0, 1.0]))];
+        let (_, right, _) = frame(&mut scene);
+        assert!(right[2] > 200 && right[0] < 40, "changed: {right:?}");
+        scene.render_world.material_overrides.clear();
+        assert_eq!(frame(&mut scene).1, left, "removed");
+    }
+
+    #[test]
+    fn surface_shaders_need_the_versioned_header() {
+        let hook = "void surface(SurfaceInput i, inout Surface s) {}";
+        let glsl = super::surface_fragment_glsl(
+            &format!("\n#rusting surface 1\n{hook}"),
+            "",
+        )
+        .unwrap();
+        assert!(glsl.contains("#define RUSTING_CUSTOM_SURFACE"));
+        assert!(glsl.contains(hook));
+        assert!(!glsl.contains("#include"), "includes are inlined");
+        // The hook counts lines from the user's file.
+        assert!(glsl.contains("#line 3\n"), "{glsl}");
+        for bad in [hook, "#rusting surface 2", "#rusting sky 1"] {
+            let error = super::surface_fragment_glsl(bad, "").unwrap_err();
+            assert!(error.contains("surface"), "{bad:?}: {error}");
+        }
+        let post = "void post(PostInput i, inout vec3 color) {}";
+        let glsl =
+            super::post_fragment_glsl(&format!("#rusting post 1\n{post}"))
+                .unwrap();
+        assert!(
+            glsl.contains("#define RUSTING_CUSTOM_POST") && glsl.contains(post)
+        );
+        assert!(!glsl.contains("#include"), "includes are inlined");
+        let error = super::post_fragment_glsl(hook).unwrap_err();
+        assert!(error.contains("post"), "{error}");
+        let sky = "void sky(SkyInput i, inout vec3 color) {}";
+        let glsl =
+            super::sky_fragment_glsl(&format!("#rusting sky 1\n{sky}"), "")
+                .unwrap();
+        assert!(
+            glsl.contains("#define RUSTING_CUSTOM_SKY") && glsl.contains(sky)
+        );
+        assert!(!glsl.contains("#include"), "includes are inlined");
+        let particle = "void particle(ParticleInput i, inout vec4 color) {}";
+        let glsl = super::particle_fragment_glsl(&format!(
+            "#rusting particle 1\n{particle}"
+        ))
+        .unwrap();
+        assert!(
+            glsl.contains("#define RUSTING_CUSTOM_PARTICLE")
+                && glsl.contains(particle)
+        );
+        // The fog hook goes into both the scene and the sky shader, next to
+        // their own hooks, and its errors name it.
+        let fog = "void fog(FogInput i, inout vec4 haze) {}";
+        let fog_source = format!("#rusting fog 1\n{fog}");
+        for glsl in [
+            super::surface_fragment_glsl("", &fog_source).unwrap(),
+            super::sky_fragment_glsl("", &fog_source).unwrap(),
+        ] {
+            assert!(glsl.contains("#define RUSTING_CUSTOM_FOG"));
+            assert!(!glsl.contains("#define RUSTING_CUSTOM_SURFACE"));
+            assert!(glsl.contains(fog) && !glsl.contains("#include"));
+        }
+        let error = super::sky_fragment_glsl("", "#rusting sky 1").unwrap_err();
+        assert!(error.contains("fog"), "{error}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_skinning_draws_what_cpu_skinning_draws() {
+        use crate::assets::{MeshAsset, MeshVertex, MorphTargets, SkinWeights};
+        use crate::runtime::{
+            morph_mesh, skin_mesh, ExtractedRenderable, GlobalTransform,
+            SkinJob,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let cooked = MeshAsset {
+            vertices: [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
+                .map(|[x, y]| MeshVertex {
+                    position: [x, y, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    ..MeshVertex::default()
+                })
+                .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+        // The left edge stays on joint 0; the right edge follows joint 1,
+        // half and fully, and a blend shape lifts the top left corner and
+        // tips every normal.
+        let skin = SkinWeights {
+            joints: vec![[0; 4], [0, 1, 0, 0], [1, 0, 0, 0], [0; 4]],
+            weights: vec![
+                [1.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+            ],
+        };
+        let morph = MorphTargets {
+            positions: vec![vec![
+                [0.0; 3],
+                [0.0; 3],
+                [0.0; 3],
+                [0.0, 0.3, 0.0],
+            ]],
+            normals: vec![vec![[0.6, 0.0, 0.0]; 4]],
+        };
+        let matrices = [
+            Matrix4::identity(),
+            Matrix4::new_translation(&Vector3::new(0.3, -0.2, 0.0))
+                * Matrix4::from_axis_angle(&Vector3::y_axis(), 0.5),
+        ];
+        let weights = vec![0.8];
+        let cpu = scene.assets.meshes.insert(skin_mesh(
+            &morph_mesh(&cooked, &morph, &weights),
+            &skin,
+            &matrices,
+        ));
+        let base = scene.assets.meshes.insert(cooked.clone());
+        let copy = scene.assets.meshes.insert(cooked);
+        scene
+            .assets
+            .deformers
+            .cooked
+            .insert(base.key(), Arc::new((Some(skin), morph)));
+        let material = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            shader: "#rusting surface 1\n\
+                     void surface(SurfaceInput i, inout Surface s) {\n\
+                         s.base_color.rgb = s.normal * 0.5 + 0.5;\n\
+                     }"
+            .into(),
+            ..MaterialAsset::default()
+        });
+        let draw = |scene: &mut SlabScene, mesh| {
+            scene.render_world.renderables = vec![ExtractedRenderable {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+                transform: GlobalTransform::default(),
+                mesh,
+                material,
+                cast_shadows: false,
+                receive_shadows: false,
+                bounds: None,
+            }];
+            scene.render_world.renderables_revision += 1;
+            render_pixel(scene, [0, 0]);
+            scene.pixels()
+        };
+        let undeformed = draw(&mut scene, copy);
+        let reference = draw(&mut scene, cpu);
+        scene.render_world.skin_jobs = vec![SkinJob {
+            mesh: copy,
+            base,
+            matrices: matrices.map(Into::into).to_vec(),
+            morph_weights: weights,
+        }];
+        let skinned = draw(&mut scene, copy);
+        assert!(scene.renderer.shader_errors().0.is_empty());
+        let differ = |a: &[u8], b: &[u8]| {
+            a.iter().zip(b).filter(|(a, b)| a.abs_diff(**b) > 2).count()
+        };
+        assert!(differ(&undeformed, &reference) > 100);
+        // Edge pixels may round the other way.
+        assert!(
+            differ(&skinned, &reference) <= 8,
+            "{} channels differ",
+            differ(&skinned, &reference)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn surface_shaders_color_their_material_per_pixel() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{ExtractedRenderable, GlobalTransform};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A grey built-in quad at x = -0.5 and a shaded one at x = 0.5,
+        // each 0.5 m wide with u running left to right.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mesh = scene.assets.meshes.insert(MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[x, y]| MeshVertex {
+                position: [x, y, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                uv: [x * 2.0 + 0.5, 0.5 - y * 2.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        let shaded = |scene: &mut SlabScene, shader: &str| {
+            scene.assets.materials.insert(MaterialAsset {
+                model: MaterialModel::Unlit,
+                base_color: [0.5, 0.5, 0.5, 1.0],
+                shader: shader.to_owned(),
+                ..MaterialAsset::default()
+            })
+        };
+        let grey = shaded(&mut scene, "");
+        let place = |scene: &mut SlabScene, material| {
+            scene.render_world.renderables =
+                [(1, -0.5, grey), (2, 0.5, material)]
+                    .map(|(id, x, material)| ExtractedRenderable {
+                        entity: bevy_ecs::entity::Entity::from_raw_u32(id)
+                            .unwrap(),
+                        transform: GlobalTransform {
+                            matrix: Matrix4::new_translation(&Vector3::new(
+                                x, 0.0, 0.0,
+                            ))
+                            .into(),
+                        },
+                        mesh,
+                        material,
+                        cast_shadows: false,
+                        receive_shadows: false,
+                        bounds: None,
+                    })
+                    .to_vec();
+            scene.render_world.renderables_revision += 1;
+        };
+        // The shaded quad covers pixels 20 to 27.
+        let gradient = shaded(
+            &mut scene,
+            "#rusting surface 1\n\
+             void surface(SurfaceInput i, inout Surface s) {\n\
+                 s.base_color.rgb = vec3(i.uv.x, 0.0, 1.0 - i.uv.x);\n\
+             }",
+        );
+        place(&mut scene, gradient);
+        let left = render_pixel(&mut scene, [8, 16]);
+        let near = render_pixel(&mut scene, [21, 16]);
+        let far = render_pixel(&mut scene, [26, 16]);
+        assert!(
+            scene.renderer.surface_shader_errors().is_empty(),
+            "{:?}",
+            scene.renderer.surface_shader_errors()
+        );
+        assert!(left[0] == left[2] && left[1] > 100, "built-in: {left:?}");
+        assert!(near[2] > near[0] && far[0] > far[2], "{near:?} {far:?}");
+        assert!(near[1] < 20 && far[1] < 20, "{near:?} {far:?}");
+        // A shader graph compiles to the same gradient.
+        {
+            use crate::rendering::shader_graph::{
+                ShaderGraph, ShaderInput, ShaderNode, SurfaceOutput,
+            };
+            let graph = ShaderGraph {
+                nodes: vec![
+                    ShaderNode::Constant([0.0, 0.0, 1.0, 1.0]),
+                    ShaderNode::Constant([1.0, 0.0, 0.0, 1.0]),
+                    ShaderNode::Input(ShaderInput::Uv),
+                    ShaderNode::Component(2, 0),
+                    ShaderNode::Mix(0, 1, 3),
+                ],
+                outputs: vec![(SurfaceOutput::BaseColor, 4)],
+            };
+            let graphed = shaded(&mut scene, &graph.compile().unwrap());
+            place(&mut scene, graphed);
+            assert_eq!(render_pixel(&mut scene, [21, 16]), near);
+            assert_eq!(render_pixel(&mut scene, [26, 16]), far);
+            assert!(scene.renderer.shader_errors().0.is_empty());
+        }
+        // `i.time` is the render world's clock.
+        let clock = shaded(
+            &mut scene,
+            "#rusting surface 1\n\
+             void surface(SurfaceInput i, inout Surface s) {\n\
+                 s.base_color.rgb = vec3(i.time);\n\
+             }",
+        );
+        place(&mut scene, clock);
+        scene.render_world.elapsed_seconds = 0.1;
+        let early = render_pixel(&mut scene, [24, 16]);
+        scene.render_world.elapsed_seconds = 0.9;
+        let late = render_pixel(&mut scene, [24, 16]);
+        assert!(late[0] > early[0] + 60, "{early:?} {late:?}");
+        // Broken shaders draw the built-in surface and say why.
+        let future = shaded(&mut scene, "#rusting surface 2\nvoid f() {}");
+        place(&mut scene, future);
+        assert_eq!(render_pixel(&mut scene, [24, 16]), left);
+        let errors = scene.renderer.surface_shader_errors();
+        assert!(
+            errors.iter().any(|error| error.contains("version")),
+            "{errors:?}"
+        );
+        let typo = shaded(
+            &mut scene,
+            "#rusting surface 1\n\
+             void surface(SurfaceInput i, inout Surface s) {\n\
+                 s.base_color = oops;\n\
+             }",
+        );
+        place(&mut scene, typo);
+        assert_eq!(render_pixel(&mut scene, [24, 16]), left);
+        let errors = scene.renderer.surface_shader_errors();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains(":3:") && error.contains("oops")),
+            "{errors:?}"
+        );
+        let errors = scene.renderer.shader_errors().0;
+        assert!(
+            errors.len() == 2
+                && errors.iter().all(|e| e.starts_with("surface: ")),
+            "{errors:?}"
+        );
+        // Fixing the source in place rebuilds the shader and clears its
+        // error; the unfixed one keeps reporting.
+        scene.assets.materials.get_mut(typo).unwrap().shader =
+            scene.assets.materials.get(gradient).unwrap().shader.clone();
+        assert_eq!(render_pixel(&mut scene, [26, 16]), far);
+        let errors = scene.renderer.shader_errors().0;
+        assert!(
+            errors.len() == 1 && errors[0].contains("version"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn sky_shaders_paint_only_the_background() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{ExtractedRenderable, GlobalTransform};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A grey quad on pixels 4 to 11; the rest is background.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mesh = scene.assets.meshes.insert(MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[x, y]| MeshVertex {
+                position: [x, y, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        let grey = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            ..MaterialAsset::default()
+        });
+        scene.render_world.renderables = vec![ExtractedRenderable {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            transform: GlobalTransform {
+                matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                    .into(),
+            },
+            mesh,
+            material: grey,
+            cast_shadows: false,
+            receive_shadows: false,
+            bounds: None,
+        }];
+        scene.render_world.renderables_revision += 1;
+        let plain = [8, 24].map(|x| render_pixel(&mut scene, [x, 16]));
+        let sky = |scene: &mut SlabScene, body: &str| {
+            scene.render_world.sky_shader = format!(
+                "#rusting sky 1\n\
+                 void sky(SkyInput i, inout vec3 color) {{\n{body}\n}}"
+            );
+        };
+        // The camera looks along -z, so the background turns blue and the
+        // quad stays as it was.
+        sky(&mut scene, "color = max(-i.direction, 0.0);");
+        let quad = render_pixel(&mut scene, [8, 16]);
+        let back = render_pixel(&mut scene, [24, 16]);
+        assert_eq!(scene.renderer.sky_shader_error(), None);
+        assert_eq!(quad, plain[0], "surfaces cover the sky");
+        assert!(back[2] > 200 && back[0] < 20, "{back:?} {plain:?}");
+        // `i.time` is the render world's clock.
+        sky(&mut scene, "color = vec3(i.time);");
+        scene.render_world.elapsed_seconds = 0.1;
+        let early = render_pixel(&mut scene, [24, 16]);
+        scene.render_world.elapsed_seconds = 0.9;
+        let late = render_pixel(&mut scene, [24, 16]);
+        assert!(late[0] > early[0] + 60, "{early:?} {late:?}");
+        // Broken shaders leave the built-in background and say why.
+        scene.render_world.sky_shader = "#rusting sky 2\n".into();
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain[1]);
+        let error = scene.renderer.sky_shader_error().unwrap_or_default();
+        assert!(error.contains("version"), "{error}");
+        sky(&mut scene, "color = oops;");
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain[1]);
+        let error = scene.renderer.sky_shader_error().unwrap_or_default();
+        assert!(error.contains(":3:") && error.contains("oops"), "{error}");
+        scene.render_world.sky_shader.clear();
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain[1]);
+        assert_eq!(scene.renderer.sky_shader_error(), None);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn particle_shaders_change_only_their_emitter() {
+        use crate::runtime::{
+            ParticleBatch, ParticleBlend, ParticleInstance, ParticleSprite,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let entity = |i| bevy_ecs::entity::Entity::from_raw_u32(i).unwrap();
+        // Two white square emitters, on pixels 4 to 11 and 20 to 27.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        scene.render_world.particles = [(1, -0.5), (2, 0.5)]
+            .map(|(i, x)| ParticleBatch {
+                entity: Some(entity(i)),
+                blend: ParticleBlend::Alpha,
+                sprite: ParticleSprite::Square,
+                instances: vec![ParticleInstance {
+                    position: [x, 0.0, 0.5],
+                    size: 0.5,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    ..ParticleInstance::default()
+                }],
+            })
+            .to_vec();
+        let plain = render_pixel(&mut scene, [8, 16]);
+        let back = render_pixel(&mut scene, [16, 16]);
+        assert!(plain[1] > back[1] + 60, "{plain:?} {back:?}");
+        let shade = |scene: &mut SlabScene, body: &str| {
+            scene.render_world.particle_shaders = HashMap::from([(
+                entity(1),
+                format!(
+                    "#rusting particle 1\n\
+                     void particle(ParticleInput i, inout vec4 color) \
+                     {{\n{body}\n}}"
+                ),
+            )]);
+        };
+        shade(&mut scene, "color.rgb = vec3(1.0, 0.0, 0.0);");
+        let red = render_pixel(&mut scene, [8, 16]);
+        assert_eq!(scene.renderer.particle_shader_errors(), Vec::<&str>::new());
+        assert!(red[0] > 100 && red[1] < 10, "{red:?} {plain:?}");
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain, "other emitter");
+        // Alpha 0 draws nothing; `corner` runs -1..1 across the quad.
+        shade(&mut scene, "color.a *= step(0.0, i.corner.x);");
+        assert_eq!(render_pixel(&mut scene, [5, 16]), back);
+        assert_eq!(render_pixel(&mut scene, [10, 16]), plain);
+        // `i.time` is the render world's clock.
+        shade(&mut scene, "color.rgb = vec3(i.time);");
+        scene.render_world.elapsed_seconds = 0.1;
+        let early = render_pixel(&mut scene, [8, 16]);
+        scene.render_world.elapsed_seconds = 0.9;
+        let late = render_pixel(&mut scene, [8, 16]);
+        assert!(late[0] > early[0] + 60, "{early:?} {late:?}");
+        // Broken shaders leave the built-in look and say why.
+        shade(&mut scene, "color = oops;");
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain);
+        let errors = scene.renderer.particle_shader_errors();
+        assert!(
+            errors.len() == 1 && errors[0].contains("oops"),
+            "{errors:?}"
+        );
+        scene.render_world.particle_shaders.clear();
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain);
+        assert_eq!(scene.renderer.particle_shader_errors(), Vec::<&str>::new());
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn fog_shaders_cover_surfaces_and_the_background() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{ExtractedRenderable, GlobalTransform};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A grey quad on pixels 4 to 11; the rest is background.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mesh = scene.assets.meshes.insert(MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[x, y]| MeshVertex {
+                position: [x, y, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        let grey = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            ..MaterialAsset::default()
+        });
+        scene.render_world.renderables = vec![ExtractedRenderable {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            transform: GlobalTransform {
+                matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                    .into(),
+            },
+            mesh,
+            material: grey,
+            cast_shadows: false,
+            receive_shadows: false,
+            bounds: None,
+        }];
+        scene.render_world.renderables_revision += 1;
+        let plain = [8, 24].map(|x| render_pixel(&mut scene, [x, 16]));
+        let fog = |scene: &mut SlabScene, body: &str| {
+            scene.render_world.fog_shader = format!(
+                "#rusting fog 1\n\
+                 void fog(FogInput i, inout vec4 haze) {{\n{body}\n}}"
+            );
+        };
+        // Without a Fog component, haze starts clear; the shader paints
+        // the quad red and the background green.
+        fog(
+            &mut scene,
+            "haze = i.background ? vec4(0.0, 1.0, 0.0, 0.0) \
+             : vec4(1.0, 0.0, 0.0, 0.0);",
+        );
+        let quad = render_pixel(&mut scene, [8, 16]);
+        let back = render_pixel(&mut scene, [24, 16]);
+        assert_eq!(scene.renderer.sky_shader_error(), None);
+        assert_eq!(scene.renderer.surface_shader_errors(), Vec::<&str>::new());
+        assert!(quad[0] > 200 && quad[1] < 20, "{quad:?} {plain:?}");
+        assert!(back[1] > 200 && back[0] < 20, "{back:?} {plain:?}");
+        // Half the surface shows through.
+        fog(&mut scene, "haze = vec4(0.0, 0.0, 0.0, 0.5);");
+        let dim = render_pixel(&mut scene, [8, 16]);
+        assert!(
+            dim[0] + 20 < plain[0][0] && dim[0] > 10,
+            "{dim:?} {plain:?}"
+        );
+        // `i.time` is the render world's clock.
+        fog(&mut scene, "haze = vec4(vec3(i.time), 0.0);");
+        scene.render_world.elapsed_seconds = 0.1;
+        let early = render_pixel(&mut scene, [8, 16]);
+        scene.render_world.elapsed_seconds = 0.9;
+        let late = render_pixel(&mut scene, [8, 16]);
+        assert!(late[0] > early[0] + 60, "{early:?} {late:?}");
+        // Broken shaders leave the built-in fog and say why.
+        fog(&mut scene, "haze = oops;");
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain[0]);
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain[1]);
+        let error = scene.renderer.sky_shader_error().unwrap_or_default();
+        assert!(error.contains(":3:") && error.contains("oops"), "{error}");
+        scene.render_world.fog_shader.clear();
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain[0]);
+        assert_eq!(scene.renderer.sky_shader_error(), None);
+        assert_eq!(scene.renderer.surface_shader_errors(), Vec::<&str>::new());
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn post_shaders_rework_the_finished_image() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{ExtractedRenderable, GlobalTransform};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A grey quad on pixels 4 to 11 of a 32 pixel image.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mesh = scene.assets.meshes.insert(MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[x, y]| MeshVertex {
+                position: [x, y, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        let grey = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            ..MaterialAsset::default()
+        });
+        scene.render_world.renderables = vec![ExtractedRenderable {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            transform: GlobalTransform {
+                matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                    .into(),
+            },
+            mesh,
+            material: grey,
+            cast_shadows: false,
+            receive_shadows: false,
+            bounds: None,
+        }];
+        scene.render_world.renderables_revision += 1;
+        let plain = [8, 24].map(|x| render_pixel(&mut scene, [x, 16]));
+        assert_ne!(plain[0], plain[1], "the quad shows: {plain:?}");
+        let post = |scene: &mut SlabScene, body: &str| {
+            scene.render_world.post_shader = format!(
+                "#rusting post 1\n\
+                 void post(PostInput i, inout vec3 color) {{\n{body}\n}}"
+            );
+        };
+        post(&mut scene, "color = vec3(i.uv.x, 0.0, 1.0 - i.uv.x);");
+        let left = render_pixel(&mut scene, [4, 16]);
+        let right = render_pixel(&mut scene, [28, 16]);
+        assert_eq!(scene.renderer.post_shader_error(), None);
+        assert!(
+            left[2] > left[0] && right[0] > right[2],
+            "{left:?} {right:?}"
+        );
+        // `scene_at` reads other pixels: here the one half the image left.
+        post(&mut scene, "color = scene_at(i.uv - vec2(0.5, 0.0));");
+        let shifted = render_pixel(&mut scene, [24, 16]);
+        assert!(
+            shifted
+                .iter()
+                .zip(plain[1])
+                .all(|(a, b)| a.abs_diff(b) > 30),
+            "{shifted:?} {plain:?}"
+        );
+        // `i.time` follows the fixed tick.
+        post(&mut scene, "color = vec3(i.time);");
+        scene.render_world.fixed_delta_seconds = 1.0 / 60.0;
+        scene.render_world.physics_tick = 6;
+        let early = render_pixel(&mut scene, [24, 16]);
+        scene.render_world.physics_tick = 54;
+        let late = render_pixel(&mut scene, [24, 16]);
+        assert!(late[0] > early[0] + 60, "{early:?} {late:?}");
+        scene.render_world.physics_tick = 0;
+        // Broken shaders leave the image as is and say why.
+        scene.render_world.post_shader = "#rusting post 2\n".into();
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain[0]);
+        let error = scene.renderer.post_shader_error().unwrap_or_default();
+        assert!(error.contains("version"), "{error}");
+        post(&mut scene, "color = oops;");
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain[0]);
+        let error = scene.renderer.post_shader_error().unwrap_or_default();
+        assert!(error.contains(":3:") && error.contains("oops"), "{error}");
+        scene.render_world.post_shader.clear();
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain[0]);
+        assert_eq!(scene.renderer.post_shader_error(), None);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn cloth_textures_land_upright_and_unmirrored() {
+        use crate::runtime::cloth::{cloth_mesh, Cloth};
+        use crate::runtime::ExtractedRenderable;
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A 1 m sheet facing the camera with a 2 x 2 image: red, green on
+        // the top row, blue, white below.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let image = scene.assets.textures.insert(TextureAsset {
+            size: [2, 2],
+            rgba8: [
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [255, 255, 255, 255],
+            ]
+            .concat(),
+            color_space: TextureColorSpace::Srgb,
+            sampler: TextureSampler::default(),
+        });
+        let material = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color_texture: Some(image),
+            ..Default::default()
+        });
+        let cloth = Cloth::grid(
+            [-0.5, -0.5, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [4, 4],
+            0.25,
+            0.3,
+        )
+        .unwrap();
+        let mesh = scene.assets.meshes.insert(cloth_mesh(&cloth));
+        scene.render_world.renderables = vec![ExtractedRenderable {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            transform: crate::runtime::GlobalTransform::default(),
+            mesh,
+            material,
+            cast_shadows: false,
+            receive_shadows: false,
+            bounds: None,
+        }];
+        scene.render_world.renderables_revision += 1;
+        // Pixels are 1/16 m; the quadrant centers sit 0.25 m off center.
+        let quadrants = [
+            ([12, 12], [true, false, false]),
+            ([20, 12], [false, true, false]),
+            ([12, 20], [false, false, true]),
+            ([20, 20], [true; 3]),
+        ];
+        for (pixel, want) in quadrants {
+            let got = render_pixel(&mut scene, pixel);
+            assert_eq!(got.map(|c| c > 150), want, "pixel {pixel:?}: {got:?}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn terrain_paints_splat_layers_and_drops_detail_with_distance() {
+        use crate::runtime::{
+            Heightfield, RenderExtractPlugin, Terrain, TerrainLayer,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A flat 2 x 2 m terrain of one chunk, turned to face the camera.
+        // Every sample paints the blue layer except column 1 (x = -0.5 m),
+        // which paints the orange one; coarse LOD levels skip that column.
+        let extract = |lod_distance: f32| {
+            let mut app = crate::App::new();
+            app.add_plugin(RenderExtractPlugin).unwrap();
+            app.insert_resource(AssetServer::default());
+            let layer = |color: [f32; 3]| TerrainLayer {
+                color,
+                ..TerrainLayer::default()
+            };
+            let splat = (0..5)
+                .map(|_| {
+                    (0..5)
+                        .map(|column| {
+                            if column == 1 {
+                                [0.0, 1.0, 0.0, 0.0]
+                            } else {
+                                [1.0, 0.0, 0.0, 0.0]
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            app.spawn((
+                crate::Transform {
+                    rotation: [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+                    ..crate::Transform::default()
+                },
+                Heightfield {
+                    heights: vec![vec![0.0; 5]; 5],
+                    spacing: 0.5,
+                    ..Heightfield::default()
+                },
+                Terrain {
+                    layers: vec![
+                        layer([0.0, 0.0, 1.0]),
+                        layer([1.0, 0.5, 0.0]),
+                    ],
+                    splat,
+                    chunk_cells: 4,
+                    lod_distance,
+                    cast_shadows: false,
+                    ..Terrain::default()
+                },
+            ));
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+            let world = app.world_mut();
+            let renderables =
+                world.resource::<RenderWorld>().renderables.clone();
+            (renderables, world.remove_resource::<AssetServer>().unwrap())
+        };
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        // Pixels are 1/16 m: column 1 is pixel 8, column 3 is pixel 24.
+        let orange = |[r, g, b]: [u8; 3]| r > 40 && r > g && r > b;
+        let blue = |[r, g, b]: [u8; 3]| b > 40 && b > r && b > g;
+        // The camera is 5 m away; no LOD distance keeps full detail.
+        (scene.render_world.renderables, scene.assets) = extract(0.0);
+        assert_eq!(scene.render_world.renderables.len(), 1);
+        let painted = render_pixel(&mut scene, [8, 16]);
+        assert!(orange(painted), "column 1 paints orange: {painted:?}");
+        let painted = render_pixel(&mut scene, [24, 16]);
+        assert!(blue(painted), "column 3 paints blue: {painted:?}");
+        // Past 2 m the chunk draws its quarter-detail mesh, which only
+        // samples columns 0 and 4.
+        (scene.render_world.renderables, scene.assets) = extract(1.0);
+        scene.render_world.renderables_revision += 1;
+        let painted = render_pixel(&mut scene, [8, 16]);
+        assert!(blue(painted), "coarse level skips column 1: {painted:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_sub_emitters_spawn_where_parent_particles_die() {
+        use crate::runtime::{
+            gpu_particle_batch, ColorKey, ParticleEmitter, ParticleSimulation,
+            ParticleSprite, ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let emitter =
+            |color: [f32; 4], speed: f32, lifetime: f32| ParticleEmitter {
+                simulation: ParticleSimulation::Gpu,
+                max_particles: 1,
+                direction: [1.0, 0.0, 0.0],
+                spread: 0.0,
+                speed: [speed, speed],
+                size: [0.5, 0.5],
+                lifetime: [lifetime, lifetime],
+                fade_in: 0.0,
+                fade_out: 0.0,
+                color_over_life: vec![ColorKey { t: 0.0, color }],
+                sprite: ParticleSprite::Square,
+                ..ParticleEmitter::default()
+            };
+        // A still green parent particle at x = -0.5 dies after 0.05 s; its
+        // sub-emitter then spawns red particles there that fly along +x at
+        // 10 m/s.
+        let parent = emitter([0.0, 1.0, 0.0, 1.0], 0.0, 0.05);
+        let child = emitter([1.0, 0.0, 0.0, 1.0], 10.0, 5.0);
+        let global = crate::runtime::GlobalTransform {
+            matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                .into(),
+        };
+        // The child emitter itself sits elsewhere: spawns follow the parent
+        // particle, not the child's transform.
+        let elsewhere = crate::runtime::GlobalTransform {
+            matrix: Matrix4::new_translation(&Vector3::new(5.0, 5.0, 0.0))
+                .into(),
+        };
+        let parent_entity = bevy_ecs::entity::Entity::from_raw_u32(1).unwrap();
+        let child_entity = bevy_ecs::entity::Entity::from_raw_u32(2).unwrap();
+        let mut child_batch = gpu_particle_batch(
+            child_entity,
+            &child,
+            &ParticleSystem::default(),
+            Some(&elsewhere),
+            None,
+        );
+        child_batch.parent = Some((parent_entity, 2));
+        child_batch.max_particles = 2;
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        scene.render_world.gpu_particles = vec![
+            gpu_particle_batch(
+                parent_entity,
+                &parent,
+                &ParticleSystem {
+                    spawned: 1,
+                    ..ParticleSystem::default()
+                },
+                Some(&global),
+                None,
+            ),
+            child_batch,
+        ];
+        let mut frame = |elapsed: f32| {
+            scene.render_world.elapsed_seconds = elapsed;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            let red = |x: usize| pixels[(16 * 32 + x) * 4 + 2];
+            let green = |x: usize| pixels[(16 * 32 + x) * 4 + 1];
+            (green(8), red(8), red(24))
+        };
+        assert_eq!(frame(0.0), (255, 0, 0), "parent alive");
+        assert_eq!(frame(0.1), (0, 255, 0), "parent died, children spawned");
+        // 0.1 s at 10 m/s: 1 m along +x.
+        assert_eq!(frame(0.2), (0, 0, 255), "children flew on");
+        assert_eq!(
+            frame(0.3),
+            (0, 0, 0),
+            "children flew off screen, none respawned"
+        );
     }
 
     #[test]

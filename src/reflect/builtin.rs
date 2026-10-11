@@ -13,19 +13,21 @@ use crate::runtime::{
     AmbientLight, AmbientOcclusion, Antialiasing, Articulation, AutoExposure,
     AutoSimulation, AxisLock, AxisMotion, Bloom, BurstEmitter, CameraScreen,
     CameraShake, ColorGrading, ColorLut, CombineMode, Connection, Connections,
-    Counter, CullingMode, DepthOfField, DeterminismMode, Dialogue,
+    Counter, CullingMode, Decal, DepthOfField, DeterminismMode, Dialogue,
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
-    FluidBlock, FluidSolver, Fog, ForceField, Fracture, GravityVolume,
-    GroundSurface, Health, Heightfield, HudAnchor, HudElement, InputAction,
-    Joint, JointAxis, JointKind, JointMotor, JointSpring, LightCookie,
-    LootEntry, LootTable, MeshSurfaces, MotionBlur, ObjectState,
-    PhysicsMaterial, PhysicsSettings, PhysicsSyncMode, Pickup,
-    PlatformerController, PlayerController, Polygon2d, PostVolume,
+    FluidBlock, FluidSolver, Fog, FogShader, FogVolume, Foliage, ForceField,
+    Fracture, GravityVolume, GroundSurface, Health, Heightfield, HudAnchor,
+    HudElement, InputAction, Joint, JointAxis, JointKind, JointMotor,
+    JointSpring, LightCookie, LightProbeGrid, Lightmap, LootEntry, LootTable,
+    MaterialOverride, MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial,
+    PhysicsSettings, PhysicsSyncMode, Pickup, PlatformerController,
+    PlayerController, Polygon2d, PostShader, PostVolume, ProceduralSky,
     QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
     ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
-    SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash, StateAction,
-    StateTransition, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
-    TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
+    SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
+    StateAction, StateTransition, Terrain, TerrainLayer, TileKind, TileMap,
+    ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle,
+    WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -35,7 +37,8 @@ use crate::runtime::{
 };
 use crate::runtime::{
     ColorKey, CurveKey, EmitterShape, ParticleBlend, ParticleBurst,
-    ParticleEmitter, ParticleFacing, ParticleSpace, ParticleSprite,
+    ParticleEmitter, ParticleFacing, ParticleShader, ParticleSimulation,
+    ParticleSpace, ParticleSprite,
 };
 
 crate::reflect! {
@@ -327,6 +330,17 @@ crate::reflect! {
 }
 
 crate::reflect! {
+    struct MaterialOverride {
+        base_color: Option<[f32; 4]> { unit: "linear RGBA", doc: "null keeps the material's" },
+        emissive: Option<[f32; 3]> { unit: "linear RGB", doc: "glow; null keeps the material's" },
+        metallic: Option<f32> { min: 0.0, max: 1.0, doc: "null keeps the material's" },
+        roughness: Option<f32> { min: 0.0, max: 1.0, doc: "null keeps the material's" },
+        uv_scale: Option<[f32; 2]> { doc: "texture repeats; null keeps the material's" },
+        uv_offset: Option<[f32; 2]> { doc: "texture shift; null keeps the material's" },
+    }
+}
+
+crate::reflect! {
     struct Flash {
         color: [f32; 3] { unit: "linear RGB" },
         duration: f32 { unit: "s", min: 0.0, doc: "fade back to no tint" },
@@ -402,6 +416,10 @@ crate::reflect! {
 }
 
 crate::reflect! {
+    enum ParticleSimulation { Cpu, Gpu }
+}
+
+crate::reflect! {
     struct ParticleBurst {
         time: f32 { unit: "s", min: 0.0, doc: "into each cycle" },
         count: u32 { unit: "particles" },
@@ -434,6 +452,12 @@ crate::reflect! {
         duration: f32 { unit: "s", min: 0.0, doc: "one cycle" },
         looping: bool { doc: "off stops emitting after one cycle" },
         on_collision: bool { doc: "restart on contact; CPU colliders only" },
+        impact_speed: f32 {
+            unit: "m/s", min: 0.0,
+            doc: "contacts closing this fast spawn impact_count particles there; 0 is off",
+        },
+        impact_count: u32 { doc: "particles per impact or settle" },
+        on_settle: bool { doc: "spawn impact_count particles when the body falls asleep" },
         shape: EmitterShape,
         shape_size: [f32; 3] {
             unit: "m", min: 0.0,
@@ -469,6 +493,12 @@ crate::reflect! {
         },
         blend: ParticleBlend,
         sprite: ParticleSprite,
+        simulation: ParticleSimulation {
+            doc: "Gpu: up to 1M particles, fewer settings",
+        },
+        collide: bool { doc: "Gpu: bounce off physics colliders" },
+        trail: f32 { unit: "s", min: 0.0, doc: "Gpu: seconds of path trailing each particle, 0 for none" },
+        on_parent_death: u32 { doc: "Gpu under a Gpu parent emitter: particles spawned where each parent particle dies; 0 for a normal emitter" },
         #[skip] command: crate::runtime::ParticleCommand,
     }
 }
@@ -732,6 +762,8 @@ crate::reflect! {
         pin_top: bool { doc: "hold the top edge on the holder, or in place without one" },
         holder: Entity { doc: "body the top edge hangs on; null pins it in place" },
         visible: bool { doc: "draw both sides of the sheet" },
+        color: [f32; 4] { unit: "linear RGBA", doc: "sheet color, multiplied into texture" },
+        texture: PathBuf { unit: "asset path", doc: "image stretched once over the sheet, top row at the top edge; empty for plain color" },
     }
 }
 
@@ -1059,10 +1091,43 @@ crate::reflect! {
     struct EnvironmentMap {
         texture: PathBuf {
             unit: "asset path",
-            doc: "equirectangular (2:1) image that surfaces reflect",
+            doc: "equirectangular (2:1) image that surfaces reflect; .hdr keeps bright light",
         },
         intensity: f32 { unit: "factor", min: 0.0 },
+        background: bool { doc: "also draw the image behind the scene" },
         #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+    }
+}
+
+crate::reflect! {
+    struct ParticleShader {
+        source: String {
+            doc: "GLSL starting with `#rusting particle 1`; see docs/surface-shaders.md",
+        },
+    }
+}
+
+crate::reflect! {
+    struct FogShader {
+        source: String {
+            doc: "GLSL starting with `#rusting fog 1`; see docs/surface-shaders.md",
+        },
+    }
+}
+
+crate::reflect! {
+    struct SkyShader {
+        source: String {
+            doc: "GLSL starting with `#rusting sky 1`; see docs/surface-shaders.md",
+        },
+    }
+}
+
+crate::reflect! {
+    struct PostShader {
+        source: String {
+            doc: "GLSL starting with `#rusting post 1`; see docs/surface-shaders.md",
+        },
     }
 }
 
@@ -1098,6 +1163,73 @@ crate::reflect! {
 }
 
 crate::reflect! {
+    struct LightProbeGrid {
+        extents: [f32; 3] {
+            unit: "m", min: 0.0,
+            doc: "half size of the box along each world axis",
+        },
+        resolution: [u32; 3] {
+            unit: "probes", min: 1.0, max: 8.0,
+            doc: "probes along each axis, at most 64 in all",
+        },
+        intensity: f32 { unit: "factor", min: 0.0 },
+    }
+}
+
+crate::reflect! {
+    struct Lightmap {
+        resolution: u32 {
+            unit: "texels", min: 2.0, max: 64.0,
+            doc: "texels along each side of each of the six faces",
+        },
+    }
+}
+
+crate::reflect! {
+    struct Terrain {
+        layers: Vec<TerrainLayer> { doc: "up to four paint layers; list them low to high for height bands" },
+        splat: Vec<Vec<[f32; 4]>> {
+            doc: "splat[row][column]: weight of each layer at that height sample; missing samples use height bands",
+        },
+        tiling: f32 { unit: "m", min: 0.001, doc: "distance the layer textures span before they repeat" },
+        chunk_cells: u32 { unit: "cells", min: 1.0, doc: "height cells along each side of a chunk" },
+        lod_distance: f32 {
+            unit: "m", min: 0.0,
+            doc: "chunks past it draw at half detail, past twice it at quarter detail; 0 keeps full detail",
+        },
+        cast_shadows: bool,
+    }
+}
+
+crate::reflect! {
+    struct TerrainLayer {
+        texture: PathBuf { unit: "asset path", doc: "image painted by this layer; empty paints the plain color" },
+        color: [f32; 3] { unit: "linear RGB", min: 0.0, color: true, doc: "tint multiplied into the texture" },
+        min_height: f32 { unit: "m", doc: "height band start used where there are no splat weights" },
+    }
+}
+
+crate::reflect! {
+    struct Foliage {
+        count: u32 {
+            unit: "copies", min: 0.0, max: 65536.0,
+            doc: "copies of the mesh scattered over the disc",
+        },
+        radius: f32 {
+            unit: "m", min: 0.0,
+            doc: "disc radius on the object's local XZ plane",
+        },
+        seed: u32 { doc: "picks the scatter; the same seed gives the same layout" },
+        scale_min: f32 { unit: "factor", min: 0.0, doc: "smallest copy scale" },
+        scale_max: f32 { unit: "factor", min: 0.0, doc: "largest copy scale" },
+        sway: f32 {
+            unit: "m per m/s²", min: 0.0,
+            doc: "lean per m/s² of force field push, per metre of height",
+        },
+    }
+}
+
+crate::reflect! {
     struct Fog {
         color: [f32; 3] {
             unit: "linear RGB", min: 0.0, max: 1.0, color: true,
@@ -1123,6 +1255,10 @@ crate::reflect! {
         sky_affect: f32 {
             unit: "factor", min: 0.0, max: 1.0,
             doc: "how much the background fades into the fog",
+        },
+        light_shafts: f32 {
+            unit: "factor", min: 0.0, max: 1.0,
+            doc: "how much shadows block the glow toward the sun: light shafts",
         },
     }
 }
@@ -1191,6 +1327,62 @@ crate::reflect! {
         distortion: f32 {
             unit: "factor", min: 0.0, max: 1.0,
             doc: "tube bulge and row wobble over time",
+        },
+    }
+}
+
+crate::reflect! {
+    struct ProceduralSky {
+        intensity: f32 {
+            unit: "factor", min: 0.0,
+            doc: "multiplies the sky's brightness, which follows the sun's",
+        },
+        haze: f32 {
+            unit: "factor", min: 0.0, max: 1.0,
+            doc: "0 clear air, 1 hazy with a wide glow around the sun",
+        },
+        ground_color: [f32; 3] {
+            unit: "linear rgb", min: 0.0, max: 1.0,
+            doc: "albedo of the ground seen below the horizon",
+        },
+        sun_size: f32 {
+            unit: "degrees", min: 0.0, max: 20.0,
+            doc: "diameter of the drawn sun disc; 0 hides it",
+        },
+    }
+}
+
+crate::reflect! {
+    struct Decal {
+        texture: PathBuf {
+            unit: "asset path",
+            doc: "image painted onto surfaces in the box; empty paints color",
+        },
+        color: [f32; 4] {
+            unit: "linear rgba", min: 0.0,
+            doc: "multiplies the image; alpha scales its coverage",
+        },
+        extents: [f32; 3] {
+            unit: "m", min: 0.0,
+            doc: "half size of the box; it projects along local -Z",
+        },
+        #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+    }
+}
+
+crate::reflect! {
+    struct FogVolume {
+        color: [f32; 3] {
+            unit: "linear rgb", min: 0.0,
+            doc: "color the box fades into",
+        },
+        density: f32 {
+            unit: "1/m", min: 0.0,
+            doc: "extinction per metre inside the box",
+        },
+        extents: [f32; 3] {
+            unit: "m", min: 0.0,
+            doc: "half size of the box in the object's local axes",
         },
     }
 }
@@ -1280,6 +1472,10 @@ crate::reflect! {
         intensity: f32 {
             unit: "exponent", min: 0.0, max: 8.0,
             doc: "above 1 darkens creases more",
+        },
+        indirect: f32 {
+            unit: "factor", min: 0.0, max: 4.0,
+            doc: "light bounced off nearby surfaces; 0 off, High profile only",
         },
     }
 }
@@ -1424,6 +1620,12 @@ crate::reflect! {
         uv_offset: [f32; 2],
         flat_shading: bool {
             doc: "Light each triangle with its own face normal for a faceted, low-poly look.",
+        },
+        splat: bool {
+            doc: "Terrain paint: blend the base-color atlas's four quadrants by the vertex color.",
+        },
+        shader: String {
+            doc: "Surface shader GLSL starting with `#rusting surface 1`; empty for the built-in surface.",
         },
         base_color_texture: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
         normal_texture: Option<crate::assets::Handle<crate::assets::TextureAsset>>,

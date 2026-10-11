@@ -231,9 +231,19 @@ each one's fields, defaults and an example:
 - `rusting.camera_screen`: On an object with a mesh: shows what the camera entity named camera sees, at size [w, h] pixels, in place of the material's base color and emissive maps.
 - `rusting.environment_map`: Equirectangular (2:1) sky image under assets/ that surfaces reflect and are lit by, replacing the sky_light hemisphere.
 - `rusting.color_lut`: Color lookup table under assets/, applied after tone mapping and rusting.color_grading: an image strip of N squares of N x N pixels side by side (256 x 16 or 1024 x 32).
+- `rusting.post_shader`: GLSL run on every pixel of the finished image, after tone mapping, rusting.color_grading and rusting.color_lut.
+- `rusting.sky_shader`: GLSL that colors the background wherever no surface was drawn.
+- `rusting.fog_shader`: GLSL that changes the fog over every surface and the background.
 - `rusting.light_cookie`: On an object with a spot_light: projects an image under assets/ through the light's outer cone, like a slide in a projector (window frames, leaves, a logo).
 - `rusting.reflection_probe`: Box of half size extents around the object's position.
+- `rusting.light_probe_grid`: Grid of resolution light probes spread through a world-aligned box of half size extents around the object.
+- `rusting.lightmap`: On an object with a mesh_renderer: bakes the light bouncing onto it into six square faces of resolution texels wrapped around its mesh's box.
+- `rusting.foliage`: On an object with a mesh_renderer: draws count copies of its mesh in place of the object, scattered over a disc of radius metres on its local XZ plane, each turned and scaled between scale_min and scale_max at random by seed.
+- `rusting.terrain`: On an object with a rusting.heightfield: draws the heights as terrain in square chunks of chunk_cells cells.
 - `rusting.fog`: Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre.
+- `rusting.procedural_sky`: Daylight sky computed from the sun (the shadow-casting directional light, else the first one): blue overhead, pale at the horizon, orange at sunset, dark at night, with a sun disc of sun_size degrees.
+- `rusting.fog_volume`: A box of uniform fog of half size extents around the object, turned and scaled with it: mist in a valley, smoke in a room.
+- `rusting.decal`: Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain.
 - `rusting.post_volume`: Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside.
 - `rusting.bloom`: Glow around pixels brighter than threshold (linear, before exposure), spread over the screen before tone mapping.
 - `rusting.auto_exposure`: Eye adaptation: every frame the renderer measures the average brightness of the lit image and moves exposure toward key / average, clamped to min_exposure..max_exposure, at speed per second (the first frame adapts at once).
@@ -249,12 +259,14 @@ each one's fields, defaults and an example:
 - `rusting.camera_shake`: Trauma shake on a camera.
 - `rusting.spawn_grid`: Bulk spawn.
 - `rusting.squash`: Squash and stretch spring.
+- `rusting.material_override`: Per-object material values on an object with a mesh_renderer: base_color (linear RGBA, multiplied into the base color texture), emissive (linear RGB glow), metallic, roughness, uv_scale and uv_offset each replace its material's value; null keeps the material's.
 - `rusting.flash`: Hit flash.
 - `rusting.sound_cue`: Sends a SoundEvent when the body starts touching something or game code calls trigger().
 - `rusting.slide_sound`: Loops clip on this body while it slides or rolls against another collider, louder the faster it moves across the contact (full volume at full_volume_speed m/s, silent under min_speed).
 - `rusting.reverb_zone`: Room reverb on a bus while the listener (the active camera, or set_listener) is inside this entity's collider; give it a sensor collider.
 - `rusting.burst_emitter`: Spawns particles that fly out, fall, and shrink, when the body starts touching something or game code calls trigger().
 - `rusting.particle_emitter`: Particle effects: rate and bursts per cycle, an emission shape (Point, Box, Sphere, Cone, Circle), random [min, max] ranges for lifetime, speed, size, rotation and spin, gravity, drag, wind and turbulence, size and color keys over life, fades, World or Local space, Billboard or Velocity facing, Alpha or Additive blend.
+- `rusting.particle_shader`: On an object with a rusting.particle_emitter: GLSL that changes how its particles look.
 - `rusting.animation`: Keyframe animation: named clips of tracks keyed over time.
 - `rusting.skin`: Skinned mesh: joint paths from this object (child names joined by /, .. for the parent) and one column-major inverse bind matrix per joint.
 - `rusting.ik`: Inverse kinematics on the end of a joint chain, solved each fixed step after the animation pose.
@@ -642,7 +654,9 @@ add the `mod` line and call it reports to `src/main.rs` (`rusting recipe list`).
   colors, so give many props one texture set instead of many textured ones.
 - Level of detail: a `.rlod` file beside a `.rmesh` (same name) lists
   coarser meshes and the distance or screen size where each takes over;
-  every object drawing that mesh uses it (`guide/look-and-feel`).
+  every object drawing that mesh uses it (`guide/look-and-feel`). glTF
+  import writes one with generated levels for static meshes of 512+
+  triangles.
 - Materials rougher than 0.5 skip screen-space reflections. If no surface
   needs a mirror-like look, call `scene.set_reflections(false)` at startup:
   it removes the scene copy, mip chain and depth pyramid passes.

@@ -181,6 +181,67 @@ feeds look like old tape and the room stays clean:
     "vignette": 0.4, "noise_band": 0.3, "distortion": 0.3, "saturation": 0.6}}
 ```
 
+### Light shafts and fog volumes
+
+With a sun that casts shadows, `light_shafts` on `rusting.fog` (0..1) keeps
+the glow toward the sun dark where shadow casters block it, so beams show
+between trees and through windows. Set `sun_scatter` above 0 for the glow.
+
+A `rusting.fog_volume` fills a box around its object with uniform fog that
+the camera sees from outside too: mist in a valley, smoke in one room. The
+box turns and scales with the object; up to eight are drawn:
+
+```json
+{"name": "Valley Mist", "transform": {"position": [0, 1, 0]},
+ "components": {"rusting.fog_volume": {"color": [0.7, 0.75, 0.8],
+   "density": 0.3, "extents": [20, 1, 20]}}}
+```
+
+### Procedural sky
+
+A `rusting.procedural_sky` on any object draws a daylight sky behind the
+scene: blue overhead, paler at the horizon, red and dim as the sun sets,
+with a sun disc `sun_size` degrees across. The sun is the directional light
+that casts shadows (else the first one), so turning that light turns the
+sky. The sky also lights and reflects in every surface, like an environment
+map; a `rusting.environment_map` still wins for lighting when both are set.
+`haze` (0..1) greys and brightens it, `ground_color` fills the lower half.
+
+```json
+{"name": "Sky", "components": {"rusting.procedural_sky":
+  {"intensity": 1.0, "haze": 0.2, "ground_color": [0.3, 0.28, 0.25],
+   "sun_size": 1.0}}}
+```
+
+For a photographed sky, put an equirectangular (2:1) Radiance `.hdr` image
+under `assets/` and use it as a `rusting.environment_map` with
+`"background": true`. Unlike PNG or JPEG, `.hdr` keeps the sun and bright
+clouds brighter than white, so reflections and lighting keep their punch:
+
+```json
+{"name": "Sky", "components": {"rusting.environment_map":
+  {"texture": "skies/field.hdr", "intensity": 1.0, "background": true}}}
+```
+
+### Decals
+
+A `rusting.decal` paints an image onto whatever lies inside a box around
+its object: a poster on a wall, a crack, a stain, road paint. The image is
+projected along the object's forward axis (-Z) with its top along +Y, so
+place the object against the surface and face it in. Surfaces that face
+away from the projection are left alone. `color` multiplies the image and
+its alpha scales the coverage; leave `texture` empty to paint plain color.
+Later decals paint over earlier ones; up to sixteen are drawn, using at
+most four distinct images:
+
+```json
+{"name": "Crack", "transform": {"position": [0, 1.5, -4.9]},
+ "components": {"rusting.decal": {"texture": "decals/crack.png",
+   "color": [1, 1, 1, 1], "extents": [0.5, 0.5, 0.2]}}}
+```
+
+Decals change the surface color only, not its normals or roughness.
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,
@@ -320,9 +381,16 @@ its `until`, in metres. The default metric, `"ScreenSize"`, uses the
 fraction of the view height the object covers instead, so a level draws while
 it covers at least `until` (0.5 is half the screen); it keeps the same look
 when the field of view changes. A level without `until` draws at any range;
-give the last level an `until` to stop drawing the object past it. Make the
-coarser meshes with `rusting scene add-model` from a lower-poly glTF, or with
-your own generator. The scene does not change: the group loads with the mesh,
+give the last level an `until` to stop drawing the object past it.
+
+Importing a glTF writes this file for you: each static mesh of 512 triangles
+or more gets up to three coarser levels with about a half, a quarter and an
+eighth of its triangles (`bear.mesh-0-0.lod1.rmesh` and so on), handing over
+at screen sizes 0.3, 0.12 and 0.05. Skinned and morphing meshes are left
+alone. The generator merges nearby vertices, so it can round off hard edges;
+for hero assets, replace the coarser meshes with your own (from a lower-poly
+glTF through `rusting scene add-model`, or your own tool) and edit the
+`.rlod` to point at them. The scene does not change: the group loads with the mesh,
 and an exported game carries it in `assets/`. Edit the `.rlod` and reload the
 scene to retune it.
 

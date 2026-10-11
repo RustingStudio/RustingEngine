@@ -133,6 +133,41 @@ scene.trigger("Coin"); // also restarts the coin's emitter
 them and starts a new cycle. `on_collision: true` restarts the emitter
 when the object's collider starts touching another one.
 
+## Impacts and settling
+
+Physics contacts can spawn particles where they happen, for sparks off a
+metal crate or dust where a rock lands:
+
+```json
+"rusting.particle_emitter": {
+  "autoplay": false, "rate": 0.0,
+  "impact_speed": 2.0, "impact_count": 12, "on_settle": true,
+  "speed": [1.0, 3.0], "spread": 0.8, "gravity": 9.81
+}
+```
+
+Put the emitter on the body that hits things. Each step, every contact of
+that body closing at `impact_speed` m/s or faster spawns `impact_count`
+particles at the contact point, launched around the contact normal away
+from what it hit (`spread` widens the cone; `direction` is ignored).
+Resting contacts close slower, so they spawn nothing. `on_settle: true`
+spawns `impact_count` particles at the body when it falls asleep, the end
+of a pile of debris settling. Impacts fire even while the emitter is
+stopped, so `autoplay: false` with `rate: 0` makes an impact-only effect.
+Only CPU bodies have contacts here. A GPU emitter spawns impact particles
+at the emitter, and Local space particles start at the emitter.
+
+## Budgets
+
+The quality profile caps the particles drawn per frame, CPU particles and
+GPU emitter slots together: 1048576 at High and Auto, 524288 at Balanced,
+131072 at Eco. Past the cap every emitter draws the same share of its
+particles, its oldest ones, so the kept set does not flicker. Decals are
+capped too: 16 at High and Auto, 8 at Balanced, 4 at Eco, later ones in
+entity order dropped. Simulation is not thinned, only drawing, so a run
+repeats on every profile. `RenderCapacityDiagnostics::dropped_particles`
+and `dropped_decals` count what the latest frame left out.
+
 ## Determinism
 
 Every random value comes from the scene seed, keyed by the emitter's scene

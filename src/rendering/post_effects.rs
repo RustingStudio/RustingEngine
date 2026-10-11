@@ -397,15 +397,21 @@ pub(super) struct OcclusionParams {
     /// Camera forward in xyz and `dot(eye, forward)` in w, so
     /// `dot(p, xyz) - w` is a point's distance in front of the camera.
     pub(super) forward: [f32; 4],
-    /// Radius in metres and intensity exponent.
+    /// Radius in metres, intensity exponent, and indirect light strength
+    /// (0 skips it).
     pub(super) settings: [f32; 4],
+    /// Last frame's view projection, which placed its scene color copy.
+    pub(super) previous_view_projection: [[f32; 4]; 4],
 }
 
 /// Raw and blurred occlusion targets, rebuilt with the depth target.
 pub(super) struct OcclusionTargets {
     /// Occlusion per target pixel, 1 where nothing occludes.
     pub(super) view: Arc<ImageView>,
+    /// Light bounced off nearby surfaces per target pixel, in rgb.
+    pub(super) indirect: Arc<ImageView>,
     raw: Arc<ImageView>,
+    raw_indirect: Arc<ImageView>,
     extent: [u32; 2],
 }
 
@@ -431,32 +437,56 @@ impl OcclusionTargets {
             extent,
             1,
         )?;
+        let [raw_indirect, indirect] =
+            ["Indirect light (raw)", "Indirect light"].map(|name| {
+                storage_image(
+                    allocator,
+                    name,
+                    Format::R16G16B16A16_SFLOAT,
+                    extent,
+                    1,
+                )
+                .and_then(|image| ImageView::new_default(image).map_err(error))
+            });
         Ok(Self {
             view: ImageView::new_default(blurred).map_err(error)?,
+            indirect: indirect?,
             raw: ImageView::new_default(raw).map_err(error)?,
+            raw_indirect: raw_indirect?,
             extent,
         })
     }
 
-    /// Traces occlusion from `depth` and blurs it into `view`. Returns the
-    /// dispatch count.
+    /// Traces occlusion from `depth`, and indirect light from `previous`
+    /// (last frame's scene color), and blurs them into `view` and
+    /// `indirect`. Returns the dispatch count.
     pub(super) fn record(
         &self,
         commands: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         descriptor_allocator: &Arc<StandardDescriptorSetAllocator>,
         pipelines: &PostPipelines,
         depth: &Arc<ImageView>,
+        previous: (Arc<ImageView>, Arc<Sampler>),
         params: Subbuffer<OcclusionParams>,
     ) -> Result<u32, SceneRenderError> {
         let passes = [
-            (&pipelines.occlusion_trace, depth.clone(), self.raw.clone()),
+            (
+                &pipelines.occlusion_trace,
+                depth.clone(),
+                self.raw.clone(),
+                previous,
+                self.raw_indirect.clone(),
+            ),
             (
                 &pipelines.occlusion_blur,
                 self.raw.clone(),
                 self.view.clone(),
+                (self.raw_indirect.clone(), pipelines.nearest.clone()),
+                self.indirect.clone(),
             ),
         ];
-        for (pipeline, source, target) in passes {
+        for (pipeline, source, target, (color, sampler), color_target) in passes
+        {
             let set = DescriptorSet::new(
                 descriptor_allocator.clone(),
                 pipeline.layout().set_layouts()[0].clone(),
@@ -468,6 +498,8 @@ impl OcclusionTargets {
                     ),
                     WriteDescriptorSet::image_view(1, target),
                     WriteDescriptorSet::buffer(2, params.clone()),
+                    WriteDescriptorSet::image_view_sampler(3, color, sampler),
+                    WriteDescriptorSet::image_view(4, color_target),
                 ],
                 [],
             )
@@ -658,12 +690,16 @@ mod occlusion_trace_shader {
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform sampler2D depth;
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D target;
+// Last frame's opaque scene color, and the light bounced off occluders.
+layout(set = 0, binding = 3) uniform sampler2D previous_color;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D indirect_target;
 layout(set = 0, binding = 2) readonly buffer Params {
     mat4 view_projection;
     mat4 inverse_view_projection;
     vec4 viewport;
     vec4 forward;
     vec4 settings;
+    mat4 previous_view_projection;
 } params;
 const int SAMPLES = 16;
 const float BAYER[16] = float[](
@@ -705,6 +741,7 @@ void main() {
     // their distance is near the half-float limit.
     if (d >= 1.0) {
         imageStore(target, pixel, vec4(1.0, 65000.0, 0.0, 0.0));
+        imageStore(indirect_target, pixel, vec4(0.0));
         return;
     }
     vec3 p = world_at(vec2(pixel) + 0.5, d);
@@ -726,6 +763,7 @@ void main() {
     float rotation = BAYER[(pixel.y & 3) * 4 + (pixel.x & 3)] / 16.0 * 6.2831853;
     float here = view_distance(p);
     float occlusion = 0.0;
+    vec3 bounced = vec3(0.0);
     for (int i = 0; i < SAMPLES; ++i) {
         // Cosine-weighted spiral over the hemisphere; lengths grow with a
         // shuffled index so near samples dominate.
@@ -751,13 +789,29 @@ void main() {
         if (scene >= 1.0) {
             continue;
         }
-        float occluder = view_distance(world_at(floor(screen) + 0.5, scene));
+        vec3 hit = world_at(floor(screen) + 0.5, scene);
+        float occluder = view_distance(hit);
         if (occluder < view_distance(sample_point) - 0.025 * radius) {
             // Surfaces far in front of this one do not occlude it.
-            occlusion += smoothstep(0.0, 1.0, radius / max(abs(here - occluder), 1e-4));
+            float weight = smoothstep(0.0, 1.0, radius / max(abs(here - occluder), 1e-4));
+            occlusion += weight;
+            // The occluder's color where last frame saw it. The samples
+            // are cosine weighted, so their mean is the irradiance over pi.
+            vec4 seen = params.previous_view_projection * vec4(hit, 1.0);
+            vec2 uv = (params.viewport.xy
+                + (seen.xy / max(seen.w, 1e-6) * 0.5 + 0.5) * params.viewport.zw)
+                / vec2(textureSize(previous_color, 0));
+            if (params.settings.z > 0.0 && seen.w > 0.0
+                && all(greaterThanEqual(uv, vec2(0.0)))
+                && all(lessThanEqual(uv, vec2(1.0)))) {
+                vec3 color = textureLod(previous_color, uv, 0.0).rgb;
+                bounced += weight * (any(isnan(color)) ? vec3(0.0) : min(color, vec3(64.0)));
+            }
         }
     }
     imageStore(target, pixel, vec4(1.0 - occlusion / float(SAMPLES), here, 0.0, 0.0));
+    imageStore(indirect_target, pixel,
+        vec4(bounced * params.settings.z / float(SAMPLES), 0.0));
 }
 "
     }
@@ -774,12 +828,15 @@ mod occlusion_blur_shader {
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform sampler2D raw;
 layout(set = 0, binding = 1, r32f) uniform writeonly image2D target;
+layout(set = 0, binding = 3) uniform sampler2D raw_indirect;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D indirect_target;
 layout(set = 0, binding = 2) readonly buffer Params {
     mat4 view_projection;
     mat4 inverse_view_projection;
     vec4 viewport;
     vec4 forward;
     vec4 settings;
+    mat4 previous_view_projection;
 } params;
 
 void main() {
@@ -791,18 +848,23 @@ void main() {
     vec2 center = texelFetch(raw, pixel, 0).rg;
     float tolerance = 0.1 * center.y + 0.01;
     float sum = 0.0;
+    vec3 bounced = vec3(0.0);
     float count = 0.0;
     for (int y = -2; y < 2; ++y) {
         for (int x = -2; x < 2; ++x) {
-            vec2 tap = texelFetch(raw, clamp(pixel + ivec2(x, y), ivec2(0), size - 1), 0).rg;
+            ivec2 at = clamp(pixel + ivec2(x, y), ivec2(0), size - 1);
+            vec2 tap = texelFetch(raw, at, 0).rg;
             if (abs(tap.y - center.y) <= tolerance) {
                 sum += tap.x;
+                bounced += texelFetch(raw_indirect, at, 0).rgb;
                 count += 1.0;
             }
         }
     }
     float occlusion = count > 0.0 ? sum / count : center.x;
     imageStore(target, pixel, vec4(pow(clamp(occlusion, 0.0, 1.0), params.settings.y)));
+    imageStore(indirect_target, pixel, vec4(
+        count > 0.0 ? bounced / count : texelFetch(raw_indirect, pixel, 0).rgb, 0.0));
 }
 "
     }

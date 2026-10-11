@@ -115,6 +115,11 @@ const PAGES: &[(&str, &str, &str)] = &[
         "guide",
         include_str!("../docs/plugin-authoring.md"),
     ),
+    (
+        "guide/surface-shaders",
+        "guide",
+        include_str!("../docs/surface-shaders.md"),
+    ),
 ];
 
 /// Sample games shipped with the engine: name, README and game code.

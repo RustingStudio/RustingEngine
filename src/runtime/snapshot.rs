@@ -427,6 +427,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<BurstParticle>();
     types.register::<super::ParticleEmitter>();
     types.register::<super::ParticleSystem>();
+    types.register::<super::ParticleShader>();
     types.register::<super::Animation>();
     types.register::<super::Skin>();
     types.register::<super::Morph>();
@@ -490,10 +491,20 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::EnvironmentMap>();
     types.register::<super::LightCookie>();
     types.register::<super::ReflectionProbe>();
+    types.register::<super::LightProbeGrid>();
+    types.register::<super::Lightmap>();
+    types.register::<super::Foliage>();
+    types.register::<super::Terrain>();
     types.register::<super::Fog>();
     types.register::<super::ColorGrading>();
     types.register::<super::ColorLut>();
+    types.register::<super::PostShader>();
+    types.register::<super::SkyShader>();
+    types.register::<super::FogShader>();
     types.register::<super::PostVolume>();
+    types.register::<super::FogVolume>();
+    types.register::<super::Decal>();
+    types.register::<super::ProceduralSky>();
     types.register::<super::CameraScreen>();
     types.register::<super::Bloom>();
     types.register::<super::AutoExposure>();
@@ -510,6 +521,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::CameraShake>();
     types.register::<super::Squash>();
     types.register::<super::Flash>();
+    types.register::<super::MaterialOverride>();
     types.register::<super::SpawnGrid>();
     types.register::<SpotLight>();
     types.register::<TileMap>();

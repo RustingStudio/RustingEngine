@@ -832,12 +832,13 @@ fn environment_maps_resolve_their_texture_and_reach_the_render_world() {
     app.spawn(EnvironmentMap {
         texture: "sky.png".into(),
         intensity: 2.0,
+        background: true,
         ..EnvironmentMap::default()
     });
     app.update(Duration::ZERO).unwrap();
     assert_eq!(
         app.world().resource::<RenderWorld>().environment,
-        Some((texture, 2.0))
+        Some((texture, 2.0, true))
     );
 }
 
@@ -2888,6 +2889,77 @@ fn a_sliding_crate_loops_its_scrape_until_friction_stops_it() {
     );
     assert!(volumes.len() > 2, "{volumes:?}");
     assert!(app.world().resource::<AudioQueue>().playing().is_empty());
+}
+
+#[test]
+fn impacts_and_settling_spawn_particles_where_the_body_hits() {
+    let run = || {
+        let mut app = App::new();
+        cpu_ground(app.world_mut());
+        let crate_body = cpu_body(
+            app.world_mut(),
+            [0.0, 1.5, 0.0],
+            UNIT_BOX,
+            RigidBodyKind::Dynamic,
+        );
+        app.world_mut().entity_mut(crate_body).insert((
+            SceneId(uuid::Uuid::from_u128(9)),
+            ParticleEmitter {
+                autoplay: false,
+                rate: 0.0,
+                impact_speed: 1.0,
+                impact_count: 6,
+                on_settle: true,
+                spread: 0.0,
+                speed: [2.0, 2.0],
+                lifetime: [100.0, 100.0],
+                ..ParticleEmitter::default()
+            },
+        ));
+        // Particle counts each step, the first impact's particles, and
+        // the step the body fell asleep.
+        let mut counts = Vec::new();
+        let mut first = None;
+        let mut slept = None;
+        for step in 0..240 {
+            run_fixed_steps(&mut app, 1);
+            let system = app.world().get::<ParticleSystem>(crate_body);
+            let alive = system.map_or(0, ParticleSystem::alive);
+            if first.is_none() && alive > 0 {
+                first = Some(system.unwrap().particles.clone());
+            }
+            if slept.is_none()
+                && app.world().get::<Sleeping>(crate_body).is_some()
+            {
+                slept = Some(step);
+            }
+            counts.push(alive);
+        }
+        (counts, first.unwrap(), slept.unwrap())
+    };
+    let (counts, first, slept) = run();
+    // Falling, nothing; the landing spawns 6 per contact point closing at
+    // 1 m/s or more, at the floor, flying straight up off it.
+    assert_eq!(counts[0], 0);
+    assert!(!first.is_empty() && first.len() % 6 == 0, "{}", first.len());
+    for particle in &first {
+        assert!(particle.position[1].abs() < 0.1, "{particle:?}");
+        assert!(particle.position[0].abs() <= 0.55, "{particle:?}");
+        let [x, y, z] = particle.velocity;
+        assert!(y > 1.9 && x.abs() < 0.05 && z.abs() < 0.05, "{particle:?}");
+    }
+    // Resting contacts close slower than 1 m/s and spawn nothing more, so
+    // the count holds until the body sleeps and adds its settle puff.
+    let before = counts[slept - 1];
+    assert_eq!(counts[slept], before + 6, "{counts:?}");
+    assert!(counts[slept..].iter().all(|&alive| alive == before + 6));
+    let landed = counts.iter().position(|&alive| alive > 0).unwrap();
+    assert!(
+        counts[landed..slept].iter().all(|&alive| alive == before),
+        "{counts:?}"
+    );
+    // The same seed and ticks give the same particles.
+    assert_eq!(run().1, first);
 }
 
 #[test]
@@ -6466,10 +6538,12 @@ fn cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes() {
         count_y: 6,
         holder: pole,
         wind: [0.0, 0.0, 2.0],
+        color: [0.25, 0.5, 0.75, 1.0],
+        texture: "flags/missing.png".into(),
         ..ClothSheet::default()
     };
     // The flag's top edge sits on the pole's bottom face.
-    app.spawn((Transform::new([0.0, 1.7, 3.0]), flag));
+    app.spawn((Transform::new([0.0, 1.7, 3.0]), flag.clone()));
     app.spawn(fixed_box([0.0, -0.5, 0.0], [2.0, 0.5, 2.0]));
     let tarp = ClothSheet {
         count_x: 6,
@@ -6489,13 +6563,16 @@ fn cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes() {
         .query::<(bevy_ecs::entity::Entity, &ClothSheet)>();
     let sheets: Vec<_> = sheets
         .iter(loaded.world())
-        .map(|(entity, sheet)| (entity, *sheet))
+        .map(|(entity, sheet)| (entity, sheet.clone()))
         .collect();
     assert_eq!(sheets.len(), 2);
-    let (flag_entity, loaded_flag) =
-        *sheets.iter().find(|(_, sheet)| sheet.pin_top).unwrap();
-    let (tarp_entity, _) =
-        *sheets.iter().find(|(_, sheet)| !sheet.pin_top).unwrap();
+    let (flag_entity, loaded_flag) = sheets
+        .iter()
+        .find(|(_, sheet)| sheet.pin_top)
+        .cloned()
+        .unwrap();
+    let tarp_entity =
+        sheets.iter().find(|(_, sheet)| !sheet.pin_top).unwrap().0;
     let pole_position = loaded
         .world()
         .get::<Transform>(loaded_flag.holder)
@@ -6531,7 +6608,7 @@ fn cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes() {
         .query::<(&crate::runtime::FluidParticle, &MeshRenderer)>();
     let drawn: Vec<_> = drawn
         .iter(loaded.world())
-        .map(|(owner, renderer)| (owner.0, renderer.mesh))
+        .map(|(owner, renderer)| (owner.0, renderer.mesh, renderer.material))
         .collect();
     assert_eq!(drawn.len(), 1);
     assert_eq!(drawn[0].0, flag_entity);
@@ -6539,6 +6616,10 @@ fn cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes() {
     let mesh = assets.meshes.get(drawn[0].1).unwrap();
     assert_eq!(mesh.vertices.len(), 2 * 49);
     assert_eq!(mesh.indices.len(), 2 * 3 * 72);
+    // Its own color; the missing image leaves it untextured.
+    let material = assets.materials.get(drawn[0].2).unwrap();
+    assert_eq!(material.base_color, [0.25, 0.5, 0.75, 1.0]);
+    assert!(material.base_color_texture.is_none());
 }
 
 #[test]

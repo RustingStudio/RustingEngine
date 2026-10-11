@@ -821,15 +821,33 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.environment_map",
-        summary: "Equirectangular (2:1) sky image under assets/ that surfaces reflect and are lit by, replacing the sky_light hemisphere. Rough surfaces see it blurred. The first one found is used.",
-        gpu: NO_GPU,
-        example: || json!({"texture": "sky.png", "intensity": 1.0}),
+        summary: "Equirectangular (2:1) sky image under assets/ that surfaces reflect and are lit by, replacing the sky_light hemisphere. Rough surfaces see it blurred. A Radiance .hdr image keeps light brighter than white, like the sun; PNG and JPEG top out at intensity. background true also draws it behind the scene. The first one found is used.",
+        gpu: "with background, one full-screen sky pass",
+        example: || json!({"texture": "sky.hdr", "intensity": 1.0, "background": true}),
     },
     ComponentSection {
         key: "rusting.color_lut",
         summary: "Color lookup table under assets/, applied after tone mapping and rusting.color_grading: an image strip of N squares of N x N pixels side by side (256 x 16 or 1024 x 32). Red runs across each square, green down it, blue from square to square; an identity strip changes nothing, so paste one into a screenshot, grade it in any image editor and save the strip. intensity 0..1 blends it in. The first one found is used.",
         gpu: "one texture sample per pixel in tone mapping",
         example: || json!({"texture": "grades/teal_orange.png", "intensity": 1.0}),
+    },
+    ComponentSection {
+        key: "rusting.post_shader",
+        summary: "GLSL run on every pixel of the finished image, after tone mapping, rusting.color_grading and rusting.color_lut. source starts with `#rusting post 1` and defines `void post(PostInput i, inout vec3 color)`; i has uv, pixel, texel and time, and scene_at(uv) reads the HDR image. A shader that fails to compile leaves the image as is. See guide/surface-shaders. The first one found is used.",
+        gpu: "one extra full-screen copy of the HDR image, plus the shader's own cost per pixel",
+        example: || json!({"source": "#rusting post 1\nvoid post(PostInput i, inout vec3 color) { color = 1.0 - color; }"}),
+    },
+    ComponentSection {
+        key: "rusting.sky_shader",
+        summary: "GLSL that colors the background wherever no surface was drawn. source starts with `#rusting sky 1` and defines `void sky(SkyInput i, inout vec3 color)`; i has direction (unit, world space) and time, and color arrives as the rusting.procedural_sky or background rusting.environment_map, black without one. Fog still covers it; reflections and lighting do not see it. A shader that fails to compile leaves the built-in background. See guide/surface-shaders. The first one found is used.",
+        gpu: "one full-screen pass over the background, plus the shader's own cost per pixel",
+        example: || json!({"source": "#rusting sky 1\nvoid sky(SkyInput i, inout vec3 color) { color = mix(vec3(0.1, 0.0, 0.2), vec3(1.0, 0.4, 0.2), max(i.direction.y, 0.0)); }"}),
+    },
+    ComponentSection {
+        key: "rusting.fog_shader",
+        summary: "GLSL that changes the fog over every surface and the background. source starts with `#rusting fog 1` and defines `void fog(FogInput i, inout vec4 haze)`; i has start (where the view ray leaves the camera), direction (unit, world space), distance (metres to the surface, 10000 for the background), background and time, and haze arrives as the rusting.fog and rusting.fog_volume result, in-scattered light in rgb and the share of what lies behind that still shows in a (0, 0, 0, 1 without fog). Every material then draws with a pipeline built for the shader. A shader that fails to compile leaves the built-in fog. See guide/surface-shaders. The first one found is used.",
+        gpu: "the shader's own cost per drawn pixel, and the fog math runs even without rusting.fog",
+        example: || json!({"source": "#rusting fog 1\nvoid fog(FogInput i, inout vec4 haze) { float t = exp(-0.05 * min(i.distance, 200.0)); haze = vec4(vec3(0.6, 0.7, 0.9) * (1.0 - t), t); }"}),
     },
     ComponentSection {
         key: "rusting.light_cookie",
@@ -844,10 +862,52 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"extents": [5.0, 3.0, 5.0], "intensity": 1.0}),
     },
     ComponentSection {
+        key: "rusting.light_probe_grid",
+        summary: "Grid of resolution light probes spread through a world-aligned box of half size extents around the object. Each probe records the light arriving from six directions; surfaces inside the box take their ambient light from the nearest probes in place of the sky or environment, so an enclosed room stays dark and a bright wall tints its neighbours. Baked when added or changed, and on the High quality profile two probes per frame are recaptured so moving objects and lights relight it (real-time one-bounce GI); at most 64 probes, the first grid in entity order.",
+        gpu: "each probe renders the scene six times at 16x16 when baked; eight probe lookups per lit pixel inside the box",
+        example: || json!({"extents": [5.0, 3.0, 5.0], "resolution": [3, 2, 3], "intensity": 1.0}),
+    },
+    ComponentSection {
+        key: "rusting.lightmap",
+        summary: "On an object with a mesh_renderer: bakes the light bouncing onto it into six square faces of resolution texels wrapped around its mesh's box. Each texel sees the sky and the direct light reflected off other lightmapped objects, so a floor beside a sunlit red wall turns red and a box darkens the floor under it. Replaces the sky, environment and light probe light on the object; direct light stays real-time. Suits walls, floors and other boxy or convex static meshes. Baked when lightmapped objects, their meshes or materials, or lights change.",
+        gpu: "a compute bake of 64 rays per texel against every lightmapped triangle; twelve buffer reads per lit pixel",
+        example: || json!({"resolution": 16}),
+    },
+    ComponentSection {
+        key: "rusting.foliage",
+        summary: "On an object with a mesh_renderer: draws count copies of its mesh in place of the object, scattered over a disc of radius metres on its local XZ plane, each turned and scaled between scale_min and scale_max at random by seed. The copies share the material, so they draw as one instanced batch and cull one by one. Force fields (wind gusts most of all) lean every copy away from its base by sway metres per metre of height for each m/s² of push, so grass inside a rusting.force_field of kind Wind ripples with its gusts. At most 65536 copies.",
+        gpu: "one instance per copy in the object's batch; the lean is CPU work per copy and frame while fields touch it",
+        example: || json!({"count": 100, "radius": 5.0, "seed": 0, "scale_min": 0.8, "scale_max": 1.2, "sway": 0.03}),
+    },
+    ComponentSection {
+        key: "rusting.terrain",
+        summary: "On an object with a rusting.heightfield: draws the heights as terrain in square chunks of chunk_cells cells. Each chunk switches to a half-detail mesh past lod_distance metres from the camera and a quarter-detail one past twice it (0 keeps full detail); skirts below chunk borders hide cracks between levels. Up to four layers paint the ground, each an image (texture, empty for plain color) tinted by color and repeating every tiling metres. splat[row][column] gives each height sample's layer weights; without them each layer covers heights from its min_height up, fading in over one metre, so list layers low to high (sand, grass, rock, snow). Add a Heightfield collider for the ground to be solid. Rebuilt when the terrain or heightfield changes.",
+        gpu: "one instanced draw per chunk at its LOD level; four atlas samples per pixel",
+        example: || json!({"layers": [{"texture": "", "color": [0.76, 0.7, 0.5], "min_height": 0.0}, {"texture": "", "color": [0.2, 0.5, 0.15], "min_height": 1.0}], "splat": [], "tiling": 4.0, "chunk_cells": 32, "lod_distance": 50.0, "cast_shadows": true}),
+    },
+    ComponentSection {
         key: "rusting.fog",
-        summary: "Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre. Brighter toward the sun by sun_scatter; sky_affect fades the background too. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
-        gpu: "a few instructions per pixel, plus one full-screen sky pass when sky_affect > 0",
-        example: || json!({"color": [0.55, 0.65, 0.75], "density": 0.02, "height": 0.0, "height_falloff": 0.1, "sun_scatter": 0.3, "sky_affect": 1.0}),
+        summary: "Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre. Brighter toward the sun by sun_scatter; sky_affect fades the background too. light_shafts lets the sun's shadow map darken that glow, showing shafts behind shadow casters. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
+        gpu: "a few instructions per pixel, plus one full-screen sky pass when sky_affect > 0; light_shafts > 0 adds 16 shadow-map taps per fogged pixel",
+        example: || json!({"color": [0.55, 0.65, 0.75], "density": 0.02, "height": 0.0, "height_falloff": 0.1, "sun_scatter": 0.3, "sky_affect": 1.0, "light_shafts": 0.0}),
+    },
+    ComponentSection {
+        key: "rusting.procedural_sky",
+        summary: "Daylight sky computed from the sun (the shadow-casting directional light, else the first one): blue overhead, pale at the horizon, orange at sunset, dark at night, with a sun disc of sun_size degrees. It is drawn behind everything and lights surfaces from every side and in reflections; a rusting.environment_map wins for lighting. haze 0..1 washes it out. The first one found is used.",
+        gpu: "one full-screen sky pass, plus a 128x64 compute bake when the sun or settings change",
+        example: || json!({"intensity": 1.0, "haze": 0.2, "ground_color": [0.3, 0.28, 0.25], "sun_size": 1.0}),
+    },
+    ComponentSection {
+        key: "rusting.fog_volume",
+        summary: "A box of uniform fog of half size extents around the object, turned and scaled with it: mist in a valley, smoke in a room. It fades what lies behind it into color by density per metre and stacks in front of rusting.fog. The renderer uses the first eight in entity order.",
+        gpu: "a box test per volume per fogged pixel, plus the full-screen sky pass",
+        example: || json!({"color": [0.6, 0.6, 0.65], "density": 0.5, "extents": [2.0, 2.0, 2.0]}),
+    },
+    ComponentSection {
+        key: "rusting.decal",
+        summary: "Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain. color (linear rgba) multiplies the image and its alpha scales the coverage; an empty texture paints plain color. Surfaces facing away from the projection are left alone. Later decals in entity order paint over earlier ones; the renderer uses the first sixteen (eight at Balanced, four at Eco), with at most four distinct images.",
+        gpu: "a box test per decal per lit pixel, plus one texture sample inside a box",
+        example: || json!({"texture": "decals/crack.png", "color": [1.0, 1.0, 1.0, 1.0], "extents": [0.5, 0.5, 0.25]}),
     },
     ComponentSection {
         key: "rusting.post_volume",
@@ -881,9 +941,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.ambient_occlusion",
-        summary: "Screen-space ambient occlusion: darkens ambient, sky and environment light in creases within radius metres. Off on the Eco quality profile. The first one found is used.",
-        gpu: "a depth prepass plus two full-screen compute passes",
-        example: || json!({"radius": 1.0, "intensity": 1.0}),
+        summary: "Screen-space ambient occlusion: darkens ambient, sky and environment light in creases within radius metres. Off on the Eco quality profile. indirect above 0 also adds light bounced off surfaces within radius (a red wall tints the floor beside it), gathered from the previous frame; High quality profile only. The first one found is used.",
+        gpu: "a depth prepass plus two full-screen compute passes; indirect adds a copy of the opaque scene each frame",
+        example: || json!({"radius": 1.0, "intensity": 1.0, "indirect": 0.0}),
     },
     ComponentSection {
         key: "rusting.background",
@@ -940,6 +1000,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"stiffness": 400.0, "damping": 14.0}),
     },
     ComponentSection {
+        key: "rusting.material_override",
+        summary: "Per-object material values on an object with a mesh_renderer: base_color (linear RGBA, multiplied into the base color texture), emissive (linear RGB glow), metallic, roughness, uv_scale and uv_offset each replace its material's value; null keeps the material's. Objects sharing a material still draw in one instanced batch, so a hundred crates in a hundred colors cost one material. Applies to the object only, not its children.",
+        gpu: "none: the values ride in the per-instance data the renderer already uploads",
+        example: || json!({"base_color": [1.0, 0.25, 0.25, 1.0], "emissive": null, "metallic": null, "roughness": 0.25, "uv_scale": null, "uv_offset": null}),
+    },
+    ComponentSection {
         key: "rusting.flash",
         summary: "Hit flash. Game code calls flash(name) on a hit or pickup; the object and its children draw tinted toward color (linear RGB, also used as glow), fading back over duration seconds. Only the drawn colors change, not the shared material, so other objects using it stay as they are.",
         gpu: NO_GPU,
@@ -971,9 +1037,15 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.particle_emitter",
-        summary: "Particle effects: rate and bursts per cycle, an emission shape (Point, Box, Sphere, Cone, Circle), random [min, max] ranges for lifetime, speed, size, rotation and spin, gravity, drag, wind and turbulence, size and color keys over life, fades, World or Local space, Billboard or Velocity facing, Alpha or Additive blend. Particles are not entities; each emitter is one instanced draw. Random values come from the scene seed, the emitter's SceneId and the fixed tick. Game code calls play(), pause(), stop() or restart(). `rusting effect list` shows ready presets.",
-        gpu: "one instanced draw of up to max_particles quads per emitter, rebuilt every frame",
-        example: || json!({"autoplay": true, "rate": 20.0, "bursts": [], "max_particles": 500, "prewarm": false, "duration": 5.0, "looping": true, "on_collision": false, "shape": "Sphere", "shape_size": [0.5, 0.5, 0.5], "lifetime": [1.0, 2.0], "speed": [0.5, 1.5], "size": [0.05, 0.1], "rotation": [0.0, 0.0], "spin": [0.0, 0.0], "direction": [0.0, 1.0, 0.0], "spread": 0.5, "gravity": 0.0, "drag": 0.5, "wind": [0.0, 0.0, 0.0], "turbulence": 0.5, "turbulence_frequency": 1.0, "size_over_life": [{"t": 0.0, "value": 1.0}, {"t": 1.0, "value": 0.2}], "color_over_life": [{"t": 0.0, "color": [1.0, 0.8, 0.3, 1.0]}, {"t": 1.0, "color": [1.0, 0.2, 0.1, 1.0]}], "start_colors": [], "emissive": 3.0, "fade_in": 0.1, "fade_out": 0.4, "space": "World", "facing": "Billboard", "stretch": 0.1, "blend": "Additive", "sprite": "Soft"}),
+        summary: "Particle effects: rate and bursts per cycle, an emission shape (Point, Box, Sphere, Cone, Circle), random [min, max] ranges for lifetime, speed, size, rotation and spin, gravity, drag, wind and turbulence, size and color keys over life, fades, World or Local space, Billboard or Velocity facing, Alpha or Additive blend. Particles are not entities; each emitter is one instanced draw. Random values come from the scene seed, the emitter's SceneId and the fixed tick. simulation Gpu moves up to 1048576 particles in a compute shader each frame (no turbulence, start colors, rotation, spin, Local space, Velocity facing or collision restarts, and alpha particles are not sorted); GPU force fields push its particles, collide bounces them off physics colliders, trail draws each particle's last seconds of path, and on_parent_death makes a GPU child emitter spawn that many particles where each parent GPU particle dies (fireworks). impact_speed > 0 spawns impact_count particles at each contact of the emitter's CPU body closing at least that fast, launched along the contact normal away from what it hit (sparks, dust); on_settle spawns impact_count at the body when it falls asleep (debris settling). Game code calls play(), pause(), stop() or restart(). `rusting effect list` shows ready presets.",
+        gpu: "one instanced draw of up to max_particles quads per emitter, rebuilt every frame; past the quality profile's particle budget (1048576 at High, 524288 at Balanced, 131072 at Eco, all emitters together) each emitter draws the same share",
+        example: || json!({"autoplay": true, "rate": 20.0, "bursts": [], "max_particles": 500, "prewarm": false, "duration": 5.0, "looping": true, "on_collision": false, "impact_speed": 0.0, "impact_count": 10, "on_settle": false, "shape": "Sphere", "shape_size": [0.5, 0.5, 0.5], "lifetime": [1.0, 2.0], "speed": [0.5, 1.5], "size": [0.05, 0.1], "rotation": [0.0, 0.0], "spin": [0.0, 0.0], "direction": [0.0, 1.0, 0.0], "spread": 0.5, "gravity": 0.0, "drag": 0.5, "wind": [0.0, 0.0, 0.0], "turbulence": 0.5, "turbulence_frequency": 1.0, "size_over_life": [{"t": 0.0, "value": 1.0}, {"t": 1.0, "value": 0.2}], "color_over_life": [{"t": 0.0, "color": [1.0, 0.8, 0.3, 1.0]}, {"t": 1.0, "color": [1.0, 0.2, 0.1, 1.0]}], "start_colors": [], "emissive": 3.0, "fade_in": 0.1, "fade_out": 0.4, "space": "World", "facing": "Billboard", "stretch": 0.1, "blend": "Additive", "sprite": "Soft", "simulation": "Cpu", "collide": false, "trail": 0.0, "on_parent_death": 0}),
+    },
+    ComponentSection {
+        key: "rusting.particle_shader",
+        summary: "On an object with a rusting.particle_emitter: GLSL that changes how its particles look. source starts with `#rusting particle 1` and defines `void particle(ParticleInput i, inout vec4 color)`; i has corner (-1..1 across the quad), particle_color (RGBA from the emitter's colors and fades), sprite (0 soft, 1 disc, 2 square) and time, and color arrives as the particle's color with its alpha already shaped by the sprite. Alpha 0 draws nothing. A shader that fails to compile leaves the built-in look. See guide/surface-shaders.",
+        gpu: "the shader's own cost per particle pixel",
+        example: || json!({"source": "#rusting particle 1\nvoid particle(ParticleInput i, inout vec4 color) { color.a *= step(0.6, length(i.corner)) * step(length(i.corner), 1.0); }"}),
     },
     ComponentSection {
         key: "rusting.animation",
@@ -1025,11 +1097,11 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.cloth",
-        summary: "XPBD cloth: a sheet of count_x by count_y squares of spacing metres in the entity's XY plane, centered on it, each cut into two triangles. stretch (edge compliance) 0 does not stretch; bend sets how easily it folds. wind blows on it with drag; self_collision keeps folds thickness apart. pin_top holds the top edge on holder (a body that carries it and feels its pull) or in place when holder is null. tear_strain above 0 tears edges stretched past rest times 1 + tear_strain. It drapes over sphere, box and capsule colliders and pushes dynamic bodies back. visible draws both sides. CPU only, deterministic; at most 4096 particles.",
+        summary: "XPBD cloth: a sheet of count_x by count_y squares of spacing metres in the entity's XY plane, centered on it, each cut into two triangles. stretch (edge compliance) 0 does not stretch; bend sets how easily it folds. wind blows on it with drag; self_collision keeps folds thickness apart. pin_top holds the top edge on holder (a body that carries it and feels its pull) or in place when holder is null. tear_strain above 0 tears edges stretched past rest times 1 + tear_strain. It drapes over sphere, box and capsule colliders and pushes dynamic bodies back. visible draws both sides in color (linear RGBA) times texture, an image stretched once over the sheet with its top row along the top edge, so it folds and tears with the cloth (flags, banners). CPU only, deterministic; at most 4096 particles.",
         gpu: NO_GPU,
         // Numbers exact in f32: components with entity fields save through
         // JSON values, which widen 0.1 to 0.10000000149011612.
-        example: || json!({"spacing": 0.125, "count_x": 8, "count_y": 8, "density": 0.25, "stretch": 0.0, "bend": 0.0, "damping": 0.5, "wind": [0.0, 0.0, 2.0], "drag": 1.0, "thickness": 0.03125, "self_collision": true, "tear_strain": 0.0, "substeps": 10, "pin_top": true, "holder": null, "visible": true}),
+        example: || json!({"spacing": 0.125, "count_x": 8, "count_y": 8, "density": 0.25, "stretch": 0.0, "bend": 0.0, "damping": 0.5, "wind": [0.0, 0.0, 2.0], "drag": 1.0, "thickness": 0.03125, "self_collision": true, "tear_strain": 0.0, "substeps": 10, "pin_top": true, "holder": null, "visible": true, "color": [0.75, 0.25, 0.25, 1.0], "texture": ""}),
     },
     ComponentSection {
         key: "rusting.gravity_volume",
@@ -1057,7 +1129,7 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.heightfield",
-        summary: "A grid of ground heights for a collider with shape \"Heightfield\" on the same object (static only, like TriangleMesh). heights[row][column] in metres; rows run along +Z and columns along +X, spacing metres apart, centred on the object and scaled by its transform. Game code can draw the same surface with Heightfield::mesh(). cells[row][column] (one row and column fewer than heights) picks an entry of surfaces for that cell, a patch such as ice or mud with its own friction, restitution and material name (sound_cue with_material matches it); missing cells and indices past the end use the collider's own values and physics_material.",
+        summary: "A grid of ground heights for a collider with shape \"Heightfield\" on the same object (static only, like TriangleMesh). heights[row][column] in metres; rows run along +Z and columns along +X, spacing metres apart, centred on the object and scaled by its transform. Add rusting.terrain to draw it, or draw it from game code with Heightfield::mesh(). cells[row][column] (one row and column fewer than heights) picks an entry of surfaces for that cell, a patch such as ice or mud with its own friction, restitution and material name (sound_cue with_material matches it); missing cells and indices past the end use the collider's own values and physics_material.",
         gpu: NO_GPU,
         example: || json!({"heights": [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.5, 0.0]], "spacing": 2.0, "cells": [[0, 255], [255, 255]], "surfaces": [{"name": "ice", "friction": 0.02, "restitution": 0.0}]}),
     },

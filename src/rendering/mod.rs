@@ -15,10 +15,15 @@ pub mod frame_pacer;
 pub mod frame_passes;
 pub mod gpu_broad_phase;
 pub mod gpu_cloth;
+mod gpu_particles;
+mod gpu_skinning;
+mod lightmap;
 mod post_effects;
 pub mod readback;
 pub mod render_scale;
 pub mod scene_renderer;
+pub mod shader_graph;
+mod sky;
 pub mod swapchain;
 
 use std::sync::Arc;

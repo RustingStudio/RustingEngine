@@ -1398,6 +1398,50 @@ impl PhysicsWorld {
             .collect()
     }
 
+    /// Summed [`ForceField`] acceleration at each point from the field
+    /// sensors that contain it, at `seconds` of time. A point is at rest,
+    /// so custom functions see zero velocity.
+    #[must_use]
+    pub fn field_accelerations(
+        &self,
+        world: &World,
+        points: &[[f32; 3]],
+        seconds: f32,
+    ) -> Vec<[f32; 3]> {
+        let functions = world.get_resource::<ForceFieldFunctions>();
+        let fields = self
+            .bodies
+            .iter()
+            .filter(|body| body.sensor)
+            .filter_map(|body| {
+                Some((body, world.get::<ForceField>(body.entity)?))
+            })
+            .collect::<Vec<_>>();
+        if fields.is_empty() {
+            return vec![[0.0; 3]; points.len()];
+        }
+        // ponytail: every point tests every field; bin points by field
+        // bounds if large scatters meet many fields.
+        points
+            .iter()
+            .map(|&point| {
+                let probe = Body::probe(Shape::Sphere(1e-3), point.into());
+                fields
+                    .iter()
+                    .filter(|(body, _)| collide(&probe, body).is_some())
+                    .fold(Vector3::zeros(), |sum, (body, field)| {
+                        sum + field.push(
+                            probe.position - body.position,
+                            Vector3::zeros(),
+                            seconds,
+                            functions,
+                        )
+                    })
+                    .into()
+            })
+            .collect()
+    }
+
     /// Every collider on a layer in `layer_mask` that overlaps a sphere, in
     /// stable entity order.
     #[must_use]

@@ -472,13 +472,7 @@ pub const MAX_CLOTH_PARTICLES: u64 = 4_096;
 /// `holder` is null, stays where it starts. The first fixed tick gives the
 /// entity its [`ClothVolume`].
 #[derive(
-    Component,
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
+    Component, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize,
 )]
 #[serde(default)]
 pub struct ClothSheet {
@@ -503,6 +497,11 @@ pub struct ClothSheet {
     pub holder: Entity,
     /// Draw both sides of the sheet.
     pub visible: bool,
+    /// Linear RGBA of the sheet, multiplied into `texture`.
+    pub color: [f32; 4],
+    /// Image stretched once over the sheet, top row at the top edge;
+    /// empty for plain `color`.
+    pub texture: std::path::PathBuf,
 }
 
 impl Default for ClothSheet {
@@ -525,6 +524,8 @@ impl Default for ClothSheet {
             pin_top: true,
             holder: Entity::PLACEHOLDER,
             visible: true,
+            color: CLOTH_COLOR,
+            texture: std::path::PathBuf::new(),
         }
     }
 }
@@ -611,22 +612,49 @@ pub(super) fn spawn_cloths(
             Err(_) => (0..top).for_each(|particle| volume.cloth.pin(particle)),
         }
         if let Some(assets) = assets.as_deref_mut().filter(|_| sheet.visible) {
-            volume.skin = Some(SoftSkin::new(named_material(
-                assets,
-                "Cloth",
-                [0.75, 0.2, 0.2, 1.0],
-                0.8,
-            )));
+            volume.skin = Some(SoftSkin::new(sheet_material(sheet, assets)));
         }
         commands.entity(entity).insert(volume);
     }
 }
 
+/// Base color of a sheet with no `color` set.
+const CLOTH_COLOR: [f32; 4] = [0.75, 0.2, 0.2, 1.0];
+
+/// The shared plain cloth material, or one of the sheet's own for another
+/// color or a texture. A texture that fails to load leaves the color.
+fn sheet_material(
+    sheet: &ClothSheet,
+    assets: &mut crate::assets::AssetServer,
+) -> crate::assets::Handle<crate::assets::MaterialAsset> {
+    if sheet.color == CLOTH_COLOR && sheet.texture.as_os_str().is_empty() {
+        return named_material(assets, "Cloth", CLOTH_COLOR, 0.8);
+    }
+    let texture = (!sheet.texture.as_os_str().is_empty())
+        .then(|| assets.load_texture(&sheet.texture))
+        .and_then(|loaded| {
+            loaded
+                .map_err(|error| {
+                    eprintln!("cloth texture {:?}: {error}", sheet.texture);
+                })
+                .ok()
+        });
+    assets.materials.insert(crate::assets::MaterialAsset {
+        name: "Cloth".into(),
+        base_color: sheet.color,
+        base_color_texture: texture,
+        roughness: 0.8,
+        ..crate::assets::MaterialAsset::default()
+    })
+}
+
 /// Both sides of a cloth's triangles, each side with its own smooth
 /// normals: the first half of the vertices faces the way the triangles
-/// wind, the second half the other way.
+/// wind, the second half the other way. UVs stay pinned to the rest shape,
+/// so a texture moves with the cloth; see [`rest_uvs`].
 pub fn cloth_mesh(cloth: &Cloth) -> crate::assets::MeshAsset {
     let count = cloth.positions.len();
+    let uvs = rest_uvs(cloth);
     let mut normals = vec![Vector3::zeros(); count];
     for &triangle in &cloth.triangles {
         let [a, b, c] = triangle.map(|i| vector(cloth.positions[i as usize]));
@@ -637,9 +665,12 @@ pub fn cloth_mesh(cloth: &Cloth) -> crate::assets::MeshAsset {
     }
     let mut vertices = Vec::with_capacity(2 * count);
     for side in [1.0, -1.0] {
-        for (&position, normal) in cloth.positions.iter().zip(&normals) {
+        for ((&position, normal), &uv) in
+            cloth.positions.iter().zip(&normals).zip(&uvs)
+        {
             vertices.push(crate::assets::MeshVertex {
                 position,
+                uv,
                 normal: (normal.try_normalize(1e-12).unwrap_or(Vector3::z())
                     * side)
                     .into(),
@@ -656,6 +687,47 @@ pub fn cloth_mesh(cloth: &Cloth) -> crate::assets::MeshAsset {
         indices.extend([a + back, c + back, b + back]);
     }
     crate::assets::MeshAsset { vertices, indices }
+}
+
+/// Each particle's rest position projected on the plane of the first
+/// triangle (u along its first edge), stretched to fill 0..1 on both axes
+/// with v = 0 at the far end of the second axis, the top of an image. A
+/// `Cloth::grid` sheet gets its grid as UVs: u along `u`, v down `v`.
+// ponytail: one plane for the whole cloth; a cloth that is curved at rest
+// (a sleeve) would need its own authored UVs.
+fn rest_uvs(cloth: &Cloth) -> Vec<[f32; 2]> {
+    let rest = &cloth.rest_positions;
+    let axes = cloth.triangles.first().and_then(|&[a, b, c]| {
+        let [a, b, c] = [a, b, c].map(|i| vector(rest[i as usize]));
+        let u = (b - a).try_normalize(1e-12)?;
+        let normal = u.cross(&(c - a)).try_normalize(1e-12)?;
+        Some((u, normal.cross(&u)))
+    });
+    let Some((u, v)) = axes else {
+        return vec![[0.0; 2]; rest.len()];
+    };
+    let projected: Vec<[f32; 2]> = rest
+        .iter()
+        .map(|&point| [vector(point).dot(&u), vector(point).dot(&v)])
+        .collect();
+    let range = |axis: usize| {
+        projected
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+                (lo.min(p[axis]), hi.max(p[axis]))
+            })
+    };
+    let ((u_low, u_high), (v_low, v_high)) = (range(0), range(1));
+    let span = |low: f32, high: f32| (high - low).max(1e-12);
+    projected
+        .iter()
+        .map(|&[pu, pv]| {
+            [
+                (pu - u_low) / span(u_low, u_high),
+                (v_high - pv) / span(v_low, v_high),
+            ]
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -679,6 +751,32 @@ mod tests {
         cloth.pin(top as usize);
         cloth.pin((top + cells) as usize);
         cloth
+    }
+
+    #[test]
+    fn cloth_uvs_follow_the_rest_grid_on_both_sides() {
+        let mut cloth = hanging(4);
+        // Moving the particles keeps their UVs: the texture moves along.
+        for position in &mut cloth.positions {
+            position[2] += position[1] * 0.5;
+        }
+        let mesh = cloth_mesh(&cloth);
+        let count = cloth.positions.len();
+        assert_eq!(mesh.vertices.len(), 2 * count);
+        for y in 0..5 {
+            for x in 0..5 {
+                let at = (x + 5 * y) as usize;
+                let want = [x as f32 / 4.0, 1.0 - y as f32 / 4.0];
+                for side in [at, at + count] {
+                    let uv = mesh.vertices[side].uv;
+                    assert!(
+                        (uv[0] - want[0]).abs() < 1e-5
+                            && (uv[1] - want[1]).abs() < 1e-5,
+                        "particle ({x}, {y}): {uv:?}, want {want:?}"
+                    );
+                }
+            }
+        }
     }
 
     fn settings() -> ClothSettings {

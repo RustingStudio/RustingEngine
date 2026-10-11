@@ -10,7 +10,8 @@ use crate::editor::gui_elements::EditorTheme;
 use crate::runtime::{
     effect_preset, ColorKey, CurveKey, EmitterShape, ParticleBlend,
     ParticleBurst, ParticleCommand, ParticleEmitter, ParticleFacing,
-    ParticleSpace, ParticleSprite, ParticleSystem, EFFECT_PRESETS,
+    ParticleSimulation, ParticleSpace, ParticleSprite, ParticleSystem,
+    EFFECT_PRESETS, MAX_GPU_PARTICLES,
 };
 
 const SHAPES: [(EmitterShape, &str); 5] = [
@@ -31,6 +32,10 @@ const FACINGS: [(ParticleFacing, &str); 2] = [
 const BLENDS: [(ParticleBlend, &str); 2] = [
     (ParticleBlend::Alpha, "Alpha"),
     (ParticleBlend::Additive, "Additive"),
+];
+const SIMULATIONS: [(ParticleSimulation, &str); 2] = [
+    (ParticleSimulation::Cpu, "CPU"),
+    (ParticleSimulation::Gpu, "GPU"),
 ];
 const SPRITES: [(ParticleSprite, &str); 3] = [
     (ParticleSprite::Soft, "Soft"),
@@ -75,10 +80,38 @@ pub(super) fn draw_particle_emitter(
                 .speed(0.5)
                 .suffix(" /s"),
         );
+        changed |= widgets::choice(
+            ui,
+            "Simulation",
+            &mut emitter.simulation,
+            &SIMULATIONS,
+        );
+        if emitter.simulation == ParticleSimulation::Gpu {
+            widgets::describe_next_row(ui, "bounce off physics colliders");
+            changed |= widgets::checkbox(ui, "Collide", &mut emitter.collide);
+            changed |= widgets::drag(
+                ui,
+                "Trail",
+                DragValue::new(&mut emitter.trail)
+                    .range(0.0..=10.0)
+                    .speed(0.01)
+                    .suffix(" s"),
+            );
+            widgets::describe_next_row(ui, "spawns where parent particles die");
+            changed |= widgets::drag(
+                ui,
+                "On Parent Death",
+                DragValue::new(&mut emitter.on_parent_death).range(0..=64),
+            );
+        }
+        let most = match emitter.simulation {
+            ParticleSimulation::Cpu => 100_000,
+            ParticleSimulation::Gpu => MAX_GPU_PARTICLES,
+        };
         changed |= widgets::drag(
             ui,
             "Max Particles",
-            DragValue::new(&mut emitter.max_particles).range(1..=100_000),
+            DragValue::new(&mut emitter.max_particles).range(1..=most),
         );
         changed |= widgets::drag(
             ui,
@@ -93,6 +126,25 @@ pub(super) fn draw_particle_emitter(
         widgets::describe_next_row(ui, "restart on contact; CPU colliders");
         changed |=
             widgets::checkbox(ui, "On Collision", &mut emitter.on_collision);
+        widgets::describe_next_row(
+            ui,
+            "contacts this fast spawn particles; 0 off",
+        );
+        changed |= widgets::drag(
+            ui,
+            "Impact Speed",
+            DragValue::new(&mut emitter.impact_speed)
+                .range(0.0..=f32::MAX)
+                .speed(0.05)
+                .suffix(" m/s"),
+        );
+        changed |= widgets::drag(
+            ui,
+            "Impact Count",
+            DragValue::new(&mut emitter.impact_count).range(0..=10_000),
+        );
+        widgets::describe_next_row(ui, "puff when the body falls asleep");
+        changed |= widgets::checkbox(ui, "On Settle", &mut emitter.on_settle);
         changed |= bursts(ui, &mut emitter.bursts);
     });
     widgets::section(ui, "Shape", false, |ui| {

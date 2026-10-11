@@ -17,8 +17,10 @@ use std::f32::consts::{PI, TAU};
 use std::time::Duration;
 
 use bevy_ecs::entity::Entity;
+use std::collections::BTreeSet;
+
 use bevy_ecs::prelude::{
-    Commands, Component, Query, Res, Resource, With, Without, World,
+    Commands, Component, Has, Local, Query, Res, Resource, With, Without, World,
 };
 use bevy_ecs::query::QueryItem;
 use serde::{Deserialize, Serialize};
@@ -69,6 +71,25 @@ pub enum ParticleFacing {
     /// Stretched along its velocity by `stretch`, for rain and sparks.
     Velocity,
 }
+
+/// Where an emitter's particles are simulated.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+pub enum ParticleSimulation {
+    /// On the CPU each fixed step: every setting works.
+    #[default]
+    Cpu,
+    /// In a compute shader each frame, for up to `MAX_GPU_PARTICLES`.
+    /// Turbulence, start colors, rotation, spin, `Local` space, `Velocity`
+    /// facing and collision restarts are ignored, and alpha blended
+    /// particles are not sorted. GPU force fields push the particles, and
+    /// `collide` bounces them off physics colliders.
+    Gpu,
+}
+
+/// Most particles one GPU emitter keeps alive.
+pub const MAX_GPU_PARTICLES: u32 = 1 << 20;
 
 /// How a particle's color mixes with what is behind it.
 #[derive(
@@ -177,6 +198,15 @@ pub struct ParticleEmitter {
     pub looping: bool,
     /// Restart when this body's collider starts touching another one.
     pub on_collision: bool,
+    /// Closing speed in m/s at which a contact of this body spawns
+    /// `impact_count` particles at the contact point, launched along the
+    /// contact normal away from the other body; 0 is off.
+    pub impact_speed: f32,
+    /// Particles spawned by each impact or settle.
+    pub impact_count: u32,
+    /// Spawn `impact_count` particles at the body when it falls asleep
+    /// (debris settling).
+    pub on_settle: bool,
     pub shape: EmitterShape,
     pub shape_size: [f32; 3],
     /// Seconds each particle lives.
@@ -224,6 +254,17 @@ pub struct ParticleEmitter {
     pub stretch: f32,
     pub blend: ParticleBlend,
     pub sprite: ParticleSprite,
+    pub simulation: ParticleSimulation,
+    /// `Gpu` simulation: particles bounce off physics colliders by the
+    /// collider's restitution.
+    pub collide: bool,
+    /// `Gpu` simulation: seconds of path each particle trails behind it,
+    /// 0 for none.
+    pub trail: f32,
+    /// `Gpu` simulation under a parent `Gpu` emitter: a sub-emitter that
+    /// spawns this many particles where each parent particle dies, instead
+    /// of by rate and bursts. 0 for a normal emitter.
+    pub on_parent_death: u32,
     /// Set by `play`, `pause`, `stop`, and `restart`.
     #[serde(skip)]
     pub command: ParticleCommand,
@@ -240,6 +281,9 @@ impl Default for ParticleEmitter {
             duration: 5.0,
             looping: true,
             on_collision: false,
+            impact_speed: 0.0,
+            impact_count: 10,
+            on_settle: false,
             shape: EmitterShape::Point,
             shape_size: [0.5; 3],
             lifetime: [1.0, 2.0],
@@ -265,6 +309,10 @@ impl Default for ParticleEmitter {
             stretch: 0.1,
             blend: ParticleBlend::Alpha,
             sprite: ParticleSprite::Soft,
+            simulation: ParticleSimulation::Cpu,
+            collide: false,
+            trail: 0.0,
+            on_parent_death: 0,
             command: ParticleCommand::None,
         }
     }
@@ -465,15 +513,24 @@ fn pick<T: Copy>(items: &[T], unit: f32) -> Option<T> {
     items.get(index.min(items.len().saturating_sub(1))).copied()
 }
 
-fn spawn(emitter: &ParticleEmitter, frame: Frame, draw: &Draw) -> Particle {
-    let axis = {
-        let length = sim_math::length(emitter.direction);
-        if length > 0.0 {
-            emitter.direction.map(|v| v / length)
-        } else {
-            [0.0, 1.0, 0.0]
-        }
-    };
+/// The emitter's normalized launch direction, or up.
+fn launch_axis(emitter: &ParticleEmitter) -> [f32; 3] {
+    let length = sim_math::length(emitter.direction);
+    if length > 0.0 {
+        emitter.direction.map(|v| v / length)
+    } else {
+        [0.0, 1.0, 0.0]
+    }
+}
+
+/// One new particle launched around the normalized `axis`, in the frame's
+/// space.
+fn spawn(
+    emitter: &ParticleEmitter,
+    frame: Frame,
+    draw: &Draw,
+    axis: [f32; 3],
+) -> Particle {
     let size = emitter.shape_size;
     let radius = size[0].max(0.0);
     let (offset, direction) = match emitter.shape {
@@ -622,6 +679,11 @@ fn step(
     if !emitter.looping && after >= duration && system.particles.is_empty() {
         system.playing = false;
     }
+    if emitter.simulation == ParticleSimulation::Gpu {
+        // The renderer spawns them; newer spawns overwrite the oldest.
+        system.spawned += count;
+        return;
+    }
     let room =
         u64::from(emitter.max_particles).saturating_sub(system.alive() as u64);
     for _ in 0..count.min(room) {
@@ -632,7 +694,12 @@ fn step(
             spawn: system.spawned,
         };
         system.spawned += 1;
-        system.particles.push(spawn(emitter, frame, &draw));
+        system.particles.push(spawn(
+            emitter,
+            frame,
+            &draw,
+            launch_axis(emitter),
+        ));
     }
 }
 
@@ -849,6 +916,118 @@ pub(super) fn restart_on_contact(
     *touching = now;
 }
 
+type ImpactParts = (
+    Entity,
+    &'static ParticleEmitter,
+    &'static mut ParticleSystem,
+    Option<&'static GlobalTransform>,
+    Option<&'static crate::Transform>,
+    Option<&'static SceneId>,
+    Has<super::Sleeping>,
+);
+
+/// Per fixed step, after the particles moved: spawns `impact_count`
+/// particles at each contact of an emitter's body closing at
+/// `impact_speed` or faster, and at the body when it falls asleep with
+/// `on_settle`. Contacts come in the solver's stable order, and each spawn
+/// takes the next spawn number, so runs repeat. GPU emitters spawn them at
+/// the emitter, and Local space particles start at the emitter.
+// ponytail: no fracture events yet; add them here when Milestone 11
+// fracture lands.
+pub(super) fn emit_on_impacts(
+    physics: Res<super::PhysicsWorld>,
+    seed: Res<RandomSeed>,
+    time: Res<FrameTime>,
+    mut emitters: Query<ImpactParts>,
+    mut asleep: Local<BTreeSet<Entity>>,
+) {
+    let mut now_asleep = BTreeSet::new();
+    for (entity, emitter, mut system, global, transform, id, sleeping) in
+        &mut emitters
+    {
+        if sleeping {
+            now_asleep.insert(entity);
+        }
+        if system.paused {
+            continue;
+        }
+        let frame = emitter_frame(global, transform);
+        // Each impact: where, and the direction particles leave along.
+        let mut impacts = Vec::new();
+        if emitter.impact_speed > 0.0 {
+            for contact in physics.contacts() {
+                if contact.sensor || contact.speed < emitter.impact_speed {
+                    continue;
+                }
+                let away = if contact.a == entity {
+                    contact.normal.map(|v| -v)
+                } else if contact.b == entity {
+                    contact.normal
+                } else {
+                    continue;
+                };
+                impacts.push((contact.point, away));
+            }
+        }
+        if emitter.on_settle && sleeping && !asleep.contains(&entity) {
+            impacts.push((frame.point([0.0; 3]), [0.0, 1.0, 0.0]));
+        }
+        let count = u64::from(emitter.impact_count);
+        if emitter.simulation == ParticleSimulation::Gpu {
+            system.spawned += count * impacts.len() as u64;
+            continue;
+        }
+        let stream =
+            RandomSeed::stream("particle_impacts", stream_key(entity, id));
+        for (point, away) in impacts {
+            let at = if emitter.space == ParticleSpace::World {
+                impact_frame(point, away)
+            } else {
+                Frame {
+                    matrix: GlobalTransform::default().matrix,
+                }
+            };
+            let axis = if emitter.space == ParticleSpace::World {
+                [0.0, 1.0, 0.0]
+            } else {
+                launch_axis(emitter)
+            };
+            let room = u64::from(emitter.max_particles)
+                .saturating_sub(system.alive() as u64);
+            for _ in 0..count.min(room) {
+                let draw = Draw {
+                    seed: &seed,
+                    tick: time.fixed_tick,
+                    stream,
+                    spawn: system.spawned,
+                };
+                system.spawned += 1;
+                system.particles.push(spawn(emitter, at, &draw, axis));
+            }
+        }
+    }
+    *asleep = now_asleep;
+}
+
+/// A unit frame at `point` whose y axis is the unit vector `up`.
+fn impact_frame(point: [f32; 3], up: [f32; 3]) -> Frame {
+    let helper = if up[1].abs() < 0.9 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let x = sim_math::normalize(cross(up, helper));
+    let z = cross(x, up);
+    Frame {
+        matrix: [
+            [x[0], x[1], x[2], 0.0],
+            [up[0], up[1], up[2], 0.0],
+            [z[0], z[1], z[2], 0.0],
+            [point[0], point[1], point[2], 1.0],
+        ],
+    }
+}
+
 /// One particle as the renderer draws it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ParticleInstance {
@@ -864,6 +1043,19 @@ pub struct ParticleInstance {
     pub rotation: f32,
 }
 
+/// A `#rusting particle 1` shader that changes how this object's
+/// [`ParticleEmitter`] particles look, pixel by pixel. See
+/// `docs/surface-shaders.md`. A shader that fails to compile leaves the
+/// built-in look; the error is in `SceneRenderer::particle_shader_errors`.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct ParticleShader {
+    /// GLSL source starting with `#rusting particle 1`.
+    pub source: String,
+}
+
 /// The particles of one emitter, drawn by one instanced draw.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParticleBatch {
@@ -871,6 +1063,106 @@ pub struct ParticleBatch {
     pub blend: ParticleBlend,
     pub sprite: ParticleSprite,
     pub instances: Vec<ParticleInstance>,
+}
+
+/// What the renderer needs to simulate one GPU emitter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuParticleBatch {
+    pub entity: Entity,
+    /// Random stream of the emitter's spawns.
+    pub stream: u64,
+    /// Spawns so far; the renderer spawns the ones it has not seen.
+    pub spawned: u64,
+    /// Ring of particle slots, 1..=`MAX_GPU_PARTICLES`.
+    pub max_particles: u32,
+    pub blend: ParticleBlend,
+    pub sprite: ParticleSprite,
+    /// Shape as 0 point, 1 box, 2 sphere, 3 cone, 4 circle.
+    pub shape: u32,
+    /// Trail points each particle keeps: 0, or `GPU_TRAIL_POINTS`.
+    pub trail_points: u32,
+    /// Sub-emitter's parent emitter and spawns per parent death, set by
+    /// render extraction when the parent is a `Gpu` emitter.
+    pub parent: Option<(Entity, u32)>,
+    /// Settings the compute shader reads: emitter matrix columns, then
+    /// direction and spread, wind and gravity, lifetime and speed ranges,
+    /// size range, drag and emissive, shape size and collide, trail seconds
+    /// and points, then `GPU_PARTICLE_CURVE` samples of color and of size
+    /// over life.
+    pub rows: Vec<[f32; 4]>,
+}
+
+/// Samples of color and size over life a GPU emitter takes.
+// ponytail: curves are sampled at 8 points and lerped between.
+pub const GPU_PARTICLE_CURVE: usize = 8;
+
+/// Past positions a trailing GPU particle keeps, evenly spread over
+/// `ParticleEmitter::trail`.
+// ponytail: fixed; long trails get coarse corners, raise if they show.
+pub const GPU_TRAIL_POINTS: u32 = 8;
+/// Builds the settings of one GPU emitter.
+#[must_use]
+pub fn gpu_particle_batch(
+    entity: Entity,
+    emitter: &ParticleEmitter,
+    system: &ParticleSystem,
+    global: Option<&GlobalTransform>,
+    id: Option<&SceneId>,
+) -> GpuParticleBatch {
+    let matrix = emitter_frame(global, None).matrix;
+    let direction = sim_math::normalize(emitter.direction);
+    let mut rows = matrix.to_vec();
+    rows.extend([
+        [direction[0], direction[1], direction[2], emitter.spread],
+        [
+            emitter.wind[0],
+            emitter.wind[1],
+            emitter.wind[2],
+            emitter.gravity,
+        ],
+        [
+            emitter.lifetime[0],
+            emitter.lifetime[1],
+            emitter.speed[0],
+            emitter.speed[1],
+        ],
+        [
+            emitter.size[0],
+            emitter.size[1],
+            emitter.drag,
+            emitter.emissive,
+        ],
+        [
+            emitter.shape_size[0],
+            emitter.shape_size[1],
+            emitter.shape_size[2],
+            f32::from(u8::from(emitter.collide)),
+        ],
+    ]);
+    let trail_points = if emitter.trail > 0.0 {
+        GPU_TRAIL_POINTS
+    } else {
+        0
+    };
+    rows.push([emitter.trail.max(0.0), trail_points as f32, 0.0, 0.0]);
+    let life = |sample: usize| sample as f32 / (GPU_PARTICLE_CURVE - 1) as f32;
+    rows.extend((0..GPU_PARTICLE_CURVE).map(|i| emitter.color_at(life(i))));
+    rows.extend(
+        (0..GPU_PARTICLE_CURVE)
+            .map(|i| [emitter.size_at(life(i)), 0.0, 0.0, 0.0]),
+    );
+    GpuParticleBatch {
+        entity,
+        stream: stream_key(entity, id),
+        spawned: system.spawned,
+        max_particles: emitter.max_particles.clamp(1, MAX_GPU_PARTICLES),
+        blend: emitter.blend,
+        sprite: emitter.sprite,
+        shape: emitter.shape as u32,
+        trail_points,
+        parent: None,
+        rows,
+    }
 }
 
 /// Builds the draw list of one emitter from its live particles.
@@ -955,6 +1247,46 @@ mod tests {
         // Half a second of particles at 60 per second, give or take one.
         assert!((29..=31).contains(&system.alive()), "{}", system.alive());
         assert_eq!(system.spawned, 60);
+    }
+
+    #[test]
+    fn gpu_emitters_only_count_spawns_and_pack_their_settings() {
+        let emitter = ParticleEmitter {
+            rate: 60.0,
+            simulation: ParticleSimulation::Gpu,
+            collide: true,
+            trail: 0.5,
+            max_particles: u32::MAX,
+            shape: EmitterShape::Sphere,
+            ..ParticleEmitter::default()
+        };
+        let system = run(&emitter, 60, 1);
+        assert_eq!(system.alive(), 0, "the renderer owns the particles");
+        assert_eq!(system.spawned, 60);
+        let global = GlobalTransform {
+            matrix: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [3.0, 4.0, 5.0, 1.0],
+            ],
+        };
+        let entity = Entity::from_raw_u32(3).unwrap();
+        let batch =
+            gpu_particle_batch(entity, &emitter, &system, Some(&global), None);
+        assert_eq!(batch.spawned, 60);
+        assert_eq!(batch.max_particles, MAX_GPU_PARTICLES);
+        assert_eq!(batch.shape, 2);
+        assert_eq!(batch.rows.len(), 10 + 2 * GPU_PARTICLE_CURVE);
+        assert_eq!(batch.rows[9], [0.5, 8.0, 0.0, 0.0], "trail");
+        assert_eq!(batch.trail_points, GPU_TRAIL_POINTS);
+        assert_eq!(batch.rows[3], [3.0, 4.0, 5.0, 1.0]);
+        assert_eq!(batch.rows[6], [1.0, 2.0, 1.0, 2.0], "lifetime, speed");
+        assert_eq!(batch.rows[8][3], 1.0, "collide");
+        // Faded in from transparent, white in the middle of life.
+        assert_eq!(batch.rows[10][3], 0.0);
+        assert_eq!(batch.rows[10 + 3], [1.0; 4]);
+        assert_eq!(batch.rows[10 + GPU_PARTICLE_CURVE], [1.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

@@ -412,3 +412,32 @@ record mode and the rest-pose preview. Later:
   `PhysicsDebugDraw` resource exists. Left: a Scene view header toggle (an
   Overlays popover like Blender's) with one checkbox per part (shapes,
   contacts, impulses, joints), and a color legend.
+
+## Deferred: HDR skies
+
+- The Assets panel, its import dialog and `asset_import` list only PNG, JPEG,
+  BMP and TGA, so a Radiance `.hdr` sky has to be copied under `assets/` by
+  hand. Accept `.hdr` there (no thumbnail needed at first) and offer it in
+  the Environment Map texture picker.
+
+## Deferred: light probe grids
+
+- A selected `rusting.light_probe_grid` shows no box or probe dots in the
+  viewport. Reuse the reflection probe's face handles for `extents`, draw a
+  dot at each probe position, and add a "Rebake" button (the grid rebakes
+  only when a field changes).
+
+## Deferred: lightmaps
+
+- `rusting.lightmap` rebakes only when an object, mesh, material or light
+  changes. Add a "Rebake lightmaps" button and a texel density preview
+  (checker overlay sized by `resolution`) on selected lightmapped objects.
+
+## Deferred: shader graph editor
+
+- `ShaderGraph` (`src/rendering/shader_graph.rs`) compiles nodes to a
+  surface shader but has no editor yet. Add a node canvas area (Blender's
+  shader editor layout: nodes with typed sockets, drag-to-wire, a node
+  search popup) that edits a material's graph and writes the compiled
+  source to its `shader` through snapshot undo. Shader errors already show
+  in Render Settings.

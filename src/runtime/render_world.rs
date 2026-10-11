@@ -137,15 +137,32 @@ pub struct RenderWorld {
     pub spot_lights: Vec<ExtractedSpotLight>,
     pub ambient_light: Option<AmbientLight>,
     pub sky_light: Option<SkyLight>,
-    /// Loaded texture and intensity of the scene's first loaded
-    /// [`EnvironmentMap`](super::EnvironmentMap).
-    pub environment:
-        Option<(crate::assets::Handle<crate::assets::TextureAsset>, f32)>,
+    /// Loaded texture, intensity and background flag of the scene's first
+    /// loaded [`EnvironmentMap`](super::EnvironmentMap).
+    pub environment: Option<(
+        crate::assets::Handle<crate::assets::TextureAsset>,
+        f32,
+        bool,
+    )>,
     /// World position and settings of each
     /// [`ReflectionProbe`](super::ReflectionProbe), in entity order.
     pub reflection_probes: Vec<([f32; 3], super::ReflectionProbe)>,
+    /// World position and settings of the first
+    /// [`LightProbeGrid`](super::LightProbeGrid) in entity order.
+    pub light_probe_grid: Option<([f32; 3], super::LightProbeGrid)>,
+    /// Entities with a [`Lightmap`](super::Lightmap), in entity order; an
+    /// entity's place in this list picks its lightmap slot.
+    pub lightmaps: Vec<(Entity, super::Lightmap)>,
     pub tone_mapping: Option<ToneMapping>,
     pub fog: Option<super::Fog>,
+    pub procedural_sky: Option<super::ProceduralSky>,
+    /// Box-to-world matrix (transform times half size) and settings of
+    /// each [`FogVolume`](super::FogVolume), in entity order.
+    pub fog_volumes: Vec<([[f32; 4]; 4], super::FogVolume)>,
+    /// Box-to-world matrix (transform times half size) and settings of
+    /// each [`Decal`](super::Decal) whose image is loaded or that has none,
+    /// in entity order.
+    pub decals: Vec<([[f32; 4]; 4], super::Decal)>,
     pub bloom: Option<super::Bloom>,
     pub auto_exposure: Option<super::AutoExposure>,
     pub depth_of_field: Option<super::DepthOfField>,
@@ -155,12 +172,28 @@ pub struct RenderWorld {
     /// [`ColorLut`](super::ColorLut).
     pub color_lut:
         Option<(crate::assets::Handle<crate::assets::TextureAsset>, f32)>,
+    /// Source of the first [`PostShader`](super::PostShader) in entity
+    /// order; empty when there is none.
+    pub post_shader: String,
+    /// Source of the first [`SkyShader`](super::SkyShader) in entity
+    /// order; empty when there is none.
+    pub sky_shader: String,
+    /// Source of the first [`FogShader`](super::FogShader) in entity
+    /// order; empty when there is none.
+    pub fog_shader: String,
     /// Meshes that show a camera's image, in entity order.
     pub screens: Vec<ExtractedScreen>,
     pub ambient_occlusion: Option<super::AmbientOcclusion>,
     /// Live particles of each visible emitter, in entity order; each batch
     /// is one instanced draw.
     pub particles: Vec<super::ParticleBatch>,
+    /// Visible GPU-simulated emitters, in entity order.
+    pub gpu_particles: Vec<super::GpuParticleBatch>,
+    /// Meshes the renderer deforms on the GPU this frame, with
+    /// [`super::GpuSkinning`]; empty otherwise.
+    pub skin_jobs: Vec<super::SkinJob>,
+    /// Source of each emitter's [`ParticleShader`](super::ParticleShader).
+    pub particle_shaders: HashMap<Entity, String>,
     pub lights_revision: u64,
     pub report: ExtractionReport,
     /// Bodies whose newest runtime transforms will be owned by GPU compute.
@@ -221,11 +254,16 @@ pub struct RenderWorld {
     /// Drawn tint of each flashing renderable, sorted by entity: rgb from
     /// its own or an ancestor's [`super::Flash`], a the strength.
     pub flashes: Vec<(Entity, [f32; 4])>,
+    /// Each renderable's [`super::MaterialOverride`], sorted by entity.
+    pub material_overrides: Vec<(Entity, super::MaterialOverride)>,
     /// Index of each entity in `renderables`.
     index: HashMap<Entity, usize>,
+    /// Each `Foliage` copy: its place in `renderables`, its unleaned
+    /// matrix and its owner's `sway`.
+    foliage: Vec<(usize, [[f32; 4]; 4], f32)>,
     renderables_signature: Option<u64>,
     /// Tick and component counts seen by the last signature hash.
-    renderables_fingerprint: Option<(Tick, [usize; 6])>,
+    renderables_fingerprint: Option<(Tick, [usize; 8])>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -242,6 +280,9 @@ impl Plugin for RenderExtractPlugin {
 
 pub fn extract_render_world(world: &mut World) {
     super::update_skins(world);
+    let skin_jobs = super::skin_jobs(world);
+    world.resource_mut::<RenderWorld>().skin_jobs = skin_jobs;
+    super::terrain::build_terrains(world);
     // Most game frames do not add objects or change their CPU transforms.
     // Hashing in place is much cheaper than allocating and sorting a new list
     // of ten thousand objects only to discover that nothing changed.
@@ -288,10 +329,17 @@ pub fn extract_render_world(world: &mut World) {
         query
             .iter(world)
             .filter_map(|(entity, map)| {
-                Some((entity.index(), map.handle?, map.intensity))
+                Some((
+                    entity.index(),
+                    map.handle?,
+                    map.intensity,
+                    map.background,
+                ))
             })
             .min_by_key(|(entity, ..)| *entity)
-            .map(|(_, handle, intensity)| (handle, intensity))
+            .map(|(_, handle, intensity, background)| {
+                (handle, intensity, background)
+            })
     };
     let reflection_probes = {
         let mut query =
@@ -310,7 +358,65 @@ pub fn extract_render_world(world: &mut World) {
             .map(|(_, center, probe)| (center, probe))
             .collect()
     };
+    let light_probe_grid = world
+        .query::<(Entity, &GlobalTransform, &super::LightProbeGrid)>()
+        .iter(world)
+        .min_by_key(|(entity, ..)| entity.index())
+        .map(|(_, transform, grid)| {
+            let [x, y, z, _] = transform.matrix[3];
+            ([x, y, z], *grid)
+        });
+    let mut lightmaps = world
+        .query::<(Entity, &super::Lightmap)>()
+        .iter(world)
+        .map(|(entity, lightmap)| (entity, *lightmap))
+        .collect::<Vec<_>>();
+    lightmaps.sort_by_key(|(entity, _)| *entity);
+    let fog_volumes = {
+        let mut query =
+            world.query::<(Entity, &GlobalTransform, &super::FogVolume)>();
+        let mut volumes = query
+            .iter(world)
+            .map(|(entity, transform, volume)| {
+                let [x, y, z] = volume.extents;
+                let matrix = nalgebra::Matrix4::from(transform.matrix)
+                    * nalgebra::Matrix4::new_nonuniform_scaling(
+                        &nalgebra::Vector3::new(x, y, z),
+                    );
+                (entity.index(), matrix.into(), *volume)
+            })
+            .collect::<Vec<_>>();
+        volumes.sort_by_key(|(entity, ..)| *entity);
+        volumes
+            .into_iter()
+            .map(|(_, matrix, volume)| (matrix, volume))
+            .collect()
+    };
+    let decals = {
+        let mut query =
+            world.query::<(Entity, &GlobalTransform, &super::Decal)>();
+        let mut decals = query
+            .iter(world)
+            .filter(|(_, _, decal)| {
+                decal.handle.is_some() || decal.texture.as_os_str().is_empty()
+            })
+            .map(|(entity, transform, decal)| {
+                let [x, y, z] = decal.extents;
+                let matrix = nalgebra::Matrix4::from(transform.matrix)
+                    * nalgebra::Matrix4::new_nonuniform_scaling(
+                        &nalgebra::Vector3::new(x, y, z),
+                    );
+                (entity.index(), matrix.into(), decal.clone())
+            })
+            .collect::<Vec<_>>();
+        decals.sort_by_key(|(entity, ..)| *entity);
+        decals
+            .into_iter()
+            .map(|(_, matrix, decal)| (matrix, decal))
+            .collect()
+    };
     let tone_mapping = collect_first::<ToneMapping>(world);
+    let procedural_sky = collect_first::<super::ProceduralSky>(world);
     let eye = active_camera.as_ref().map(|camera| {
         let [x, y, z, _] = camera.transform.matrix[3];
         [x, y, z]
@@ -345,9 +451,21 @@ pub fn extract_render_world(world: &mut World) {
             .min_by_key(|(entity, ..)| *entity)
             .map(|(_, handle, intensity)| (handle, intensity))
     };
+    let post_shader =
+        first_source::<super::PostShader>(world, |shader| &shader.source);
+    let sky_shader =
+        first_source::<super::SkyShader>(world, |shader| &shader.source);
+    let fog_shader =
+        first_source::<super::FogShader>(world, |shader| &shader.source);
     let screens = collect_screens(world);
     let ambient_occlusion = collect_first::<super::AmbientOcclusion>(world);
     let particles = collect_particles(world);
+    let gpu_particles = collect_gpu_particles(world);
+    let particle_shaders = world
+        .query_filtered::<(Entity, &super::ParticleShader), With<super::ParticleEmitter>>()
+        .iter(world)
+        .map(|(entity, shader)| (entity, shader.source.clone()))
+        .collect();
     let has_gpu_physics_resources = world
         .contains_resource::<super::PhysicsIdRegistry>()
         && world.contains_resource::<super::GpuEventRegistry>()
@@ -390,14 +508,16 @@ pub fn extract_render_world(world: &mut World) {
     };
     // ponytail: rebuilt every frame from the CPU step; a revision would skip
     // the upload for static-only scenes if colliders ever number thousands.
-    let (gpu_colliders, gpu_force_fields) = match world
-        .get_resource::<super::PhysicsWorld>()
-    {
-        Some(physics) if !gpu_physics.as_ref().is_some_and(Vec::is_empty) => {
-            (physics.gpu_colliders(), physics.gpu_force_fields(world))
-        }
-        _ => Default::default(),
-    };
+    let (gpu_colliders, gpu_force_fields) =
+        match world.get_resource::<super::PhysicsWorld>() {
+            Some(physics)
+                if !gpu_physics.as_ref().is_some_and(Vec::is_empty)
+                    || !gpu_particles.is_empty() =>
+            {
+                (physics.gpu_colliders(), physics.gpu_force_fields(world))
+            }
+            _ => Default::default(),
+        };
     let gpu_lod = world.get_resource::<super::GpuSimulationLod>().copied();
     let gpu_observers = if gpu_lod.is_some() {
         world
@@ -438,8 +558,22 @@ pub fn extract_render_world(world: &mut World) {
     );
 
     let flashes = collect_flashes(world);
+    let mut material_overrides = world
+        .query_filtered::<(Entity, &super::MaterialOverride), With<MeshRenderer>>()
+        .iter(world)
+        .map(|(entity, values)| (entity, *values))
+        .collect::<Vec<_>>();
+    material_overrides.sort_by_key(|(entity, _)| *entity);
+    let new_foliage = renderables
+        .as_ref()
+        .map(|renderables| collect_foliage(world, renderables));
+    let leaned = {
+        let previous = &world.resource::<RenderWorld>().foliage;
+        lean_foliage(world, new_foliage.as_ref().unwrap_or(previous), seconds)
+    };
     let mut render_world = world.resource_mut::<RenderWorld>();
     render_world.flashes = flashes;
+    render_world.material_overrides = material_overrides;
     match renderables {
         None => {
             // Moving objects keep their place in the sorted list, since the
@@ -501,22 +635,47 @@ pub fn extract_render_world(world: &mut World) {
                 render_world.renderables_layout_revision.wrapping_add(1);
         }
     }
+    if let Some(foliage) = new_foliage {
+        render_world.foliage = foliage;
+    }
+    let mut leaned_any = false;
+    for (at, matrix) in leaned {
+        let transform = &mut render_world.renderables[at].transform;
+        if transform.matrix != matrix {
+            transform.matrix = matrix;
+            leaned_any = true;
+        }
+    }
+    if leaned_any {
+        render_world.renderables_revision =
+            render_world.renderables_revision.wrapping_add(1);
+    }
     render_world.renderables_signature = renderables_signature;
     render_world.active_camera = active_camera;
     render_world.views = views;
     render_world.tone_mapping = tone_mapping;
     render_world.fog = fog;
+    render_world.procedural_sky = procedural_sky;
+    render_world.fog_volumes = fog_volumes;
+    render_world.decals = decals;
     render_world.bloom = bloom;
     render_world.auto_exposure = auto_exposure;
     render_world.depth_of_field = depth_of_field;
     render_world.motion_blur = motion_blur;
     render_world.color_grading = color_grading;
     render_world.color_lut = color_lut;
+    render_world.post_shader = post_shader;
+    render_world.sky_shader = sky_shader;
+    render_world.fog_shader = fog_shader;
     render_world.screens = screens;
     render_world.ambient_occlusion = ambient_occlusion;
     render_world.particles = particles;
+    render_world.gpu_particles = gpu_particles;
+    render_world.particle_shaders = particle_shaders;
     render_world.environment = environment;
     render_world.reflection_probes = reflection_probes;
+    render_world.light_probe_grid = light_probe_grid;
+    render_world.lightmaps = lightmaps;
     if render_world.directional_lights != directional_lights
         || render_world.point_lights != point_lights
         || render_world.spot_lights != spot_lights
@@ -596,6 +755,55 @@ fn collect_particles(world: &mut World) -> Vec<super::ParticleBatch> {
     batches
 }
 
+fn collect_gpu_particles(world: &mut World) -> Vec<super::GpuParticleBatch> {
+    let mut query = world.query::<(
+        Entity,
+        &super::ParticleEmitter,
+        &super::ParticleSystem,
+        Option<&GlobalTransform>,
+        Option<&super::SceneId>,
+    )>();
+    let world = &*world;
+    let mut batches = query
+        .iter(world)
+        .filter(|(entity, emitter, ..)| {
+            emitter.simulation == super::ParticleSimulation::Gpu
+                && visible_in_hierarchy(world, *entity)
+        })
+        .map(|(entity, emitter, system, global, id)| {
+            let mut batch =
+                super::gpu_particle_batch(entity, emitter, system, global, id);
+            if emitter.on_parent_death > 0 {
+                batch.parent = world
+                    .get::<super::Parent>(entity)
+                    .map(|parent| (parent.0, emitter.on_parent_death));
+            }
+            batch
+        })
+        .collect::<Vec<_>>();
+    // One level: a sub-emitter's parent must be a plain GPU emitter.
+    let parents = batches
+        .iter()
+        .filter(|batch| batch.parent.is_none())
+        .map(|batch| (batch.entity, batch.max_particles))
+        .collect::<std::collections::HashMap<_, _>>();
+    for batch in &mut batches {
+        let Some((parent, burst)) = batch.parent else {
+            continue;
+        };
+        match parents.get(&parent) {
+            Some(slots) => {
+                let most = super::MAX_GPU_PARTICLES / burst * burst;
+                batch.max_particles = slots.saturating_mul(burst).min(most);
+            }
+            None => batch.parent = None,
+        }
+    }
+    // Parents step before their sub-emitters.
+    batches.sort_by_key(|batch| (batch.parent.is_some(), batch.entity));
+    batches
+}
+
 enum RenderablesChange {
     None,
     /// Only these entities' `GlobalTransform`s changed.
@@ -617,7 +825,7 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
     let newer = |tick: Tick| {
         last_run.is_none_or(|last_run| tick.is_newer_than(last_run, this_run))
     };
-    let mut counts = [0; 6];
+    let mut counts = [0; 8];
     let mut changed = false;
     let mut moved = Vec::new();
     let mut query = world.query_filtered::<(
@@ -628,15 +836,28 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
         Option<Ref<super::Parent>>,
         Option<Ref<RenderBounds>>,
         Option<Ref<super::SkinnedMesh>>,
+        Option<Ref<super::Foliage>>,
+        Option<Ref<super::TerrainChunks>>,
     ), Or<(
         With<MeshRenderer>,
         With<Visibility>,
         With<super::Parent>,
         With<RenderBounds>,
+        With<super::TerrainChunks>,
     )>>();
-    for (entity, transform, renderer, visibility, parent, bounds, skinned) in
-        query.iter(world)
+    for (
+        entity,
+        transform,
+        renderer,
+        visibility,
+        parent,
+        bounds,
+        skinned,
+        foliage,
+        chunks,
+    ) in query.iter(world)
     {
+        let scattered = foliage.is_some() || chunks.is_some();
         let ticks = [
             transform.map(|value| value.last_changed()),
             renderer.map(|value| value.last_changed()),
@@ -644,12 +865,16 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
             parent.map(|value| value.last_changed()),
             bounds.map(|value| value.last_changed()),
             skinned.map(|value| value.last_changed()),
+            foliage.map(|value| value.last_changed()),
+            chunks.map(|value| value.last_changed()),
         ];
         for (slot, (count, tick)) in counts.iter_mut().zip(ticks).enumerate() {
             if let Some(tick) = tick {
                 *count += 1;
                 if newer(tick) {
-                    if slot == 0 {
+                    // Foliage copies and terrain chunks share their
+                    // owner's entity, so a moved owner rebuilds.
+                    if slot == 0 && !scattered {
                         moved.push(entity);
                     } else {
                         changed = true;
@@ -682,9 +907,14 @@ fn renderables_signature(world: &mut World) -> u64 {
         &MeshRenderer,
         Option<&RenderBounds>,
         Option<&super::SkinnedMesh>,
+        Option<&super::Foliage>,
     )>();
+    let mut terrains =
+        world.query::<(Entity, &GlobalTransform, &super::TerrainChunks)>();
     let world = &*world;
-    for (entity, transform, renderer, bounds, skinned) in query.iter(world) {
+    for (entity, transform, renderer, bounds, skinned, foliage) in
+        query.iter(world)
+    {
         if !visible_in_hierarchy(world, entity) {
             continue;
         }
@@ -697,7 +927,20 @@ fn renderables_signature(world: &mut World) -> u64 {
         renderer.material.key().hash(&mut hasher);
         renderer.cast_shadows.hash(&mut hasher);
         renderer.receive_shadows.hash(&mut hasher);
-        format!("{bounds:?}").hash(&mut hasher);
+        format!("{bounds:?}{foliage:?}").hash(&mut hasher);
+        for row in transform.matrix {
+            for value in row {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
+    }
+    for (entity, transform, chunks) in terrains.iter(world) {
+        if !visible_in_hierarchy(world, entity) {
+            continue;
+        }
+        count += 1;
+        entity.to_bits().hash(&mut hasher);
+        chunks.hash(&mut hasher);
         for row in transform.matrix {
             for value in row {
                 value.to_bits().hash(&mut hasher);
@@ -761,6 +1004,52 @@ fn collect_flashes(world: &mut World) -> Vec<(Entity, [f32; 4])> {
     flashes
 }
 
+/// Each `Foliage` copy in `renderables` with its unleaned matrix and sway.
+fn collect_foliage(
+    world: &World,
+    renderables: &[ExtractedRenderable],
+) -> Vec<(usize, [[f32; 4]; 4], f32)> {
+    renderables
+        .iter()
+        .enumerate()
+        .filter_map(|(at, renderable)| {
+            let foliage = world.get::<super::Foliage>(renderable.entity)?;
+            Some((at, renderable.transform.matrix, foliage.sway))
+        })
+        .collect()
+}
+
+/// Each foliage copy's matrix leaned by the force fields at its base.
+fn lean_foliage(
+    world: &World,
+    foliage: &[(usize, [[f32; 4]; 4], f32)],
+    seconds: f32,
+) -> Vec<(usize, [[f32; 4]; 4])> {
+    let bases = foliage
+        .iter()
+        .map(|(_, matrix, _)| [matrix[3][0], matrix[3][1], matrix[3][2]])
+        .collect::<Vec<_>>();
+    let pushes = match world.get_resource::<super::PhysicsWorld>() {
+        Some(physics) if !foliage.is_empty() => {
+            physics.field_accelerations(world, &bases, seconds)
+        }
+        _ => vec![[0.0; 3]; foliage.len()],
+    };
+    foliage
+        .iter()
+        .zip(bases)
+        .zip(pushes)
+        .map(|((&(at, rest, sway), base), push)| {
+            let lean = nalgebra::Vector2::new(push[0], push[2]) * sway;
+            // Past 45 degrees a copy would stretch more than it leans.
+            let lean = lean.cap_magnitude(1.0);
+            let matrix = super::lean_matrix(base, [lean.x, lean.y])
+                * nalgebra::Matrix4::from(rest);
+            (at, matrix.into())
+        })
+        .collect()
+}
+
 fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
     let mut query = world.query::<(
         Entity,
@@ -768,13 +1057,14 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
         &MeshRenderer,
         Option<&RenderBounds>,
         Option<&super::SkinnedMesh>,
+        Option<&super::Foliage>,
     )>();
     let world_ref = &*world;
     let mut renderables = query
         .iter(world_ref)
         .filter(|(entity, ..)| visible_in_hierarchy(world_ref, *entity))
-        .map(|(entity, transform, renderer, bounds, skinned)| {
-            ExtractedRenderable {
+        .flat_map(|(entity, transform, renderer, bounds, skinned, foliage)| {
+            let renderable = ExtractedRenderable {
                 entity,
                 transform: *transform,
                 mesh: skinned.map_or(renderer.mesh, |skinned| skinned.mesh),
@@ -782,9 +1072,43 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
                 cast_shadows: renderer.cast_shadows,
                 receive_shadows: renderer.receive_shadows,
                 bounds: bounds.copied(),
-            }
+            };
+            let Some(foliage) = foliage else {
+                return vec![renderable];
+            };
+            let model = nalgebra::Matrix4::from(transform.matrix);
+            foliage
+                .placements()
+                .into_iter()
+                .map(|local| ExtractedRenderable {
+                    transform: GlobalTransform {
+                        matrix: (model * local).into(),
+                    },
+                    ..renderable
+                })
+                .collect()
         })
         .collect::<Vec<_>>();
+    let mut terrains =
+        world.query::<(Entity, &GlobalTransform, &super::TerrainChunks)>();
+    let world_ref = &*world;
+    for (entity, transform, chunks) in terrains.iter(world_ref) {
+        if !visible_in_hierarchy(world_ref, entity) {
+            continue;
+        }
+        renderables.extend(chunks.meshes.iter().map(|&mesh| {
+            ExtractedRenderable {
+                entity,
+                transform: *transform,
+                mesh,
+                material: chunks.material,
+                cast_shadows: chunks.cast_shadows,
+                receive_shadows: true,
+                bounds: None,
+            }
+        }));
+    }
+    // The sort is stable, so one owner's copies keep their scatter order.
     renderables.sort_by_key(|renderable| {
         (
             renderable.mesh.key(),
@@ -957,6 +1281,19 @@ fn collect_spot_lights(world: &mut World) -> Vec<ExtractedSpotLight> {
 }
 
 /// The environment component on the lowest entity, so the pick is stable.
+/// The shader source of the first `T` in entity order, or empty.
+fn first_source<T: Component>(
+    world: &mut World,
+    source: impl Fn(&T) -> &String,
+) -> String {
+    let mut query = world.query::<(Entity, &T)>();
+    query
+        .iter(world)
+        .min_by_key(|(entity, _)| entity.index())
+        .map(|(_, shader)| source(shader).clone())
+        .unwrap_or_default()
+}
+
 fn collect_first<T: Component + Copy>(world: &mut World) -> Option<T> {
     let mut query = world.query::<(Entity, &T)>();
     query
@@ -1039,8 +1376,8 @@ fn custom_solver_shaders(
 mod tests {
     use std::time::Duration;
 
-    use crate::assets::AssetServer;
     use crate::Transform;
+    use crate::assets::AssetServer;
 
     use super::*;
 
@@ -1050,6 +1387,121 @@ mod tests {
             material: server.fallback_material,
             cast_shadows: true,
             receive_shadows: true,
+        }
+    }
+
+    #[test]
+    fn foliage_scatters_copies_that_lean_with_wind_fields() {
+        use crate::runtime::{
+            Collider, ColliderShape, FieldKind, Foliage, ForceField,
+            PhysicsBody, RigidBody, RigidBodyKind,
+        };
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let server = AssetServer::default();
+        let renderer = renderer(&server);
+        app.insert_resource(server);
+        let foliage = Foliage {
+            count: 50,
+            radius: 2.0,
+            ..Foliage::default()
+        };
+        let owner =
+            app.spawn((Transform::new([10.0, 0.0, 0.0]), renderer, foliage));
+        app.spawn((Transform::default(), renderer));
+        let wind = app.spawn((
+            Transform::new([10.0, 0.0, 0.0]),
+            PhysicsBody::default(),
+            RigidBody {
+                kind: RigidBodyKind::Fixed,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::Box {
+                    half_extents: [3.0; 3],
+                },
+                sensor: true,
+                ..Collider::default()
+            },
+            ForceField {
+                kind: FieldKind::Wind,
+                strength: 10.0,
+                direction: [1.0, 0.0, 0.0],
+                ..ForceField::default()
+            },
+        ));
+        let step = |app: &mut App| {
+            for _ in 0..3 {
+                app.update(Duration::from_secs_f64(1.0 / 60.0)).unwrap();
+            }
+        };
+        step(&mut app);
+        let copies = |app: &App| {
+            app.world()
+                .resource::<RenderWorld>()
+                .renderables
+                .iter()
+                .filter(|renderable| renderable.entity == owner)
+                .map(|renderable| renderable.transform.matrix)
+                .collect::<Vec<_>>()
+        };
+        let leaned = copies(&app);
+        assert_eq!(leaned.len(), 50, "the owner draws only its copies");
+        assert_eq!(app.world().resource::<RenderWorld>().renderables.len(), 51);
+        assert_eq!(foliage.placements(), foliage.placements());
+        for matrix in &leaned {
+            let [x, _, z, _] = matrix[3];
+            assert!(((x - 10.0).powi(2) + z * z).sqrt() <= 2.0 + 1e-4);
+            // Steady 10 m/s² wind along +x at sway 0.03: 0.3 m per metre.
+            let [lean_x, up, lean_z, _] = matrix[1];
+            assert!((lean_x / up - 0.3).abs() < 1e-4, "{lean_x} {up}");
+            assert!(lean_z.abs() < 1e-4);
+        }
+        app.world_mut().entity_mut(wind).remove::<ForceField>();
+        step(&mut app);
+        for matrix in copies(&app) {
+            assert!(matrix[1][0].abs() < 1e-6, "no wind, standing straight");
+        }
+    }
+
+    #[test]
+    fn sub_emitters_follow_a_plain_gpu_parent_and_step_after_it() {
+        use crate::runtime::{
+            ParticleEmitter, ParticleSimulation, ParticleSystem,
+        };
+        let gpu = |on_parent_death| {
+            (
+                ParticleEmitter {
+                    simulation: ParticleSimulation::Gpu,
+                    max_particles: 10,
+                    on_parent_death,
+                    ..ParticleEmitter::default()
+                },
+                ParticleSystem::default(),
+            )
+        };
+        let mut world = World::new();
+        // Spawned first, so it sorts first by entity alone.
+        let child = world.spawn(gpu(3)).id();
+        let orphan = world.spawn(gpu(3)).id();
+        let parent = world.spawn(gpu(0)).id();
+        let grandchild = world.spawn(gpu(2)).id();
+        world
+            .entity_mut(child)
+            .insert(crate::runtime::Parent(parent));
+        world
+            .entity_mut(grandchild)
+            .insert(crate::runtime::Parent(child));
+        let batches = collect_gpu_particles(&mut world);
+        let found = batches
+            .iter()
+            .map(|batch| (batch.entity, batch.parent, batch.max_particles))
+            .collect::<Vec<_>>();
+        // The sub-emitter steps last, with a slot per parent slot spawn.
+        assert_eq!(found[3], (child, Some((parent, 3)), 30));
+        // No parent, and no sub-emitter parent: plain emitters.
+        for plain in [orphan, parent, grandchild] {
+            assert!(found[..3].contains(&(plain, None, 10)));
         }
     }
 
@@ -1269,6 +1721,76 @@ mod tests {
     }
 
     #[test]
+    fn decals_wait_for_their_image() {
+        use crate::runtime::Decal;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        app.spawn((
+            Transform::default(),
+            Decal {
+                texture: "missing.png".into(),
+                ..Decal::default()
+            },
+        ));
+        app.spawn((
+            Transform::new([1.0, 0.0, 0.0]),
+            Decal {
+                extents: [2.0, 1.0, 0.5],
+                ..Decal::default()
+            },
+        ));
+        app.update(Duration::ZERO).unwrap();
+        let decals = &app.world().resource::<RenderWorld>().decals;
+        assert_eq!(decals.len(), 1, "the unloaded image is skipped");
+        let corner = nalgebra::Matrix4::from(decals[0].0)
+            * nalgebra::Vector4::new(1.0, 1.0, 1.0, 1.0);
+        assert_eq!(corner, nalgebra::Vector4::new(3.0, 1.0, 0.5, 1.0));
+    }
+
+    #[test]
+    fn particle_shaders_reach_the_renderer_only_on_emitters() {
+        use crate::runtime::{ParticleEmitter, ParticleShader};
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let shader = || ParticleShader {
+            source: "#rusting particle 1".into(),
+        };
+        let emitter = app.spawn((ParticleEmitter::default(), shader()));
+        app.spawn(shader());
+        app.update(Duration::ZERO).unwrap();
+        let shaders = &app.world().resource::<RenderWorld>().particle_shaders;
+        assert_eq!(shaders.len(), 1, "{shaders:?}");
+        assert_eq!(shaders[&emitter], shader().source);
+    }
+
+    #[test]
+    fn fog_volumes_carry_their_box_in_entity_order() {
+        use crate::runtime::FogVolume;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let first = app.spawn((
+            Transform::new([1.0, 2.0, 3.0]),
+            FogVolume {
+                extents: [2.0, 1.0, 0.5],
+                ..FogVolume::default()
+            },
+        ));
+        app.spawn((Transform::default(), FogVolume::default()));
+        app.update(Duration::ZERO).unwrap();
+        let volumes = &app.world().resource::<RenderWorld>().fog_volumes;
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes[0].1.extents, [2.0, 1.0, 0.5]);
+        // The box corner (1, 1, 1) lands at position plus extents.
+        let corner = nalgebra::Matrix4::from(volumes[0].0)
+            * nalgebra::Vector4::new(1.0, 1.0, 1.0, 1.0);
+        assert_eq!(corner, nalgebra::Vector4::new(3.0, 3.0, 3.5, 1.0));
+        app.world_mut().despawn(first);
+        app.update(Duration::ZERO).unwrap();
+        let volumes = &app.world().resource::<RenderWorld>().fog_volumes;
+        assert_eq!(volumes.len(), 1);
+    }
+
+    #[test]
     fn viewport_cameras_draw_over_the_full_window_one_in_priority_order() {
         let mut app = App::new();
         app.add_plugin(RenderExtractPlugin).unwrap();
@@ -1362,11 +1884,12 @@ mod tests {
         ));
         app.update(Duration::ZERO).unwrap();
         // No policy, no LOD.
-        assert!(app
-            .world()
-            .resource::<RenderWorld>()
-            .gpu_observers
-            .is_empty());
+        assert!(
+            app.world()
+                .resource::<RenderWorld>()
+                .gpu_observers
+                .is_empty()
+        );
         let lod = super::super::GpuSimulationLod {
             full_radius: 10.0,
             reduced_radius: 30.0,
@@ -1417,11 +1940,12 @@ mod tests {
         let light = app.spawn((Transform::default(), PointLight::default()));
         app.set_parent(light, parent).unwrap();
         app.update(Duration::ZERO).unwrap();
-        assert!(app
-            .world()
-            .resource::<RenderWorld>()
-            .point_lights
-            .is_empty());
+        assert!(
+            app.world()
+                .resource::<RenderWorld>()
+                .point_lights
+                .is_empty()
+        );
 
         app.world_mut()
             .get_mut::<Visibility>(parent)

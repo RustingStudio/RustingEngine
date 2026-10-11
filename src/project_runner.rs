@@ -4677,6 +4677,9 @@ impl WindowRunner {
             )
             .expect("failed to create game scene renderer"),
         );
+        runtime
+            .world_mut()
+            .insert_resource(crate::runtime::GpuSkinning);
         self.cloth = crate::rendering::gpu_cloth::GpuClothRunner::new(
             self.vulkan.device().clone(),
             renderer.graphics_queue(),

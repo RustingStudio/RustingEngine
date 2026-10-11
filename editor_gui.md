@@ -279,7 +279,9 @@ editor. Results appear in `Cargo Output`.
   shadow map size (Auto, Low, Medium or High); Auto follows the quality
   profile. Like VSync, these two are not saved with the scene. MSAA 2x falls back to off
   on a GPU without it, and "MSAA in use" shows the count the renderer
-  picked.
+  picked. When a surface, sky, fog, particle, post or condition shader fails
+  to build, a "Shader errors" section lists the compiler messages; it
+  clears on the frame after the source is fixed.
 - **Physics Diagnostics** shows which physics backends are available, how
   many bodies run on the GPU and the CPU, the GPU work and readback each
   frame costs, and what falls back when a capacity limit is reached.

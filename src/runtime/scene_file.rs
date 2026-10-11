@@ -1127,6 +1127,7 @@ pub const SPAWN_GRID_COMPONENT: &str = "rusting.spawn_grid";
 pub const SQUASH_COMPONENT: &str = "rusting.squash";
 /// Registry name of the built-in hit flash.
 pub const FLASH_COMPONENT: &str = "rusting.flash";
+pub const MATERIAL_OVERRIDE_COMPONENT: &str = "rusting.material_override";
 /// Registry name of the built-in camera trauma shake.
 pub const CAMERA_SHAKE_COMPONENT: &str = "rusting.camera_shake";
 /// Registry name of the built-in event-triggered sound cue.
@@ -1139,6 +1140,8 @@ pub const SLIDE_SOUND_COMPONENT: &str = "rusting.slide_sound";
 pub const BURST_EMITTER_COMPONENT: &str = "rusting.burst_emitter";
 /// Registry name of the built-in particle emitter.
 pub const PARTICLE_EMITTER_COMPONENT: &str = "rusting.particle_emitter";
+/// Registry name of the built-in particle shader.
+pub const PARTICLE_SHADER_COMPONENT: &str = "rusting.particle_shader";
 /// Registry name of the built-in keyframe animation.
 pub const ANIMATION_COMPONENT: &str = "rusting.animation";
 /// Registry name of the built-in skinned mesh joints.
@@ -1176,6 +1179,14 @@ pub const ENVIRONMENT_MAP_COMPONENT: &str = "rusting.environment_map";
 pub const LIGHT_COOKIE_COMPONENT: &str = "rusting.light_cookie";
 /// Registry name of the built-in reflection probe.
 pub const REFLECTION_PROBE_COMPONENT: &str = "rusting.reflection_probe";
+/// Registry name of the built-in light probe grid.
+pub const LIGHT_PROBE_GRID_COMPONENT: &str = "rusting.light_probe_grid";
+/// Registry name of the built-in baked lightmap.
+pub const LIGHTMAP_COMPONENT: &str = "rusting.lightmap";
+/// Registry name of the built-in foliage scatter.
+pub const FOLIAGE_COMPONENT: &str = "rusting.foliage";
+/// Registry name of the built-in heightmap terrain.
+pub const TERRAIN_COMPONENT: &str = "rusting.terrain";
 /// Registry name of the built-in height fog.
 pub const FOG_COMPONENT: &str = "rusting.fog";
 /// Registry name of the built-in bloom.
@@ -1185,10 +1196,20 @@ pub const AUTO_EXPOSURE_COMPONENT: &str = "rusting.auto_exposure";
 pub const COLOR_GRADING_COMPONENT: &str = "rusting.color_grading";
 /// Registry name of the built-in color lookup table.
 pub const COLOR_LUT_COMPONENT: &str = "rusting.color_lut";
+pub const POST_SHADER_COMPONENT: &str = "rusting.post_shader";
+pub const SKY_SHADER_COMPONENT: &str = "rusting.sky_shader";
+/// Registry name of the built-in fog shader.
+pub const FOG_SHADER_COMPONENT: &str = "rusting.fog_shader";
 /// Registry name of the built-in lens blur.
 pub const DEPTH_OF_FIELD_COMPONENT: &str = "rusting.depth_of_field";
 /// Registry name of the built-in camera motion blur.
 pub const MOTION_BLUR_COMPONENT: &str = "rusting.motion_blur";
+/// Registry name of the built-in daylight sky.
+pub const PROCEDURAL_SKY_COMPONENT: &str = "rusting.procedural_sky";
+/// Registry name of the built-in box of local fog.
+pub const FOG_VOLUME_COMPONENT: &str = "rusting.fog_volume";
+/// Registry name of the built-in projected image.
+pub const DECAL_COMPONENT: &str = "rusting.decal";
 /// Registry name of the built-in fog and grading area.
 pub const POST_VOLUME_COMPONENT: &str = "rusting.post_volume";
 pub const CAMERA_SCREEN_COMPONENT: &str = "rusting.camera_screen";
@@ -1270,6 +1291,9 @@ impl Default for SceneComponentRegistry {
             .register::<super::Flash>(FLASH_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
+            .register::<super::MaterialOverride>(MATERIAL_OVERRIDE_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
             .register::<super::SpawnGrid>(SPAWN_GRID_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
@@ -1277,6 +1301,9 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::ParticleEmitter>(PARTICLE_EMITTER_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::ParticleShader>(PARTICLE_SHADER_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::Animation>(ANIMATION_COMPONENT)
@@ -1351,6 +1378,18 @@ impl Default for SceneComponentRegistry {
             .register::<super::ReflectionProbe>(REFLECTION_PROBE_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
+            .register::<super::LightProbeGrid>(LIGHT_PROBE_GRID_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Lightmap>(LIGHTMAP_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Foliage>(FOLIAGE_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Terrain>(TERRAIN_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
             .register::<super::Fog>(FOG_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
@@ -1366,6 +1405,15 @@ impl Default for SceneComponentRegistry {
             .register::<super::ColorLut>(COLOR_LUT_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
+            .register::<super::PostShader>(POST_SHADER_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::SkyShader>(SKY_SHADER_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::FogShader>(FOG_SHADER_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
             .register::<super::DepthOfField>(DEPTH_OF_FIELD_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
@@ -1373,6 +1421,15 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::PostVolume>(POST_VOLUME_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::FogVolume>(FOG_VOLUME_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Decal>(DECAL_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::ProceduralSky>(PROCEDURAL_SKY_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::CameraScreen>(CAMERA_SCREEN_COMPONENT)
@@ -3109,6 +3166,10 @@ fn runtime_material(
         uv_scale: material.uv_scale,
         uv_offset: material.uv_offset,
         flat_shading: material.flat_shading,
+        splat: false,
+        // ponytail: scene files do not save surface shaders yet; that
+        // needs a cooked format version.
+        shader: String::new(),
         base_color_texture: texture(assets, &material.base_color_texture)?,
         normal_texture: texture(assets, &material.normal_texture)?,
         metallic_roughness_texture: texture(

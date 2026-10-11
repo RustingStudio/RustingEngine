@@ -2429,9 +2429,71 @@ Depends on: Milestones 3 and 4.
   `transmissive_glass_tints_the_refracted_backdrop` under frustum and
   occlusion culling (fails with the refraction path turned off: 255 255
   255); `transitions_list_every_layout_change_between_passes`.
-- [ ] Baked lightmaps with a GPU lightmapper and light probes for dynamic objects.
-- [ ] One real-time GI technique (probe-based DDGI or voxel/SDF GI) with a quality-profile fallback to ambient probes.
-- [ ] Sky system: procedural physical sky, HDRI skies, and sky-derived ambient/specular.
+- [x] Baked lightmaps with a GPU lightmapper and light probes for dynamic objects.
+  Light probes: `rusting.light_probe_grid` (extents, resolution,
+  intensity) spreads up to 64 probes (1..=8 per axis) wall to wall through a
+  world-aligned box. When the grid is added or changes, the shared
+  `capture_faces` helper (also used by reflection probes) renders six
+  16x16 R32G32B32A32 faces per probe with a temporary renderer; they are
+  read back and `ambient_cube` integrates them on the CPU into irradiance
+  over pi toward each axis. Set 2 binding 11 holds the cubes; the fragment
+  shader's `probe_light` blends the eight nearest probes trilinearly,
+  weights the six sides by the squared normal, and replaces the sky,
+  environment and ambient diffuse light inside the box (fading in over the
+  outer tenth). Limits: static bake (moving objects and lights do not
+  update it), every surface uses probes since there are no lightmaps yet,
+  probes inside geometry read black, captured light clamps at 1, no editor
+  gizmo (deferred in `docs/editor-overhaul.md`). Evidence: GPU test
+  `light_probes_light_a_wall_with_the_red_slab_behind_the_camera` (a white
+  wall turns red from a probe that sees an unlit red slab behind the camera,
+  stays gray with the grid elsewhere or removed); it failed with the probe
+  weight zeroed (255 255 255) and with the +Z/-Z sides swapped (202 202
+  202). Unit tests `ambient_cubes_integrate_the_light_from_each_side` and
+  `light_probe_grids_clamp_and_spread_wall_to_wall`.
+  Lightmaps: `rusting.lightmap` (resolution 2..=64, default 16) wraps six
+  square faces of texels around the object's local mesh box (box
+  projection, no UV2). When a lightmapped object, its mesh or material, a
+  light, the ambient or the sky changes, `bake_lightmaps` runs the
+  `lightmap_bake.comp` compute shader once per slot: each texel is projected
+  onto the object's own triangles, then 64 cosine-weighted Hammersley rays
+  (rotated per texel) hit every lightmapped triangle; a hit adds albedo times
+  direct light (shadow rays to each light) plus emissive, a miss adds the
+  sky/ground hemisphere ambient. Set 2 binding 12 holds the texels; the
+  fragment shader blends the three faces the normal points at (squared
+  weights, bilinear) and the result replaces the ambient term after the
+  probe mix, so direct light stays real time. Limits: box projection shares
+  texels on concave meshes, brute force tracing capped at 16384 triangles
+  (no BVH), one bounce, the bake ignores the environment map and light
+  cookies, static bake (moving objects do not update it), no editor rebake
+  button (deferred in `docs/editor-overhaul.md`). Evidence: GPU test
+  `lightmaps_bounce_a_sunlit_red_slab_onto_the_floor` (a white floor under
+  a sunlit red slab, with ambient off, reads red only when both are
+  lightmapped, and stays dark with one of them or none); it failed with the
+  bake's `albedo * direct` zeroed ([0, 0, 0]). Unit test
+  `lightmaps_map_the_mesh_box_onto_the_unit_cube_and_skip_the_rest`. Full
+  check: fmt, clippy (default, `--no-default-features`, `gpu-tests`),
+  `cargo test --workspace` and the gpu-tests run (1000 lib tests) pass.
+- [x] One real-time GI technique (probe-based DDGI or voxel/SDF GI) with a quality-profile fallback to ambient probes.
+  Probe-based: on the High quality profile `rusting.light_probe_grid`
+  recaptures `LIGHT_PROBES_PER_FRAME` (2) probes per frame round robin
+  (`relight_light_probes`), so a grid of 64 probes follows moving objects
+  and lights within 32 frames. Each recapture renders the probe's six
+  16x16 faces with a capture renderer that `capture_faces` now keeps
+  between calls (format and size match), reads them back and patches the
+  probe's ambient cube into a fresh buffer, so frames in flight keep the
+  old one. Eco and Balanced fall back to the probes baked when the grid
+  changes. Limits: one bounce (captures do not see the probe light), each
+  recapture blocks on its readback (ponytail note: move the reduction to
+  compute if it shows in frame pacing), up to 32 frames of lag on a full
+  grid. Evidence: GPU test
+  `high_quality_relights_light_probes_when_the_red_slab_moves_away` (a
+  probe sees an unlit red slab; after the slab moves aside the wall turns
+  gray on High and stays red on Balanced); it failed with the relight call
+  removed ([247, 56, 56]). The light probe test still passes with the
+  cached capturer. Full check: fmt, clippy (default,
+  `--no-default-features`, `gpu-tests`), `cargo test --workspace` and the
+  gpu-tests run (1001 lib tests) pass.
+- [x] Sky system: procedural physical sky, HDRI skies, and sky-derived ambient/specular.
   Partial: `EnvironmentMap { texture, intensity }` (`rusting.environment_map`)
   loads an equirectangular image and replaces the `SkyLight` hemisphere as the
   ambient source. Diffuse samples the second-smallest mip along the normal;
@@ -2446,10 +2508,41 @@ Depends on: Milestones 3 and 4.
   (a repeating sampler blended the top row with the bottom one) and before
   the mip chain (rough metal stayed pure red). Unit test
   `environment_maps_resolve_their_texture_and_reach_the_render_world`.
+  Partial (procedural sky): `ProceduralSky { intensity, haze, ground_color,
+  sun_size }` (`rusting.procedural_sky`) draws a single-scattering daylight
+  sky (Rayleigh air, Mie haze, Kasten-Young air mass, `src/shaders/sky.glsl`)
+  behind the scene, with a sun disc, under the fog. The sun is the shadowed
+  directional light, else the first one. Without an environment map, a
+  compute pass bakes the sky into a 128x64 half-float equirect with a mip
+  chain, re-baked only when the sun or settings change, and binds it as the
+  environment, so surfaces get sky ambient and specular. Known ceilings: one
+  scattering bounce, no night sky or moon, no `.hdr` HDRI loading, and
+  environment maps are still not drawn as the background. Evidence: GPU test
+  `the_procedural_sky_follows_the_sun_and_lights_the_scene` (horizon blue at
+  noon, red at sunset, a bright disc, and a slab lit with no ambient light);
+  it failed with the sky pass gated off (black background) and with the bake
+  not bound (slab unchanged). Unit test
+  `the_sun_is_the_shadowed_light_and_sets_the_sky_brightness`.
+  HDRI: textures loaded from Radiance `.hdr` files (own RGBE decoder in
+  `src/assets/radiance.rs`, flat and run-length scanlines) upload as
+  `R16G16B16A16_SFLOAT` (`TextureColorSpace::Hdr`), so environment light
+  keeps values above 1. `EnvironmentMap.background` draws the map behind the
+  scene in the sky pass, under the fog. Done with known ceilings: box-filtered
+  mips instead of GGX prefiltering, single-scattering sky with no night sky,
+  old-style run-length `.hdr` files rejected, and the editor's asset import
+  does not list `.hdr` yet (deferred in `docs/editor-overhaul.md`).
+  Evidence: GPU test
+  `hdr_environment_maps_draw_behind_the_scene_brighter_than_white` (no
+  background without the flag; a 0.25 red texel shows mid red, a 4.0 texel
+  clips to full red and still shows mid red at intensity 1/16); it failed
+  with the background flag ignored and with the lookup turned half a circle.
+  Unit tests `radiance_files_decode_flat_and_run_length_scanlines` and
+  `half_floats_round_and_clamp`.
 
 ### Screen-space and post effects
 
-- [ ] SSAO, SSR, and screen-space indirect lighting, each independently toggled by quality profile.
+- [x] SSAO, SSR, and screen-space indirect lighting, each independently toggled by quality profile.
+  Done: SSR off on `Eco`, SSAO off on `Eco`, indirect light on `High` only.
   Partial (SSR): frames with a PBR batch under roughness 0.5
   (`SSR_MAX_ROUGHNESS`) split like refraction frames. The `SceneColor` pass
   also copies opaque depth into depth pyramid mip 0; the `Transparent` pass
@@ -2478,8 +2571,22 @@ Depends on: Milestones 3 and 4.
   box darker than open floor, unchanged with the component removed) and
   `atmosphere_effects_combine_with_every_scene_path` (frustum and
   occlusion culling, MSAA off and 4x, opaque and glossy); pass table
-  `transitions_list_every_layout_change_between_passes`. Screen-space
-  indirect lighting is not started.
+  `transitions_list_every_layout_change_between_passes`.
+  Indirect light: `rusting.ambient_occlusion.indirect` above 0 turns it on,
+  `High` profile only. Those frames make the `SceneColor` copy; the next
+  frame's `AmbientOcclusion` trace reprojects each occluding sample into that
+  copy with last frame's view projection and averages the colors it sees
+  (cosine-weighted samples, so the mean is irradiance over pi). The blur
+  filters it with the same depth weights into an RGBA16F target that set 2
+  binding 10 adds to the diffuse term. Limits: one frame of lag, the first
+  frame after a resize has none, only on-screen occluders inside the radius
+  bounce light, single bounce. Evidence: GPU test
+  `indirect_light_bleeds_a_bright_surface_onto_its_neighbour` (a dark wall
+  turns red beside a glowing red slab on `High`, stays dark at strength 0
+  and on `Balanced`); it failed (red 0 -> 0) with the binding 10 add gated
+  off and with the reprojection matrix zeroed. Pass table tests
+  `every_read_follows_a_write_of_the_same_resource` and
+  `transitions_list_every_layout_change_between_passes`.
 - [x] Bloom/glow, depth of field, motion blur, auto-exposure, color grading LUTs, vignette, and chromatic aberration.
   Partial (bloom): `rusting.bloom` (intensity, threshold, spread). After the
   transparent pass, the `Bloom` compute pass prefilters the HDR target to
@@ -2612,7 +2719,7 @@ Depends on: Milestones 3 and 4.
   cannot tell Catmull-Rom from bilinear in the center tap, because
   sharpening dominates. Full check: fmt, clippy x3 clean; workspace tests
   821 passed; gpu-tests 934 passed.
-- [ ] Volumetric fog with light scattering and fog volumes.
+- [x] Volumetric fog with light scattering and fog volumes.
   Partial (height fog): `rusting.fog` (color, density, height,
   height_falloff, sun_scatter, sky_affect). `src/shaders/fog.glsl`
   integrates exponential height fog along the camera ray in closed form,
@@ -2623,8 +2730,31 @@ Depends on: Milestones 3 and 4.
   (distant red wall and the sky turn fog-colored, near surfaces keep their
   color) and `atmosphere_effects_combine_with_every_scene_path`; unit tests
   `atmosphere_settings_come_from_the_lowest_entity` and
-  `atmosphere_settings_go_on_one_environment_object`. Not started: froxel
-  volumetrics, light shafts through shadows, local fog volumes.
+  `atmosphere_settings_go_on_one_environment_object`.
+  Partial (light shafts): `rusting.fog` `light_shafts` (0..1) scales the
+  sun glow by the share of 16 hard shadow-map taps along the camera ray
+  that the sun reaches (cascade picked per tap, per-pixel interleaved
+  gradient offset), in both the surface fog and the sky pass. Evidence:
+  GPU test `light_shafts_keep_fog_in_a_casters_shadow_dark` (fog in a
+  slab's shadow looking into the sun: 255 with shafts off, under 30 with
+  shafts on, bright again when the sun casts no shadows); dropping the
+  visibility factor or replacing the shadow tap with 1.0 fails it.
+  Fog volumes: `rusting.fog_volume` (color, density, extents) fills an
+  oriented box (object transform times half size) with uniform fog. Up to
+  8 volumes, in entity order, go to the main pass as world-to-box
+  matrices; `fog_volumes()` in `fog.glsl` clips each camera segment to
+  each box and composites them in front of the height fog, on surfaces
+  and in the sky pass (which now also runs when only volumes exist). The
+  editor's fog switch and debug views turn them off. Evidence: GPU test
+  `fog_volumes_fill_only_their_turned_box` (a quarter-turned red box turns
+  the middle column red and leaves the edge column white, hides nothing
+  from behind the slab, reddens the sky in front of it and leaves the sky
+  beside it black); unit test `fog_volumes_carry_their_box_in_entity_order`.
+  Uploading the box matrix without inverting it, or skipping the sky pass
+  for volumes, fails the GPU test. Known limits: no froxel grid (the
+  march runs per shaded pixel); fog volumes are unlit (their color does
+  not react to lights or shadows); only the sun makes shafts, not spot or
+  point lights; volume edges are hard.
   Editor: the Scene view's viewport menu has Scene Effects toggles that
   leave fog, bloom or ambient occlusion out of the Scene view only (Play
   and games draw them all), and a selected Fog draws squares at its
@@ -2712,21 +2842,330 @@ Depends on: Milestones 3 and 4.
 
 ### Geometry and effects
 
-- [ ] GPU particle system reusing the physics compute infrastructure, with collision against physics shapes, attractors, sub-emitters, and trails.
+- [x] GPU particle system reusing the physics compute infrastructure, with collision against physics shapes, attractors, sub-emitters, and trails.
+  Done on lane/render in four steps. Step 1, GPU simulation: `rusting.particle_emitter`
+  takes `simulation` (`Cpu` default, `Gpu`). A GPU emitter's fixed step only
+  counts spawns (same rate, bursts, cycles and seed stream as the CPU path);
+  each frame `gpu_particles.comp` respawns the ring slots the new spawns
+  land in (spawn `n` in slot `n % max_particles`, up to
+  `MAX_GPU_PARTICLES` = 1048576), moves every live particle with gravity,
+  wind and drag, and writes its billboard straight into a vertex buffer the
+  existing particle pipelines draw, so nothing is read back. Shapes,
+  spread, lifetime, speed and size ranges match the CPU path; color and
+  size over life are sampled at 8 points. Inspector: Simulation choice,
+  Max Particles up to 1048576 for GPU. Limits: no turbulence, start
+  colors, rotation, spin, `Local` space, `Velocity` facing or collision
+  restarts; alpha particles are not sorted; steps by frame time, so they
+  freeze while `elapsed_seconds` does. Evidence: GPU test
+  `gpu_particles_spawn_move_and_die_on_the_gpu` (an 8x8 pixel red square
+  spawns, moves 1 m under 100 m/s² wind in 0.1 s, and is gone past its
+  0.15 s lifetime); it failed with the position update removed from the
+  shader ("moved by the wind"). Unit tests
+  `gpu_emitters_only_count_spawns_and_pack_their_settings` and
+  `new_spawns_cap_at_one_ring_and_restart_from_zero`. Full check: fmt,
+  clippy (default, `--no-default-features`, `gpu-tests`), `cargo test
+  --workspace` and the gpu-tests run (1004 lib tests) pass.
+  Step 2, attractors and collision, reusing the physics compute
+  infrastructure: GPU particles feel every GPU force field (directional,
+  radial attractors and repellers, vortex, wind gusts) through
+  `field_push`, now in `src/shaders/physics_fields.glsl` and shared with
+  `physics.comp`. With `collide` on, they bounce off the physics colliders
+  (`physics_shapes.glsl` `shape_distance`, collider restitution). They read
+  the same collider and field uploads (bindings 7 and 14) as GPU physics,
+  now extracted when a GPU emitter exists. Inspector: Collide checkbox for
+  GPU emitters. Limits: each particle tests every collider, ignores
+  collision layers, friction and its own size. Evidence: GPU test
+  `gpu_particles_feel_force_fields_and_stop_at_colliders` (a 100 m/s²
+  field moves a particle 1 m in 0.1 s, then a wall from x = 0.6 holds it).
+  It failed with the field push zeroed ("pushed by the field") and with
+  collision disabled ("stopped by the wall"). The unit test also checks
+  the packed `collide` row. Full check: fmt, clippy (default,
+  `--no-default-features`, `gpu-tests`), `cargo test --workspace` (877
+  lib) and the gpu-tests run (1005 lib) pass.
+  Step 3, trails: `trail` (seconds, GPU emitters) keeps
+  `GPU_TRAIL_POINTS` = 8 past positions per slot after its three particle
+  rows, a new one every `trail / 8` seconds of age (at most one per frame).
+  Each slot draws its billboard plus 8 velocity-style stretched segments
+  back through the points, thinning and fading toward the tail, all in the
+  same instanced draw. Inspector: Trail drag for GPU emitters. Limits:
+  trail spacing is coarse when frames are longer than `trail / 8`; a
+  trailing emitter needs 9 billboards per slot. Evidence: GPU test
+  `gpu_particle_trails_draw_the_path_behind_each_particle` (a particle
+  flying 1 m in 6 frames leaves red behind it with `trail` 0.1 s and none
+  with 0). It failed with the segment size zeroed ("its trail behind it:
+  0"). The unit test checks the trail row. Full check: fmt, clippy
+  (default, `--no-default-features`, `gpu-tests`), `cargo test --workspace`
+  (877 lib) and the gpu-tests run (1006 lib) pass.
+  Step 4, sub-emitters: a GPU emitter with `on_parent_death` N under a
+  parent GPU emitter gets N slots per parent slot. Each frame it steps
+  right after its parent, and when a parent particle dies (the shader
+  flags the death and keeps the spawn number), its N slots respawn at the
+  death point with the child's own settings and a random stream from the
+  parent's spawn number. One level only: a sub-emitter under a sub-emitter
+  is a plain emitter. Inspector: On Parent Death drag for GPU emitters.
+  Evidence: unit test
+  `sub_emitters_follow_a_plain_gpu_parent_and_step_after_it` (parent
+  lookup, slot count, step order, orphans and second-level emitters are
+  plain); GPU test `gpu_sub_emitters_spawn_where_parent_particles_die` (a
+  green parent dies at x = -0.5 and red children appear there, away from
+  the child emitter's own transform, then fly 1 m in 0.1 s). It failed
+  with the parent death check removed ("parent died, children spawned").
+  Full check: fmt, clippy (default, `--no-default-features`,
+  `gpu-tests`), `cargo test --workspace` (878 lib) and the gpu-tests run
+  (1008 lib) pass.
 - [ ] Particle emission driven by physics events: impacts, fracture, debris settling.
+  Partial (lane/render): `ParticleEmitter` gains `impact_speed`,
+  `impact_count` and `on_settle` (`emit_on_impacts` in
+  `src/runtime/particles.rs`, after `update_particles`). Each contact of
+  the emitter's CPU body closing at `impact_speed` m/s or faster spawns
+  `impact_count` particles at the contact point, launched around the
+  contact normal away from the other body; `on_settle` spawns them at the
+  body when it gets `Sleeping`. Contacts come in solver order and spawns
+  take the emitter's spawn numbers, so runs repeat. Inspector rows, schema
+  text and `docs/effects.md` "Impacts and settling" cover it. Evidence:
+  `impacts_and_settling_spawn_particles_where_the_body_hits` (a dropped
+  box spawns a multiple of 6 particles at the floor flying straight up on
+  the landing step, none from resting contacts, 6 more the step it
+  sleeps, and the same particles on a rerun). It failed with the speed
+  threshold removed and with the launch direction flipped. Full check:
+  fmt, clippy x3, `cargo test --workspace` (lib 886) and the gpu-tests run
+  (lib 1018) pass.
+  Not done: fracture events (the engine has no fracture yet); GPU emitters
+  spawn impact particles at the emitter, not the contact point.
 - [ ] Decals, including decals that survive or are invalidated by fracture.
-- [ ] Instanced multi-mesh rendering and foliage scattering with wind driven by physics force fields.
-- [ ] Heightmap terrain rendering with texture splatting and LOD.
-- [ ] Automatic mesh LOD generation at import.
+  Partial (lane/render): `rusting.decal` projects an image (or plain color)
+  along its object's -Z into a box of half size `extents`, painting base
+  color on surfaces facing the projection; up to 16 decals and 4 distinct
+  images per frame (set 2 binding 9), later ones over earlier.
+  Evidence: GPU test
+  `decals_paint_their_image_on_surfaces_facing_the_projection` (image
+  quadrants land on the matching screen quadrants, a decal turned away
+  paints nothing, a half-alpha color decal tints only its box); unit test
+  `decals_wait_for_their_image`. Mutations (flipped uv, no facing fade, no
+  box test) each fail the GPU test. Full check: workspace lib 872 passed,
+  gpu-tests run 994 passed.
+  Not done: fracture survival or invalidation (the engine has no fracture
+  yet), decal normals and roughness, decals on skinned or moving objects
+  following them.
+- [x] Instanced multi-mesh rendering and foliage scattering with wind driven by physics force fields.
+  Evidence: `rusting.foliage` (`Foliage`) on an object with a mesh_renderer
+  draws `count` copies of its mesh (at most 65536) in place of the object,
+  scattered over a disc of `radius` with a seeded yaw and scale. Extraction
+  expands the copies into renderables that share the owner's entity, so
+  they join the existing mesh+material instanced batches and cull one by
+  one; each mesh in a multi-mesh scatter is its own Foliage object. Every
+  frame `PhysicsWorld::field_accelerations` samples the force fields at
+  each copy's base, and the copy leans by `sway` per m/s² of push (a shear
+  keeping heights, capped at 45 degrees), so Wind fields ripple foliage
+  with their gusts. Unit test
+  `foliage_scatters_copies_that_lean_with_wind_fields` (50 copies inside
+  the disc, deterministic layout, 0.3 m/m lean under 10 m/s² wind at sway
+  0.03, upright again once the field is removed); GPU test
+  `foliage_copies_lean_in_wind_fields_when_drawn` (a pillar extracted
+  through a real app: upright pixels lit in still air, the top shifted
+  0.36 m right under wind). Mutation (lean zeroed) fails both tests.
+  Full check: workspace lib 879 passed, gpu-tests run 1010 passed.
+  Not done: lean in the vertex shader (CPU per copy and frame now), rule
+  scattering by slope, height or mask (Milestone 20 item), lean from GPU
+  physics fields alone.
+- [x] Heightmap terrain rendering with texture splatting and LOD.
+  `rusting.terrain` (`src/runtime/terrain.rs`) draws the object's
+  `Heightfield` as chunks of `chunk_cells` cells, each a `LodGroupAsset`
+  of full, half and quarter detail meshes switching at `lod_distance` and
+  twice it, with skirts hiding cracks. Up to four layers (texture tinted by
+  color) pack into a 2x2 atlas; the new `MaterialAsset::splat` makes the
+  main fragment shader blend its quadrants by the vertex-color weights,
+  from `splat[row][column]` or height bands. Built at extraction, so the
+  editor shows it; rebuilt on change. Evidence: unit tests
+  `terrain_splits_into_chunks_with_coarser_lod_meshes`,
+  `terrain_layers_blend_by_height_bands_or_splat_weights`,
+  `terrain_assets_rebuild_on_change_and_free_on_removal`; GPU test
+  `terrain_paints_splat_layers_and_drops_detail_with_distance` (an orange
+  sample column paints at full detail and vanishes at the quarter level).
+  Mutations (splat branch off, LOD ranges infinite) fail them. Full check:
+  fmt, clippy x3 clean; workspace lib 882 passed, gpu-tests run 1014
+  passed (one transient doctest failure passed on rerun).
+- [x] Automatic mesh LOD generation at import.
+  glTF import (`import_gltf` in `src/assets/mod.rs`) gives each static mesh
+  (no skin, no morph targets) of 512 triangles or more up to three coarser
+  levels at about 1/2, 1/4 and 1/8 of its triangles, written next to the
+  cooked mesh as `<mesh>.lodN.rmesh`, plus a `<mesh>.rlod` with screen-size
+  hand-overs at 0.3, 0.12 and 0.05, which `load_mesh` picks up on later
+  loads. `simplify_mesh` (`src/assets/simplify.rs`) clusters vertices on a
+  uniform grid, binary-searching the finest grid that meets the target, and
+  keeps winding. Evidence: `simplified_meshes_meet_the_target_and_keep_their_shape`
+  (2048-triangle grid lands in 512..=1024 and 16..=64 triangles, faces still
+  point up, extent kept) and `gltf_import_generates_lod_levels_for_large_meshes`
+  (1152-triangle glTF gets 3+ levels each at least 25% smaller, last level
+  has no `until`, and a fresh server's `load_mesh` loads the group). A
+  mutation that skipped the grid search failed both. Full check: fmt,
+  clippy x3, `cargo test --workspace` (lib 885) and the gpu-tests run
+  (lib 1017) pass.
 - [ ] Rendering of deformables, fluid surfaces, and debris produced by Milestone 11.
-- [ ] Effect budget and quality-profile scaling for particles and decals.
+  Partial (lane/render): cloth sheets take a material. `rusting.cloth`
+  gains `color` (linear RGBA) and `texture` (asset path); `spawn_cloths`
+  gives a sheet with either set its own material (a texture that fails to
+  load leaves the color), and `cloth_mesh` writes UVs from the rest shape
+  (`rest_uvs`: projected on the first triangle's plane, filling 0..1, top
+  row at v = 0), so the image folds and tears with the cloth. Evidence:
+  unit test `cloth_uvs_follow_the_rest_grid_on_both_sides` (UVs stay on the
+  rest grid on both sides after the particles move);
+  `cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes` now
+  round-trips color and texture and checks the drawn material's color;
+  GPU tests `cloth_textures_land_upright_and_unmirrored` (a 2x2 image's
+  quadrants land on the matching screen quadrants) and
+  `meshes_rebuilt_in_place_redraw_where_their_vertices_went` (a mesh asset
+  edited in place under the same handle redraws at its new place with
+  frustum and occlusion culling, as cloth, soft-body skins and fluid
+  surfaces do each tick). Mutation (v flipped) fails the UV and GPU tests.
+  Full check: fmt, clippy x3, `cargo test --workspace` (lib 887) and the
+  gpu-tests run (lib 1021) pass.
+  Not done: debris (the engine has no fracture yet), soft-body skin
+  textures, fluid surface shading beyond its material, UVs for cloth
+  curved at rest.
+- [x] Effect budget and quality-profile scaling for particles and decals.
+  `particle_budget` and `decal_budget` (`src/rendering/scene_renderer.rs`,
+  next to `light_budget`) cap each frame by the resolved quality profile:
+  1048576 / 524288 / 131072 particles (High and Auto / Balanced / Eco),
+  CPU particles and GPU emitter slots together, and 16 / 8 / 4 decals.
+  Past the particle cap every emitter draws the same share of its
+  particles, a prefix (the oldest CPU particles, whole GPU slots with
+  their trails), so the kept set holds still; simulation is untouched, so
+  runs repeat on every profile. `RenderCapacityDiagnostics` gains
+  `dropped_particles` and `dropped_decals`. Docs: `docs/effects.md`
+  "Budgets", schema text for decals and particle emitters. Evidence: GPU
+  test `effect_budgets_shrink_with_the_quality_profile` (six decals paint
+  at High and Balanced, four at Eco with 2 dropped; 140000 CPU particles
+  plus a 131072-slot GPU emitter draw all at High and Balanced, while at
+  Eco the last CPU particle, a green square, is not drawn and about
+  total - budget are counted dropped). Mutations (no particle share, Eco
+  decal cap at 16) each fail it. Full check: fmt, clippy x3,
+  `cargo test --workspace` (lib 887) and the gpu-tests run (lib 1022)
+  pass.
+  Not done: per-emitter priorities, budgets by screen size or distance.
 
 ### Programmable shading
 
-- [ ] A versioned engine shader language (GLSL-based with engine includes) for surface, unlit, sky, particle, fog, and post-process shaders, with stable uniforms/built-ins.
+- [x] A versioned engine shader language (GLSL-based with engine includes) for surface, unlit, sky, particle, fog, and post-process shaders, with stable uniforms/built-ins.
+  Partial: surface and unlit. `MaterialAsset::shader` takes GLSL headed
+  `#rusting surface 1` that defines `void surface(SurfaceInput i, inout
+  Surface s)`; the built-ins (uv, world_position, view_direction,
+  vertex_color, time; base_color, normal, metallic, roughness, emissive)
+  live in `src/shaders/surface.glsl`, and the scene fragment shader moved to
+  `src/shaders/fragment/scene.frag` with the hook. The renderer splices the
+  hook in, compiles it with `glslc` once per source and sample count, and
+  draws those materials with their own opaque, blended and overlay
+  pipelines; batches split by shader. Unknown headers and compile errors
+  draw the built-in surface and land in
+  `SceneRenderer::surface_shader_errors` with the user's line numbers.
+  Unit test `surface_shaders_need_the_versioned_header`; GPU test
+  `surface_shaders_color_their_material_per_pixel` (a uv gradient beside a
+  built-in grey quad, `i.time` following the clock, version 2 and a typo
+  falling back with errors naming version and `:3:`). Dropping the hook's
+  base_color fails it; so did batching without the shader in the group key.
+  Guide `rusting docs show guide/surface-shaders`. Full check: fmt,
+  clippy x3, `cargo test --workspace` (lib 888) and the gpu-tests run
+  (lib 1025) pass.
+  Post-process: a `PostShader` component (`rusting.post_shader`, saved in
+  scene files) holds GLSL headed `#rusting post 1` that defines `void
+  post(PostInput i, inout vec3 color)` (uv, pixel, texel, time from the
+  fixed tick; `scene_at(uv)` reads the HDR image). The tone-map shader
+  moved to `src/shaders/fragment/tonemap.frag` with the hook after
+  grading, LUT and film effects; the renderer builds one tone-map pipeline
+  per source and sample count and forces the HDR copy on while it runs.
+  Errors leave the image as is and land in `SceneRenderer::post_shader_error`.
+  GPU test `post_shaders_rework_the_finished_image` (uv gradient,
+  `scene_at` shifting the quad half an image, time following the tick,
+  version 2 and a typo leaving the image unchanged with errors naming
+  version and `:3:`, clearing it restores the built-in); binding the
+  built-in pipeline instead fails it. Full check: fmt, clippy x3,
+  `cargo test --workspace` (lib 888) and the gpu-tests run (lib 1026) pass.
+  Sky: a `SkyShader` component (`rusting.sky_shader`) holds GLSL headed
+  `#rusting sky 1` defining `void sky(SkyInput i, inout vec3 color)`
+  (direction, time) over the procedural sky or background map, or black;
+  the sky fragment shader moved to `src/shaders/fragment/sky.frag` with the
+  hook, the background pass runs whenever a sky shader is set, and errors
+  keep the built-in background and land in `SceneRenderer::sky_shader_error`.
+  The post and sky pipelines share one per-source cache. GPU test
+  `sky_shaders_paint_only_the_background` (the background turns the
+  view direction's blue while the quad in front keeps its color, time
+  follows the clock, version 2 and a typo leave the background with errors
+  naming version and `:3:`); dropping the hook call fails it. Full check:
+  fmt, clippy x3, `cargo test --workspace` (lib 888) and the gpu-tests run
+  (lib 1027) pass.
+  Particle: a `ParticleShader` component (`rusting.particle_shader`) next
+  to a `ParticleEmitter` holds GLSL headed `#rusting particle 1` defining
+  `void particle(ParticleInput i, inout vec4 color)` (corner, particle
+  color, sprite, time); the particle fragment shader moved to
+  `src/shaders/fragment/particle.frag` with the hook, each emitter's CPU and
+  GPU draws pick alpha and additive pipelines built from its shader
+  (cached per source), and errors keep the built-in look and land in
+  `SceneRenderer::particle_shader_errors`. GPU test
+  `particle_shaders_change_only_their_emitter` (the shaded emitter turns
+  red while the other stays white, alpha 0 by corner leaves background,
+  time follows the clock, a typo keeps the built-in look with the error);
+  dropping the hook call fails it. Unit test
+  `particle_shaders_reach_the_renderer_only_on_emitters`. The GPU-simulated
+  draw path is wired the same way but not covered by its own test. Full
+  check: fmt, clippy x3, `cargo test --workspace` (lib 889) and the
+  gpu-tests run (lib 1029) pass.
+  Fog: a `FogShader` component (`rusting.fog_shader`) holds GLSL headed
+  `#rusting fog 1` defining `void fog(FogInput i, inout vec4 haze)`
+  (start, direction, distance, background, time) over the `Fog` and
+  `FogVolume` result; `fog.glsl` calls the hook at the end of `fog_at` and
+  `fog_sky`, `hooked_glsl` now takes several hooks so the scene shader gets
+  the surface and fog hooks and the sky shader gets the sky and fog hooks,
+  and while a fog shader is set every material draws through the surface
+  pipeline cache (keyed by surface shader, fog shader and samples) and the
+  background pass runs. GPU test `fog_shaders_cover_surfaces_and_the_background`
+  (the quad turns red and the background green, alpha 0.5 dims the quad,
+  time follows the clock, a typo keeps the built-in look with an error
+  naming `:3:`); dropping the hook call in `fog_at` fails it. Unit test
+  `surface_shaders_need_the_versioned_header` covers both hook pairs.
+  Full check: fmt, clippy x3, `cargo test --workspace` (lib 889) and the
+  gpu-tests run (lib 1030) pass.
+  Not done: reflections and environment lighting
+  ignore the sky shader; scene files saving a material's
+  `shader` (needs a cooked format version); the depth prepass and shadows
+  ignore the surface shader; post shaders cannot read depth.
 - [ ] A visual shader graph that compiles to the same language.
-- [ ] Shader hot reload with error reporting in the editor.
-- [ ] Material instancing with per-instance parameter overrides.
+  Partial (lane/render): `rendering::shader_graph::ShaderGraph` is serde
+  data (nodes `Input`, `Constant`, `Add`, `Subtract`, `Multiply`, `Mix`,
+  `Sin`, `Fract`, `Component`; outputs onto `Surface` fields) whose
+  `compile` emits `#rusting surface 1` GLSL, every node a `vec4` read only
+  by later nodes. Evidence: `graphs_compile_in_node_order_and_reject_bad_wiring`
+  (exact GLSL, serde round trip, forward reads, missing nodes, bad lanes
+  and NaN rejected) and `surface_shaders_color_their_material_per_pixel`
+  (a graph-built `mix(blue, red, uv.x)` draws the hand-written gradient's
+  pixels with no shader errors; it failed with `Mix` arguments swapped).
+  `docs/surface-shaders.md` "Shader graphs" covers it. Full check: fmt,
+  clippy x3, `cargo test --workspace` (lib 890) and the gpu-tests run
+  (lib 1031) pass.
+  Not done: the editor node canvas (backlog in `docs/editor-overhaul.md`).
+- [x] Shader hot reload with error reporting in the editor.
+  Evidence: the renderer keys every shader build by its source text and
+  drops builds no material, emitter or scene uses, so editing a shader in
+  the Inspector rebuilds it the next frame. `SceneRenderer::shader_errors`
+  gathers surface, sky/fog, particle, post and condition errors into the
+  `ShaderErrors` resource; the editor inserts it each frame and Render
+  Settings lists it under "Shader errors". `surface_shaders_color_their_material_per_pixel`
+  now fixes a broken material in place and sees its error leave while an
+  unfixed one stays, and the gradient return; it failed with the
+  surface cache's pruning disabled. `panels_expose_missing_assets_and_physics_overflow`
+  checks the panel text; it failed with the error label removed. Full
+  check: fmt, clippy x3, `cargo test --workspace` (lib 889) and the
+  gpu-tests run (lib 1030) pass.
+  Not done: shaders read from files on disk (sources live in scene text).
+- [x] Material instancing with per-instance parameter overrides.
+  Evidence: `rusting.material_override` (base_color, emissive, metallic,
+  roughness, uv_scale, uv_offset; null keeps the material's value) is
+  extracted into `RenderWorld::material_overrides` and written into the
+  per-instance upload, so overridden objects stay in their material's batch.
+  GPU test `material_overrides_recolor_one_object_inside_the_shared_batch`:
+  two quads share one grey material; overriding one red keeps the other grey
+  at the same draw count, switching to blue redraws it, clearing restores
+  grey. Removing the override from the instance-cache comparison fails it
+  ("overridden: [188, 188, 188]"). Applies to the object only, not children.
 
 ### Frame structure
 
@@ -2748,7 +3187,7 @@ Depends on: Milestones 2, 9 (reflection), and 10 (ragdolls).
 
 ### Core animation
 
-- [ ] Skeletal animation with GPU skinning and blend shapes (morph targets).
+- [x] Skeletal animation with GPU skinning and blend shapes (morph targets). Done 2026-10-11: CPU skinning and blend shapes were items 6 and 7 of the Effects and animation track; GPU skinning is step 1 of that item's "Not done" list (below), done with a compute pass instead of skinned vertex shader variants. Tests: `gpu_skinning_draws_what_cpu_skinning_draws` (gpu-tests), `gpu_skinning_keeps_the_copy_cooked_and_lists_a_job`.
 - [x] glTF skin, morph target, and animation import, completing the Milestone 2 deferral. Done in the Effects and animation track, items 6 and 7 (node clips, `rusting.skin` with `.rskin`, `rusting.morph` with `.rmorph` and weight channels). Tests: `add_model_keeps_gltf_skin_and_bends_the_mesh`, `add_model_keeps_gltf_morph_weights_and_reshapes_every_part`, `every_primitive_of_a_skinned_node_gets_the_skin`.
 - [ ] Property animation of any reflected field (the equivalent of `AnimationPlayer`), including method-call and event tracks.
 - [ ] Tweens for scripted interpolation with easing curves.
@@ -4329,8 +4768,8 @@ Goal: games feel alive. Particles, effects and animation, each with editor GUI. 
     - Editor skeleton overlay. `overlay::bone_shapes` gives each joint of a visible skin a small cross and a line from its parent joint. The Scene View draws them in front of meshes (cyan, selection colors when selected), and a click near a bone selects the joint before any mesh. Test: `editor::tests::added_model_skin_joints_follow_renamed_nodes` now also checks 4 joints for two bars and a Tip bone line. Not checked visually.
     - Full check: fmt and clippy ×3 clean. `cargo test --workspace` passes (565 lib tests). With gpu-tests: 650 lib, 26 CLI, 5 vertical slice, 17 doc tests pass.
   - Not done, in order:
-    1. GPU skinning. Add `joints: [u16; 4]` and `weights: [f32; 4]` as a second vertex buffer, bound only for skinned draws. Add a joint-matrix SSBO with one slice per skinned instance; the instance carries its slice offset. Give the forward, depth-prepass, shadow and picking pipelines in `scene_renderer.rs` a skinned variant of each vertex shader. Drop the CPU copy when the GPU path is on. Verify with a gpu-tests render of `bending_bar.gltf` that compares bent pixels with the CPU path.
-    2. Skinned bounds. Culling uses the bent copy's bounds today; the GPU path needs bounds per joint or a padded bind-pose box.
+    1. Done 2026-10-11: GPU skinning. With the `GpuSkinning` resource (inserted by the editor and the windowed game runner; headless renders keep the CPU path as the reference), `update_skins` keeps the copy's cooked vertices and `skin_jobs` lists each copy's joint matrices and shape weights in `RenderWorld::skin_jobs`. `SceneRenderer::prepare_skinning` uploads the cooked vertices, joints, weights and blend shapes once per copy (`rendering::gpu_skinning::SkinInputs`, keyed by copy, rebuilt when the cooked revision changes) and `skinning.comp` writes the morphed then skinned vertices into the copy's prepared vertex buffer (now also a storage buffer) before culling, so forward, prepass, shadow and reflection passes all draw the bent mesh with no shader variants. Verification: `gpu_skinning_draws_what_cpu_skinning_draws` renders a quad with two joints, uneven weights and a blend shape on position and normal (normals shown as color) through the CPU path and the GPU path; at most 8 channels differ by more than 2 while the unbent quad differs in over 100. `gpu_skinning_keeps_the_copy_cooked_and_lists_a_job` checks the copy stays cooked with an unchanged revision and the job list, and that removing the resource returns to CPU bending. Full check: fmt and clippy ×3 clean; `cargo test --workspace` passes (891 lib); with gpu-tests 1033 lib, 32 CLI, 5 vertical slice and 18 doc tests pass. Not checked visually in the editor window.
+    2. Skinned bounds. GPU-bent copies are never frustum culled (bounds dropped); a box per joint or a padded bind-pose box would let them cull. Picking still tests the unbent shape.
 
 ### FOREVER BEAR track
 

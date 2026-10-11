@@ -20,3 +20,28 @@ pub struct MeshRenderer {
     pub cast_shadows: bool,
     pub receive_shadows: bool,
 }
+
+/// Per-object values that replace its material's: a red and a blue crate
+/// share one material and still draw in one instanced batch. Unset fields
+/// keep the material's value.
+#[derive(
+    Component,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(default)]
+pub struct MaterialOverride {
+    /// Linear RGBA, multiplied into the base color texture.
+    pub base_color: Option<[f32; 4]>,
+    /// Linear RGB glow.
+    pub emissive: Option<[f32; 3]>,
+    pub metallic: Option<f32>,
+    pub roughness: Option<f32>,
+    pub uv_scale: Option<[f32; 2]>,
+    pub uv_offset: Option<[f32; 2]>,
+}

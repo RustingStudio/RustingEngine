@@ -1,0 +1,86 @@
+#version 450
+
+// Deforms one mesh: adds its blend shapes, then blends four joints per
+// vertex, the same steps as `runtime::morph_mesh` and `skin_mesh`. See
+// `rendering::gpu_skinning`.
+
+layout(local_size_x = 64) in;
+
+// `SceneVertex`: position, normal, uv, tangent, color in 16 floats.
+layout(set = 0, binding = 0) readonly buffer Base { float base[]; };
+layout(set = 0, binding = 1) writeonly buffer Out { float deformed[]; };
+layout(set = 0, binding = 2) readonly buffer Joints { uvec4 joints[]; };
+layout(set = 0, binding = 3) readonly buffer Weights { vec4 weights[]; };
+// Per blend shape, per vertex: position offset, then normal offset.
+layout(set = 0, binding = 4) readonly buffer Morph { float morph[]; };
+layout(set = 0, binding = 5) readonly buffer Matrices { mat4 matrices[]; };
+layout(set = 0, binding = 6) readonly buffer Shapes { float shape_weights[]; };
+
+layout(push_constant) uniform Counts {
+    // Vertices, joint matrices, blend shapes, 1 when a shape weight is
+    // not zero.
+    uvec4 counts;
+};
+
+const float EPSILON = 1.1920929e-7;
+
+vec3 turn(vec3 value, mat3 by) {
+    vec3 turned = by * value;
+    float length_ = length(turned);
+    return length_ > EPSILON ? turned / length_ : value;
+}
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= counts.x) {
+        return;
+    }
+    uint at = v * 16;
+    vec3 position = vec3(base[at], base[at + 1], base[at + 2]);
+    vec3 normal = vec3(base[at + 3], base[at + 4], base[at + 5]);
+    vec3 tangent = vec3(base[at + 8], base[at + 9], base[at + 10]);
+    for (uint shape = 0; shape < counts.z; shape++) {
+        float weight = shape_weights[shape];
+        if (weight == 0.0) {
+            continue;
+        }
+        uint row = (shape * counts.x + v) * 6;
+        position += vec3(morph[row], morph[row + 1], morph[row + 2]) * weight;
+        normal +=
+            vec3(morph[row + 3], morph[row + 4], morph[row + 5]) * weight;
+    }
+    if (counts.w != 0) {
+        float length_ = length(normal);
+        normal = length_ > EPSILON ? normal / length_ : normal;
+    }
+    vec4 amounts = weights[v];
+    float total = amounts.x + amounts.y + amounts.z + amounts.w;
+    if (counts.y != 0 && total > EPSILON) {
+        mat4 blend = mat4(0.0);
+        for (uint i = 0; i < 4; i++) {
+            uint joint = joints[v][i];
+            if (joint < counts.y) {
+                blend += matrices[joint] * (amounts[i] / total);
+            }
+        }
+        mat3 linear = mat3(blend);
+        mat3 normals =
+            determinant(linear) != 0.0 ? transpose(inverse(linear)) : linear;
+        vec4 moved = blend * vec4(position, 1.0);
+        position = moved.w != 0.0 ? moved.xyz / moved.w : moved.xyz;
+        normal = turn(normal, normals);
+        tangent = turn(tangent, linear);
+    }
+    for (uint i = 0; i < 16; i++) {
+        deformed[at + i] = base[at + i];
+    }
+    deformed[at] = position.x;
+    deformed[at + 1] = position.y;
+    deformed[at + 2] = position.z;
+    deformed[at + 3] = normal.x;
+    deformed[at + 4] = normal.y;
+    deformed[at + 5] = normal.z;
+    deformed[at + 8] = tangent.x;
+    deformed[at + 9] = tangent.y;
+    deformed[at + 10] = tangent.z;
+}

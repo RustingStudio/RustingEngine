@@ -1,0 +1,214 @@
+#version 450
+
+// One frame of one GPU particle emitter: respawns the slots this frame's
+// new spawns land in, moves every live particle, and writes each slot's
+// billboard for the particle pipelines. See `rendering::gpu_particles`.
+
+layout(local_size_x = 64) in;
+
+#include <physics_shapes.glsl>
+#include <physics_fields.glsl>
+
+struct Particle {
+    vec4 position_age;
+    vec4 velocity_lifetime;
+    vec4 size;
+};
+
+// Matches `ParticleVertex` (std430: each vec3 shares a row with a float).
+struct Billboard {
+    vec3 center;
+    float size;
+    vec4 color;
+    vec3 stretch;
+    float rotation;
+};
+
+// Per slot: a `Particle`, then the trail points, newest first.
+layout(set = 0, binding = 0) buffer Particles { vec4 slot_rows[]; };
+layout(set = 0, binding = 1) writeonly buffer Billboards {
+    Billboard billboards[];
+};
+// `GpuParticleBatch::rows`.
+layout(set = 0, binding = 2) readonly buffer Settings { vec4 rows[]; };
+// A sub-emitter's parent `slot_rows`, stepped just before this dispatch.
+layout(set = 0, binding = 3) readonly buffer Parent { vec4 parent_rows[]; };
+
+// Physics colliders, laid out like `physics.comp`'s.
+struct Collider {
+    mat4 model;
+    vec4 shape;
+    vec4 velocity;
+    vec4 material;
+    uvec4 layers;
+};
+layout(set = 0, binding = 7) readonly buffer Colliders { Collider colliders[]; };
+
+layout(push_constant) uniform Step {
+    // First new spawn number (low 32 bits), new spawns, slots, shape.
+    uvec4 spawn;
+    // Stream low and high bits, colliders, force fields.
+    uvec4 seed;
+    // Seconds since the last frame, scene time; for a sub-emitter, spawns
+    // per parent death and parent slot stride in rows, else 0.
+    vec4 time;
+} step;
+
+const uint CURVE = 8u;
+const uint COLOR = 10u;
+const uint SIZE = COLOR + CURVE;
+const float PI = 3.14159265;
+
+uint hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+// Random value in [0, 1) number `index` of spawn `n`.
+float unit(uint n, uint index) {
+    uint h = hash(hash(hash(step.seed.x ^ (index * 0x9e3779b9u)) ^ step.seed.y) ^ n);
+    return float(h >> 8) / 16777216.0;
+}
+
+// Unit vector within `spread` radians of `axis`.
+vec3 cone(vec3 axis, float spread, float u, float v) {
+    float c = 1.0 - u * (1.0 - cos(clamp(spread, 0.0, PI)));
+    float s = sqrt(max(1.0 - c * c, 0.0));
+    vec3 helper = abs(axis.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 side = normalize(cross(helper, axis));
+    vec3 up = cross(axis, side);
+    float a = v * 2.0 * PI;
+    return axis * c + (side * cos(a) + up * sin(a)) * s;
+}
+
+vec4 curve(uint first, float life) {
+    float x = clamp(life, 0.0, 1.0) * float(CURVE - 1u);
+    uint i = min(uint(x), CURVE - 2u);
+    return mix(rows[first + i], rows[first + i + 1u], x - float(i));
+}
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    uint slots = step.spawn.z;
+    if (slot >= slots) {
+        return;
+    }
+    uint points = uint(rows[9].y);
+    uint base = slot * (3u + points);
+    Particle p = Particle(slot_rows[base], slot_rows[base + 1u], slot_rows[base + 2u]);
+    float dt = step.time.x;
+    bool born = false;
+    mat4 frame = mat4(rows[0], rows[1], rows[2], rows[3]);
+    vec3 origin = frame[3].xyz;
+    // The new spawn landing in this slot, if any: the next in the ring, or
+    // for a sub-emitter, one of the spawns of its parent slot's death.
+    uint offset = (slot + slots - step.spawn.x % slots) % slots;
+    bool spawn = offset < step.spawn.y;
+    uint n = step.spawn.x + offset;
+    uint burst = uint(step.time.z);
+    if (burst > 0u) {
+        uint parent = (slot / burst) * uint(step.time.w);
+        spawn = parent_rows[parent + 2u].y > 0.5;
+        n = floatBitsToUint(parent_rows[parent + 2u].z) * burst + slot % burst;
+        origin = parent_rows[parent].xyz;
+    }
+    if (spawn) {
+        vec3 axis = rows[4].xyz;
+        float spread = rows[4].w;
+        vec3 extent = rows[8].xyz;
+        float radius = max(extent.x, 0.0);
+        vec3 start = vec3(0.0);
+        vec3 direction = cone(axis, spread, unit(n, 3u), unit(n, 4u));
+        uint shape = step.spawn.w;
+        if (shape == 1u) {
+            start = (vec3(unit(n, 0u), unit(n, 1u), unit(n, 2u)) * 2.0 - 1.0) * extent;
+        } else if (shape == 2u) {
+            start = cone(axis, PI, unit(n, 0u), unit(n, 1u)) * radius * pow(unit(n, 2u), 1.0 / 3.0);
+        } else if (shape >= 3u) {
+            float a = unit(n, 0u) * 2.0 * PI;
+            float r = shape == 4u ? radius : radius * sqrt(unit(n, 1u));
+            start = vec3(cos(a) * r, 0.0, sin(a) * r);
+            if (shape == 3u) {
+                // Lean outward by the spread at the rim.
+                float lean = radius > 0.0 ? clamp(spread, 0.0, 0.5 * PI) * r / radius : 0.0;
+                direction = normalize(vec3(cos(a) * sin(lean), cos(lean), sin(a) * sin(lean)));
+            }
+        }
+        mat3 rotation = mat3(
+            normalize(frame[0].xyz), normalize(frame[1].xyz), normalize(frame[2].xyz));
+        float speed = mix(rows[6].z, rows[6].w, unit(n, 5u));
+        p.position_age = vec4(mat3(frame) * start + origin, 0.0);
+        p.velocity_lifetime = vec4(
+            rotation * direction * speed, max(mix(rows[6].x, rows[6].y, unit(n, 6u)), 1e-3));
+        // y = died this frame, z = spawn number, for sub-emitters.
+        p.size = vec4(mix(rows[7].x, rows[7].y, unit(n, 7u)), 0.0, uintBitsToFloat(n), 0.0);
+        // Born this frame, so it shows at its start before moving.
+        dt = 0.0;
+        born = true;
+    }
+    float age = p.position_age.w;
+    p.size.y = 0.0;
+    if (p.position_age.w < p.velocity_lifetime.w) {
+        vec3 accel = rows[5].xyz - vec3(0.0, rows[5].w, 0.0)
+            + field_push(p.position_age.xyz, 0.0, step.seed.w, step.time.y);
+        float damp = max(1.0 - rows[7].z * dt, 0.0);
+        p.velocity_lifetime.xyz = (p.velocity_lifetime.xyz + accel * dt) * damp;
+        p.position_age.xyz += p.velocity_lifetime.xyz * dt;
+        // ponytail: every particle tests every collider; walk the physics
+        // collider tree if scenes with many colliders get slow.
+        for (uint i = 0u; rows[8].w > 0.5 && i < step.seed.z; i++) {
+            Collider c = colliders[i];
+            vec3 normal;
+            float distance;
+            shape_distance(c.shape, mat3(c.model), c.model[3].xyz, p.position_age.xyz, normal, distance);
+            if (distance >= 0.0) continue;
+            p.position_age.xyz -= normal * distance;
+            float closing = dot(p.velocity_lifetime.xyz - c.velocity.xyz, normal);
+            if (closing < 0.0) {
+                p.velocity_lifetime.xyz -= (1.0 + c.material.y) * closing * normal;
+            }
+        }
+        p.position_age.w += dt;
+        if (p.position_age.w >= p.velocity_lifetime.w) {
+            p.size.y = 1.0;
+        }
+    }
+    slot_rows[base] = p.position_age;
+    slot_rows[base + 1u] = p.velocity_lifetime;
+    slot_rows[base + 2u] = p.size;
+    bool alive = p.position_age.w < p.velocity_lifetime.w;
+    float life = p.position_age.w / max(p.velocity_lifetime.w, 1e-6);
+    vec4 color = curve(COLOR, life);
+    color.rgb *= rows[7].w;
+    float size = alive ? p.size.x * curve(SIZE, life).x : 0.0;
+    uint first = slot * (1u + points);
+    billboards[first] = Billboard(p.position_age.xyz, size, color, vec3(0.0), 0.0);
+    if (points == 0u) {
+        return;
+    }
+    // A new trail point every `trail / points` seconds of age.
+    float spacing = max(rows[9].x / float(points), 1e-4);
+    bool shift = floor(p.position_age.w / spacing) > floor(age / spacing);
+    for (uint k = points; k > 0u; k--) {
+        uint at = base + 2u + k;
+        if (born) {
+            slot_rows[at] = vec4(p.position_age.xyz, 0.0);
+        } else if (shift) {
+            slot_rows[at] = k == 1u ? vec4(p.position_age.xyz, 0.0) : slot_rows[at - 1u];
+        }
+    }
+    // Segments from the particle back through its points, thinning out.
+    vec3 ahead = p.position_age.xyz;
+    for (uint k = 0u; k < points; k++) {
+        vec3 behind = slot_rows[base + 3u + k].xyz;
+        float taper = 1.0 - float(k + 1u) / float(points + 1u);
+        billboards[first + 1u + k] = Billboard(
+            0.5 * (ahead + behind), size * taper,
+            vec4(color.rgb, color.a * taper), ahead - behind, 0.0);
+        ahead = behind;
+    }
+}

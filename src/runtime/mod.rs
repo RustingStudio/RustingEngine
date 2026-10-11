@@ -48,6 +48,7 @@ mod skinning;
 mod snapshot;
 pub mod soft_body;
 mod state_hash;
+mod terrain;
 #[cfg(test)]
 mod tests;
 mod time;
@@ -126,8 +127,8 @@ pub use signals::{
     Added, Connection, Connections, Removed, Signal, SignalError, SignalEvent,
 };
 pub use skinning::{
-    joint_matrices, morph_mesh, skin_mesh, update_skins, Deformers, Morph,
-    Skin, SkinnedMesh,
+    joint_matrices, morph_mesh, skin_jobs, skin_mesh, update_skins, Deformers,
+    GpuSkinning, Morph, Skin, SkinJob, SkinnedMesh,
 };
 pub use snapshot::{SnapshotError, WorldSnapshot};
 pub use soft_body::{
@@ -135,6 +136,7 @@ pub use soft_body::{
     SoftBody, SoftBodySettings, SoftBodyVolume,
 };
 pub use state_hash::*;
+pub use terrain::{Terrain, TerrainChunks, TerrainLayer, MAX_TERRAIN_LAYERS};
 pub use time::{FrameTime, RandomSeed, TimeControl};
 pub use two_d::*;
 #[cfg(feature = "ui")]
@@ -313,6 +315,7 @@ impl Default for App {
                     particles::restart_on_contact,
                     particles::add_particle_systems,
                     particles::update_particles,
+                    particles::emit_on_impacts,
                 )
                     .chain(),
                 (

@@ -1229,18 +1229,52 @@ pub(super) fn apply_scene_background(
     }
 }
 
+/// Daylight sky computed from the sun: blue overhead, pale toward the
+/// horizon, orange at sunset, dark at night. It is drawn behind everything
+/// and lights surfaces from every side and in their reflections, like an
+/// [`EnvironmentMap`] (which wins for lighting when both exist). The sun
+/// is the shadow-casting directional light, else the first one. The one
+/// on the entity with the lowest ID is used.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProceduralSky {
+    /// Multiplies the sky's brightness, which follows the sun's.
+    pub intensity: f32,
+    /// 0 is clear air, 1 a hazy, washed-out sky with a wide glow around
+    /// the sun.
+    pub haze: f32,
+    /// Linear RGB albedo of the ground seen below the horizon.
+    pub ground_color: [f32; 3],
+    /// Diameter of the drawn sun disc in degrees; 0 hides it. The real sun
+    /// is 0.53.
+    pub sun_size: f32,
+}
+
+impl Default for ProceduralSky {
+    fn default() -> Self {
+        Self {
+            intensity: 1.0,
+            haze: 0.2,
+            ground_color: [0.3, 0.28, 0.25],
+            sun_size: 1.0,
+        }
+    }
+}
+
 /// Equirectangular (2:1) sky image that surfaces reflect and that lights
 /// them from every side, replacing the [`SkyLight`](super::SkyLight)
-/// hemisphere. Rough surfaces sample blurrier mip levels. The one on the
+/// hemisphere. Rough surfaces sample blurrier mip levels. A Radiance `.hdr`
+/// image keeps light brighter than white, such as the sun. With
+/// `background`, the image is also drawn behind the scene. The one on the
 /// entity with the lowest ID is used.
-// ponytail: 8-bit images only, so reflections top out at `intensity`; add
-// `.hdr` loading with the sky system milestone.
 #[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EnvironmentMap {
     /// Image path relative to the project's `assets` folder.
     pub texture: std::path::PathBuf,
     pub intensity: f32,
+    /// Draws the image behind the scene, in place of the clear color.
+    pub background: bool,
     /// The loaded `texture`, set by the engine.
     #[serde(skip)]
     pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
@@ -1251,6 +1285,7 @@ impl Default for EnvironmentMap {
         Self {
             texture: std::path::PathBuf::new(),
             intensity: 1.0,
+            background: false,
             handle: None,
         }
     }
@@ -1279,6 +1314,147 @@ impl Default for ReflectionProbe {
     }
 }
 
+/// Grid of light probes filling a world-aligned box of half size `extents`
+/// around the object: each probe records the light arriving from six
+/// directions, and surfaces inside the box take their ambient light from
+/// the nearest probes instead of the sky or environment, so a dark room
+/// stays dark and a red wall tints what stands next to it. The first one in
+/// entity order is used. Baked when the grid is added or changes; the High
+/// quality profile also recaptures two probes per frame, so moving objects
+/// and lights relight the grid within a few frames (one bounce). Eco and
+/// Balanced keep the baked probes.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LightProbeGrid {
+    /// Half size of the box along each world axis.
+    pub extents: [f32; 3],
+    /// Probes along each axis, spread from wall to wall. The renderer
+    /// clamps each to 1..=8 and the total to 64.
+    pub resolution: [u32; 3],
+    pub intensity: f32,
+}
+
+impl Default for LightProbeGrid {
+    fn default() -> Self {
+        Self {
+            extents: [5.0; 3],
+            resolution: [3; 3],
+            intensity: 1.0,
+        }
+    }
+}
+
+/// Bakes the light bouncing onto this object into a lightmap: six square
+/// faces of `resolution` texels wrapped around its mesh's box. Each texel
+/// sees the sky and the direct light reflected off other lightmapped
+/// objects, and replaces the sky, environment and probe light on the
+/// object's surface. Direct light stays real-time.
+// ponytail: box-projected, so concave meshes share texels between hidden
+// and visible faces; a UV2 unwrap would fix that. Baked when lightmapped
+// objects, their meshes or materials, or lights change.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Lightmap {
+    /// Texels along each side of each face, clamped to 2..=64.
+    pub resolution: u32,
+}
+
+impl Default for Lightmap {
+    fn default() -> Self {
+        Self { resolution: 16 }
+    }
+}
+
+/// Scatters `count` copies of this object's mesh over a disc of `radius`
+/// metres on its local XZ plane, each turned and scaled at random by
+/// `seed`, in place of the single object. Copies share the object's
+/// material, so they draw as one instanced batch. Wind and other force
+/// fields lean each copy away from its base by `sway` per m/s² of push.
+// ponytail: the lean is computed on the CPU per copy and frame; move it
+// into the vertex shader if scattered counts reach the 100k range.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Foliage {
+    /// Copies drawn, at most [`MAX_FOLIAGE_COPIES`].
+    pub count: u32,
+    /// Disc radius in metres.
+    pub radius: f32,
+    /// Picks the scatter; the same seed gives the same layout.
+    pub seed: u32,
+    /// Smallest and largest uniform scale of a copy.
+    pub scale_min: f32,
+    pub scale_max: f32,
+    /// Lean per m/s² of force field push, in metres per metre of height.
+    pub sway: f32,
+}
+
+/// Most copies one [`Foliage`] draws.
+pub const MAX_FOLIAGE_COPIES: u32 = 65_536;
+
+impl Default for Foliage {
+    fn default() -> Self {
+        Self {
+            count: 100,
+            radius: 5.0,
+            seed: 0,
+            scale_min: 0.8,
+            scale_max: 1.2,
+            sway: 0.03,
+        }
+    }
+}
+
+impl Foliage {
+    /// Local matrix of each copy: a point in the disc, a yaw and a scale.
+    #[must_use]
+    pub fn placements(&self) -> Vec<nalgebra::Matrix4<f32>> {
+        let seed = crate::runtime::RandomSeed(u64::from(self.seed));
+        let streams = [
+            "foliage_angle",
+            "foliage_distance",
+            "foliage_yaw",
+            "foliage_scale",
+        ]
+        .map(|name| crate::runtime::RandomSeed::stream(name, 0));
+        (0..u64::from(self.count.min(MAX_FOLIAGE_COPIES)))
+            .map(|index| {
+                let [angle, distance, yaw, scale] =
+                    streams.map(|stream| seed.unit(index, stream));
+                // sqrt spreads copies evenly over the disc's area.
+                let distance = self.radius.max(0.0) * distance.sqrt();
+                let angle = angle * TAU;
+                let scale =
+                    self.scale_min + (self.scale_max - self.scale_min) * scale;
+                nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
+                    distance * angle.cos(),
+                    0.0,
+                    distance * angle.sin(),
+                )) * nalgebra::Matrix4::from_axis_angle(
+                    &nalgebra::Vector3::y_axis(),
+                    yaw * TAU,
+                ) * nalgebra::Matrix4::new_scaling(scale)
+            })
+            .collect()
+    }
+}
+
+/// Shear that leans everything above world point `base` by `lean` (x and
+/// z metres per metre of height), keeping heights.
+#[must_use]
+pub fn lean_matrix(base: [f32; 3], lean: [f32; 2]) -> nalgebra::Matrix4<f32> {
+    let base = nalgebra::Vector3::from(base);
+    #[rustfmt::skip]
+    let shear = nalgebra::Matrix4::new(
+        1.0, lean[0], 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, lean[1], 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    );
+    nalgebra::Matrix4::new_translation(&base)
+        * shear
+        * nalgebra::Matrix4::new_translation(&-base)
+}
+
 /// Exponential height fog: the scene fades into `color` with distance, and
 /// the fog thins out above `height`. Looking toward the sun brightens it.
 /// The one on the entity with the lowest ID is used.
@@ -1297,6 +1473,10 @@ pub struct Fog {
     pub sun_scatter: f32,
     /// How much the background behind everything fades into the fog.
     pub sky_affect: f32,
+    /// How much shadows block the glow toward the sun, 0 to 1: at 1 the
+    /// fog behind shadow-casting objects stays dark, showing light shafts.
+    /// Needs the sun to cast shadows.
+    pub light_shafts: f32,
 }
 
 impl Default for Fog {
@@ -1308,6 +1488,7 @@ impl Default for Fog {
             height_falloff: 0.1,
             sun_scatter: 0.3,
             sky_affect: 1.0,
+            light_shafts: 0.0,
         }
     }
 }
@@ -1324,6 +1505,32 @@ impl Fog {
             height_falloff: mix(self.height_falloff, other.height_falloff),
             sun_scatter: mix(self.sun_scatter, other.sun_scatter),
             sky_affect: mix(self.sky_affect, other.sky_affect),
+            light_shafts: mix(self.light_shafts, other.light_shafts),
+        }
+    }
+}
+
+/// Uniform fog filling a box of half size `extents` around the object,
+/// turned and scaled with it: mist in a valley, smoke in a room. Volumes
+/// stack in front of `rusting.fog`; the renderer uses the first eight in
+/// entity order.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FogVolume {
+    /// Linear RGB color the box fades into.
+    pub color: [f32; 3],
+    /// Extinction per metre inside the box. 1 hides things 3 m deep.
+    pub density: f32,
+    /// Half size of the box in the object's local axes, in metres.
+    pub extents: [f32; 3],
+}
+
+impl Default for FogVolume {
+    fn default() -> Self {
+        Self {
+            color: [0.6, 0.6, 0.65],
+            density: 0.5,
+            extents: [2.0, 2.0, 2.0],
         }
     }
 }
@@ -1608,6 +1815,10 @@ pub struct AmbientOcclusion {
     pub radius: f32,
     /// Exponent on the occlusion. Above 1 darkens creases more.
     pub intensity: f32,
+    /// Strength of light bounced off nearby surfaces within `radius`
+    /// (screen-space indirect light): a red wall tints the floor beside
+    /// it. 0 turns it off; it runs on the High quality profile only.
+    pub indirect: f32,
 }
 
 impl Default for AmbientOcclusion {
@@ -1615,6 +1826,7 @@ impl Default for AmbientOcclusion {
         Self {
             radius: 1.0,
             intensity: 1.0,
+            indirect: 0.0,
         }
     }
 }
@@ -1637,6 +1849,39 @@ pub struct LightCookie {
     pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
 }
 
+/// Paints an image onto the surfaces inside a box of half size `extents`
+/// around the object, projected along its forward axis (-Z) with the
+/// image's top along +Y: a poster on a wall, a crack, a puddle stain.
+/// Surfaces facing away from the projection get none of it.
+// ponytail: sixteen decals and four distinct images per frame (the first
+// in entity order); move to a texture array and clustered decals if
+// scenes need more.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Decal {
+    /// Image path relative to the project's `assets` folder; empty paints
+    /// plain `color`.
+    pub texture: std::path::PathBuf,
+    /// Linear RGBA multiplied with the image; alpha scales its coverage.
+    pub color: [f32; 4],
+    /// Half size of the box in the object's local axes, in metres.
+    pub extents: [f32; 3],
+    /// The loaded `texture`, set by the engine.
+    #[serde(skip)]
+    pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+}
+
+impl Default for Decal {
+    fn default() -> Self {
+        Self {
+            texture: std::path::PathBuf::new(),
+            color: [1.0; 4],
+            extents: [0.5, 0.5, 0.25],
+            handle: None,
+        }
+    }
+}
+
 /// Color lookup table applied after tone mapping and [`ColorGrading`]: an
 /// image strip of N squares of N x N pixels side by side (for example
 /// 256 x 16 or 1024 x 32). Red runs across each square, green down it, and
@@ -1655,6 +1900,50 @@ pub struct ColorLut {
     pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
 }
 
+/// A `#rusting post 1` shader run on every pixel of the finished image,
+/// after tone mapping, [`ColorGrading`] and [`ColorLut`]. See
+/// `docs/surface-shaders.md`. A shader that fails to compile leaves the
+/// image as is; the error is in `SceneRenderer::post_shader_error`. The one
+/// on the entity with the lowest ID is used.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct PostShader {
+    /// GLSL source starting with `#rusting post 1`.
+    pub source: String,
+}
+
+/// A `#rusting sky 1` shader that colors the background wherever no
+/// surface was drawn, starting from the [`ProceduralSky`] or background
+/// [`EnvironmentMap`] if there is one. Fog still covers it. See
+/// `docs/surface-shaders.md`. A shader that fails to compile leaves the
+/// built-in background; the error is in `SceneRenderer::sky_shader_error`.
+/// The one on the entity with the lowest ID is used.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct SkyShader {
+    /// GLSL source starting with `#rusting sky 1`.
+    pub source: String,
+}
+
+/// A `#rusting fog 1` shader that changes the fog over every surface and
+/// the background, starting from the [`Fog`] and [`FogVolume`]s if there
+/// are any. See `docs/surface-shaders.md`. A shader that fails to compile
+/// leaves the built-in fog; the error is in `SceneRenderer::sky_shader_error`
+/// and `SceneRenderer::surface_shader_errors`. The one on the entity with
+/// the lowest ID is used.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct FogShader {
+    /// GLSL source starting with `#rusting fog 1`.
+    pub source: String,
+}
+
 impl Default for ColorLut {
     fn default() -> Self {
         Self {
@@ -1666,13 +1955,14 @@ impl Default for ColorLut {
 }
 
 /// Loads the image of each added or changed [`EnvironmentMap`],
-/// [`LightCookie`] and [`ColorLut`]. An image whose load failed (file missing or not written
+/// [`LightCookie`], [`Decal`] and [`ColorLut`]. An image whose load failed (file missing or not written
 /// yet) is tried again about every two seconds.
 pub(super) fn load_environment_maps(
     assets: Option<ResMut<crate::assets::AssetServer>>,
     mut maps: Query<&mut EnvironmentMap>,
     mut cookies: Query<&mut LightCookie>,
     mut luts: Query<&mut ColorLut>,
+    mut decals: Query<&mut Decal>,
     mut frame: bevy_ecs::prelude::Local<u32>,
 ) {
     let Some(mut assets) = assets else {
@@ -1720,6 +2010,12 @@ pub(super) fn load_environment_maps(
             bevy_ecs::change_detection::DetectChanges::is_changed(&lut);
         let lut = lut.bypass_change_detection();
         load(changed, &lut.texture, &mut lut.handle, "color lut");
+    }
+    for mut decal in &mut decals {
+        let changed =
+            bevy_ecs::change_detection::DetectChanges::is_changed(&decal);
+        let decal = decal.bypass_change_detection();
+        load(changed, &decal.texture, &mut decal.handle, "decal");
     }
 }
 

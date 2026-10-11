@@ -12,35 +12,39 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::World;
 
 use crate::runtime::{
-    AmbientLight, AmbientOcclusion, AutoExposure, Bloom, Camera,
-    DirectionalLight, Fog, MeshRenderer, Name, PointLight, SceneBackground,
-    SkyLight, SpotLight, ToneMapping, AMBIENT_LIGHT_COMPONENT,
-    AMBIENT_OCCLUSION_COMPONENT, AUTO_EXPOSURE_COMPONENT, BACKGROUND_COMPONENT,
-    BLOOM_COMPONENT, ENVIRONMENT_MAP_COMPONENT, FOG_COMPONENT,
-    HUD_ELEMENT_COMPONENT, POST_VOLUME_COMPONENT, SKY_LIGHT_COMPONENT,
-    TILE_MAP_COMPONENT, TONE_MAPPING_COMPONENT,
+    AMBIENT_LIGHT_COMPONENT, AMBIENT_OCCLUSION_COMPONENT,
+    AUTO_EXPOSURE_COMPONENT, AmbientLight, AmbientOcclusion, AutoExposure,
+    BACKGROUND_COMPONENT, BLOOM_COMPONENT, Bloom, Camera, DECAL_COMPONENT,
+    DirectionalLight, ENVIRONMENT_MAP_COMPONENT, FOG_COMPONENT,
+    FOG_VOLUME_COMPONENT, Fog, HUD_ELEMENT_COMPONENT, MeshRenderer, Name,
+    POST_VOLUME_COMPONENT, PROCEDURAL_SKY_COMPONENT, PointLight,
+    SKY_LIGHT_COMPONENT, SceneBackground, SkyLight, SpotLight,
+    TILE_MAP_COMPONENT, TONE_MAPPING_COMPONENT, ToneMapping,
 };
 use crate::runtime::{
     ANIMATION_COMPONENT, ARTICULATION_COMPONENT, AUTO_SIMULATION_COMPONENT,
     AXIS_LOCK_COMPONENT, BURST_EMITTER_COMPONENT, CLOTH_COMPONENT,
     CONNECTIONS_COMPONENT, COUNTER_COMPONENT, DIALOGUE_COMPONENT,
-    FLUID_BLOCK_COMPONENT, FORCE_FIELD_COMPONENT, FRACTURE_COMPONENT,
-    GRAVITY_VOLUME_COMPONENT, HEALTH_COMPONENT, HEIGHTFIELD_COMPONENT,
-    IK_COMPONENT, INPUT_ACTION_COMPONENT, JOINT_COMPONENT,
-    LIGHT_COOKIE_COMPONENT, LOOT_TABLE_COMPONENT, MESH_SURFACES_COMPONENT,
+    FLUID_BLOCK_COMPONENT, FOLIAGE_COMPONENT, FORCE_FIELD_COMPONENT,
+    FRACTURE_COMPONENT, GRAVITY_VOLUME_COMPONENT, HEALTH_COMPONENT,
+    HEIGHTFIELD_COMPONENT, IK_COMPONENT, INPUT_ACTION_COMPONENT,
+    JOINT_COMPONENT, LIGHT_COOKIE_COMPONENT, LIGHT_PROBE_GRID_COMPONENT,
+    LIGHTMAP_COMPONENT, LOOT_TABLE_COMPONENT, MESH_SURFACES_COMPONENT,
     MORPH_COMPONENT, OBJECT_STATE_COMPONENT, PARTICLE_EMITTER_COMPONENT,
-    PHYSICS_MATERIAL_COMPONENT, PHYSICS_SYNC_COMPONENT, PICKUP_COMPONENT,
-    PLATFORMER_CONTROLLER_COMPONENT, PLAYER_CONTROLLER_COMPONENT,
-    POLYGON_COMPONENT, RAGDOLL_COMPONENT, REFLECTION_PROBE_COMPONENT,
-    RENDER_BOUNDS_COMPONENT, REVERB_ZONE_COMPONENT, ROPE_COMPONENT,
-    SCENE_INSTANCE_COMPONENT, SKIN_COMPONENT, SLIDE_SOUND_COMPONENT,
-    SOFT_BLOCK_COMPONENT, SOUND_CUE_COMPONENT, TWEEN_COMPONENT,
-    VEHICLE_COMPONENT, WATER_COMPONENT,
+    PARTICLE_SHADER_COMPONENT, PHYSICS_MATERIAL_COMPONENT,
+    PHYSICS_SYNC_COMPONENT, PICKUP_COMPONENT, PLATFORMER_CONTROLLER_COMPONENT,
+    PLAYER_CONTROLLER_COMPONENT, POLYGON_COMPONENT, RAGDOLL_COMPONENT,
+    REFLECTION_PROBE_COMPONENT, RENDER_BOUNDS_COMPONENT, REVERB_ZONE_COMPONENT,
+    ROPE_COMPONENT, SCENE_INSTANCE_COMPONENT, SKIN_COMPONENT,
+    SLIDE_SOUND_COMPONENT, SOFT_BLOCK_COMPONENT, SOUND_CUE_COMPONENT,
+    TERRAIN_COMPONENT, TWEEN_COMPONENT, VEHICLE_COMPONENT, WATER_COMPONENT,
 };
 use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
     COLOR_LUT_COMPONENT, DEPTH_OF_FIELD_COMPONENT, FLASH_COMPONENT,
-    MOTION_BLUR_COMPONENT, SPAWN_GRID_COMPONENT, SQUASH_COMPONENT,
+    FOG_SHADER_COMPONENT, MATERIAL_OVERRIDE_COMPONENT, MOTION_BLUR_COMPONENT,
+    POST_SHADER_COMPONENT, SKY_SHADER_COMPONENT, SPAWN_GRID_COMPONENT,
+    SQUASH_COMPONENT,
 };
 
 /// Components that together make a World Environment object.
@@ -70,9 +74,13 @@ fn kind(name: &str) -> Kind {
         | AUTO_EXPOSURE_COMPONENT
         | COLOR_GRADING_COMPONENT
         | COLOR_LUT_COMPONENT
+        | POST_SHADER_COMPONENT
+        | SKY_SHADER_COMPONENT
+        | FOG_SHADER_COMPONENT
         | DEPTH_OF_FIELD_COMPONENT
         | MOTION_BLUR_COMPONENT
         | POST_VOLUME_COMPONENT
+        | PROCEDURAL_SKY_COMPONENT
         | AMBIENT_OCCLUSION_COMPONENT => Kind::Environment,
         HUD_ELEMENT_COMPONENT => Kind::Hud,
         TILE_MAP_COMPONENT => Kind::TileMap,
@@ -132,12 +140,20 @@ pub(in crate::editor) fn placement(
             first_with::<crate::runtime::EnvironmentMap>(world)
         }
         FOG_COMPONENT => first_with::<Fog>(world),
+        PROCEDURAL_SKY_COMPONENT => {
+            first_with::<crate::runtime::ProceduralSky>(world)
+        }
         BLOOM_COMPONENT => first_with::<Bloom>(world),
         AUTO_EXPOSURE_COMPONENT => first_with::<AutoExposure>(world),
         COLOR_GRADING_COMPONENT => {
             first_with::<crate::runtime::ColorGrading>(world)
         }
         COLOR_LUT_COMPONENT => first_with::<crate::runtime::ColorLut>(world),
+        POST_SHADER_COMPONENT => {
+            first_with::<crate::runtime::PostShader>(world)
+        }
+        SKY_SHADER_COMPONENT => first_with::<crate::runtime::SkyShader>(world),
+        FOG_SHADER_COMPONENT => first_with::<crate::runtime::FogShader>(world),
         DEPTH_OF_FIELD_COMPONENT => {
             first_with::<crate::runtime::DepthOfField>(world)
         }
@@ -200,6 +216,10 @@ pub(in crate::editor) fn component_help(
             "Copies this object onto a grid when the game runs.",
             "Ball pits, crowds, rows of crates; one object instead of thousands.",
         ),
+        MATERIAL_OVERRIDE_COMPONENT => (
+            "Replaces some of its material's values for this object only.",
+            "A red and a blue crate from one material, still one batch.",
+        ),
         FLASH_COMPONENT => (
             "Tints the object and its children for a moment.",
             "Hits, damage, pickups; game code calls flash.",
@@ -231,6 +251,10 @@ pub(in crate::editor) fn component_help(
         PARTICLE_EMITTER_COMPONENT => (
             "A full particle effect: emission shape, random ranges, forces, size and color over life, glow and blending.",
             "Fire, smoke, snow, rain, leaves, magic. Start from `rusting effect list`.",
+        ),
+        PARTICLE_SHADER_COMPONENT => (
+            "Changes how this object's particles look with your own GLSL.",
+            "Flickering flames, rings, sparkles, color by age or position.",
         ),
         SKIN_COMPONENT => (
             "Joints that bend the object's mesh, with weights from the imported model.",
@@ -392,6 +416,18 @@ pub(in crate::editor) fn component_help(
             "Recolors the final image through a lookup table image.",
             "A film look graded in an image editor.",
         ),
+        POST_SHADER_COMPONENT => (
+            "Runs your own GLSL on every pixel of the final image.",
+            "Outlines, pixelation, a night-vision or heat-haze look.",
+        ),
+        SKY_SHADER_COMPONENT => (
+            "Paints the background with your own GLSL.",
+            "Alien skies, starfields, a stylized gradient or aurora.",
+        ),
+        FOG_SHADER_COMPONENT => (
+            "Changes the fog over everything with your own GLSL.",
+            "Ground mist, colored haze by height, drifting or pulsing fog.",
+        ),
         LIGHT_COOKIE_COMPONENT => (
             "Projects an image through this object's spot light.",
             "Window-frame shadows, leaf patterns, a flashlight logo.",
@@ -400,14 +436,29 @@ pub(in crate::editor) fn component_help(
             "Captures reflections of a local area.",
             "Indoor rooms with shiny floors or glass.",
         ),
+        LIGHT_PROBE_GRID_COMPONENT => (
+            "Bakes the ambient light inside a box from probes.",
+            "Dark interiors, colored light bouncing off walls.",
+        ),
+        LIGHTMAP_COMPONENT => (
+            "Bakes the light bouncing onto a static object.",
+            "Floors and walls tinted by nearby lit surfaces.",
+        ),
+        FOLIAGE_COMPONENT => (
+            "Scatters copies of the mesh, leaning in wind fields.",
+            "Grass, flowers, rocks, debris fields.",
+        ),
+        TERRAIN_COMPONENT => (
+            "Draws the heightfield as painted terrain with LOD.",
+            "Hills, valleys, open-world ground.",
+        ),
         FOG_COMPONENT => (
             "Fades distant objects into a color.",
             "Mood, depth, hiding the far clip plane.",
         ),
-        BLOOM_COMPONENT => (
-            "Makes very bright areas glow.",
-            "Lamps, sun, magic, neon.",
-        ),
+        BLOOM_COMPONENT => {
+            ("Makes very bright areas glow.", "Lamps, sun, magic, neon.")
+        }
         AUTO_EXPOSURE_COMPONENT => (
             "Brightens dark scenes and darkens bright ones, like an eye adapting.",
             "Walking from a dark cave into sunlight.",
@@ -423,6 +474,18 @@ pub(in crate::editor) fn component_help(
         POST_VOLUME_COMPONENT => (
             "Limits this object's fog and color grading to a box around it.",
             "A foggy hall next to a warm office.",
+        ),
+        PROCEDURAL_SKY_COMPONENT => (
+            "Draws a daylight sky that follows the sun and lights the scene.",
+            "Outdoor levels, day-night cycles.",
+        ),
+        DECAL_COMPONENT => (
+            "Paints an image onto the surfaces inside a box.",
+            "Posters, cracks, stains, road markings.",
+        ),
+        FOG_VOLUME_COMPONENT => (
+            "Fills a box around this object with fog, seen from outside too.",
+            "Mist in a valley, smoke in one room.",
         ),
         CAMERA_SCREEN_COMPONENT => (
             "Shows what another camera sees on this mesh.",
@@ -488,11 +551,11 @@ pub(in crate::editor) fn component_label(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Transform;
     use crate::runtime::App;
     use crate::runtime::{
         PICKUP_COMPONENT, SCENE_INSTANCE_COMPONENT, TWEEN_COMPONENT,
     };
-    use crate::Transform;
 
     #[test]
     fn every_engine_component_has_specific_help() {
