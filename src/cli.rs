@@ -5866,7 +5866,14 @@ fn headless_state_hashes(
         config.release,
     )
     .map_err(|error| CliResult::failure("BUILD_FAILED", error, None))?;
-    let report_path = out_dir.join(format!("{}-{ticks}.json", config.name));
+    // Absolute, since the game runs in the project root: a relative root
+    // would be joined twice.
+    let report_path = std::path::absolute(
+        out_dir.join(format!("{}-{ticks}.json", config.name)),
+    )
+    .map_err(|error| {
+        CliResult::failure("IO_ERROR", error.to_string(), Some(out_dir.into()))
+    })?;
     let _ = std::fs::remove_file(&report_path);
     let mut game = if config.one_cpu {
         let mut game = Command::new("taskset");

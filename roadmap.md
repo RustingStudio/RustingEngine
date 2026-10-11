@@ -4113,7 +4113,7 @@ Depends on: Milestones 3, 4, and 21.
 ### Determinism tests
 
 - [ ] Per-tick world-state hashes match between two runs with identical inputs.
-- [ ] Hashes match between debug and release builds.
+- [x] Hashes match between debug and release builds. Done 2026-10-11: new ignored `tests/cli.rs` `every_sample_hashes_alike_in_debug_release_and_on_one_cpu` runs `rusting determinism samples/<name> --ticks 300` on all 13 sample games. It passes the root as a relative path from the repository and uses `CARGO_TARGET_DIR=target/samples`. Each sample is built in debug and release and run headless, and release is also run under `taskset --cpu-list 0`. Every configuration gave the same state hash on all 300 ticks. The test passed here in 562 s. Writing the test found a bug, now fixed: with a relative root, `rusting determinism` and `rusting bisect` failed with `GAME_FAILED` (`No such file or directory`). The game runs in the project root, so the relative hash-report path was joined twice. `headless_state_hashes` now makes it absolute.
 - [ ] Hashes match across differing CPU worker-thread counts.
 - [ ] Hashes match across at least two GPU vendors.
 - [ ] A recorded replay reproduces its original hash sequence.

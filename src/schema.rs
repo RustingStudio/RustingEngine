@@ -1993,7 +1993,11 @@ mod tests {
                 let path = entry.unwrap().path();
                 let name = path.file_name().unwrap().to_string_lossy();
                 if path.is_dir() {
-                    if !name.starts_with('.') && name != "target" {
+                    // Skip hidden folders and generated, ignored output.
+                    if !name.starts_with('.')
+                        && name != "target"
+                        && name != "build"
+                    {
                         folders.push(path);
                     }
                 } else if name.ends_with(".json") || name.ends_with(".rscene") {

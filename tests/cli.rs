@@ -2043,6 +2043,31 @@ fn every_template_and_sample_builds_and_runs_headless() {
     let _ = std::fs::remove_dir_all(parent);
 }
 
+/// Runs `rusting determinism` on every sample game: debug, release, and
+/// release pinned to one CPU (one bevy and rayon worker thread) must give
+/// the same state hash on every tick.
+#[test]
+#[ignore = "builds every sample game in debug and release"]
+fn every_sample_hashes_alike_in_debug_release_and_on_one_cpu() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (sample, _) in SAMPLE_STRENGTH {
+        // A relative root, as people type it.
+        let root = format!("samples/{sample}");
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(["determinism", &root, "--ticks", "300", "--json"])
+            .current_dir(repository)
+            .env("CARGO_TARGET_DIR", repository.join("target/samples"))
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{sample}: {report}");
+        let configurations =
+            report["data"]["configurations"].as_array().unwrap();
+        let names: Vec<_> = configurations.iter().map(|c| &c["name"]).collect();
+        assert_eq!(names, ["debug", "release", "release-one-cpu"], "{report}");
+    }
+}
+
 /// Exports a game through one preset per supported platform (Linux and
 /// Windows, `docs/getting-started.md`). The Linux export runs its own
 /// headless check; the Windows one is run under Wine when it is installed.
