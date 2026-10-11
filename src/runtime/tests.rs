@@ -1653,6 +1653,83 @@ fn custom_solver_files_reach_the_render_world_once_per_path() {
 }
 
 #[test]
+fn cpu_queries_skip_filtered_colliders_and_hit_the_one_behind() {
+    let mut app = App::new();
+    let world = app.world_mut();
+    // Along +x from the origin: a layer-2 box at 2, a sensor at 4, a
+    // layer-1 box at 6 and a box on every layer at 8.
+    let near = cpu_body(world, [2.0, 0.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    world.entity_mut(near).insert(CollisionLayers {
+        memberships: 0b10,
+        filters: u32::MAX,
+    });
+    let sensor =
+        cpu_body(world, [4.0, 0.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    world.get_mut::<Collider>(sensor).unwrap().sensor = true;
+    world.entity_mut(sensor).insert(CollisionLayers {
+        memberships: 0b01,
+        filters: u32::MAX,
+    });
+    let middle =
+        cpu_body(world, [6.0, 0.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    world.entity_mut(middle).insert(CollisionLayers {
+        memberships: 0b01,
+        filters: u32::MAX,
+    });
+    let far = cpu_body(world, [8.0, 0.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    run_fixed_steps(&mut app, 1);
+    let physics = app.world().resource::<PhysicsWorld>();
+    let x = [1.0, 0.0, 0.0];
+    let ray = |mask| physics.raycast([0.0; 3], x, 20.0, mask).unwrap();
+
+    let hit = ray(u32::MAX);
+    assert_eq!((hit.entity, hit.distance), (near, 1.5));
+    // Layer 1: past the layer-2 box to the sensor, which rays do hit.
+    assert_eq!(ray(0b01).entity, sensor);
+    // Layer 4: only the box on every layer.
+    let hit = ray(0b100);
+    assert_eq!((hit.entity, hit.distance), (far, 7.5));
+    // The predicate skips what the mask lets through.
+    let hit = physics
+        .raycast_where([0.0; 3], x, 20.0, 0b01, |entity| entity != sensor)
+        .unwrap();
+    assert_eq!(hit.entity, middle);
+    // A ray ends at its max distance, and one starting inside a box hits
+    // the next one.
+    assert!(physics.raycast([0.0; 3], x, 1.4, u32::MAX).is_none());
+    assert_eq!(
+        physics
+            .raycast([2.0, 0.0, 0.0], x, 20.0, u32::MAX)
+            .unwrap()
+            .entity,
+        sensor
+    );
+
+    // Shape casts take the same mask but skip sensors and `exclude`.
+    let ball = ColliderShape::Sphere { radius: 0.25 };
+    let cast = |mask, exclude| {
+        physics
+            .shape_cast(ball, [0.0; 3], x, 20.0, mask, exclude)
+            .unwrap()
+    };
+    assert_eq!(cast(u32::MAX, None).entity, near);
+    let hit = cast(0b01, None);
+    assert_eq!(hit.entity, middle);
+    assert!((hit.distance - 5.25).abs() < 1e-3, "{hit:?}");
+    assert_eq!(cast(0b01, Some(middle)).entity, far);
+
+    // Overlaps take the mask too, in stable entity order (these bodies
+    // have no `SpawnOrder`).
+    let all = physics.overlap_sphere([5.0, 0.0, 0.0], 1.0, u32::MAX);
+    let mut expected = vec![sensor, middle];
+    expected.sort();
+    assert_eq!(all, expected);
+    assert!(physics
+        .overlap_sphere([5.0, 0.0, 0.0], 1.0, 0b10)
+        .is_empty());
+}
+
+#[test]
 fn cpu_shape_casts_stop_before_colliders_and_characters_slide() {
     let mut app = App::new();
     let world = app.world_mut();
