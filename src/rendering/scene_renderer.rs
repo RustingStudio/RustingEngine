@@ -1304,15 +1304,19 @@ fn light_cookies(render_world: &RenderWorld) -> Vec<Handle<TextureAsset>> {
 /// A decal's box-to-world matrix, settings and image slot.
 type FrameDecal<'a> = (&'a [[f32; 4]; 4], &'a crate::runtime::Decal, f32);
 
-/// The decals the main pass paints, at most [`MAX_DECALS`] in entity
-/// order, with their image slot (-1 for none), and the distinct images in
-/// slot order. A decal whose image finds no free slot is dropped.
+/// The decals the main pass paints, at most `limit` in entity order, with
+/// their image slot (-1 for none), and the distinct images in slot order. A
+/// decal whose image finds no free slot is dropped.
 fn frame_decals(
     render_world: &RenderWorld,
+    limit: usize,
 ) -> (Vec<FrameDecal<'_>>, Vec<Handle<TextureAsset>>) {
     let mut images = Vec::new();
     let mut decals = Vec::new();
     for (matrix, decal) in &render_world.decals {
+        if decals.len() == limit {
+            break;
+        }
         let slot = match decal.handle {
             None => -1.0,
             Some(image) => {
@@ -1327,9 +1331,6 @@ fn frame_decals(
             }
         };
         decals.push((matrix, decal, slot));
-        if decals.len() == MAX_DECALS {
-            break;
-        }
     }
     (decals, images)
 }
@@ -1658,6 +1659,12 @@ pub const MAX_LIGHTS: usize = 1024;
 pub struct RenderCapacityDiagnostics {
     /// Lights beyond [`MAX_LIGHTS`] left out of the latest light upload.
     pub dropped_lights: usize,
+    /// Decals past the quality profile's [`decal_budget`] or without a free
+    /// image slot, left out of the latest frame.
+    pub dropped_decals: usize,
+    /// Particles past the quality profile's [`particle_budget`] left out of
+    /// the latest frame, CPU particles and GPU slots together.
+    pub dropped_particles: usize,
     /// Lights in the latest light upload: directional, point and spot.
     pub lights: usize,
     /// Distinct missing meshes of visible objects; they draw the fallback
@@ -2844,6 +2851,9 @@ impl SceneRenderer {
             };
         }
         self.last_culling_path = path;
+        let quality = resolve_quality(render_world.quality, &self.capabilities);
+        let (decal_limit, particle_limit) =
+            (decal_budget(quality), particle_budget(quality));
         self.prepare_materials(
             assets,
             render_world
@@ -2851,11 +2861,13 @@ impl SceneRenderer {
                 .map(|(texture, ..)| texture)
                 .into_iter()
                 .chain(light_cookies(render_world))
-                .chain(frame_decals(render_world).1)
+                .chain(frame_decals(render_world, decal_limit).1)
                 .chain(render_world.color_lut.map(|(texture, _)| texture))
                 .collect(),
         )?;
         let particle_steps = self.prepare_gpu_particles(render_world)?;
+        let particle_total = particle_total(render_world);
+        let particle_share = particle_share(particle_total, particle_limit);
 
         let carry = self.prepared_physics.as_mut().unwrap().carry.take();
         let physics = self.prepared_physics.as_ref().unwrap();
@@ -3115,7 +3127,8 @@ impl SceneRenderer {
         let fog = render_world
             .fog
             .filter(|fog| lit && effects.fog && fog.density > 0.0);
-        let (decals, decal_images) = frame_decals(render_world);
+        let (decals, decal_images) = frame_decals(render_world, decal_limit);
+        self.capacity.dropped_decals = render_world.decals.len() - decals.len();
         let fog_volumes: &[_] = if lit && effects.fog {
             let volumes = &render_world.fog_volumes;
             &volumes[..volumes.len().min(MAX_FOG_VOLUMES)]
@@ -4775,9 +4788,15 @@ impl SceneRenderer {
                 )?;
             }
         }
+        let mut particles_drawn = 0;
         if !render_world.particles.is_empty() {
-            let (vertices, draws) =
-                particle_draws(&render_world.particles, eye, forward);
+            let (vertices, draws) = particle_draws(
+                &render_world.particles,
+                eye,
+                forward,
+                particle_share,
+            );
+            particles_drawn += vertices.len();
             let upload = self.frame_contexts[self.frame_index]
                 .transient
                 .allocate_slice::<ParticleVertex>(vertices.len() as u64)
@@ -4829,6 +4848,12 @@ impl SceneRenderer {
             let Some(state) = self.gpu_particles.get(&batch.entity) else {
                 continue;
             };
+            // Each slot owns a run of billboards (its head, then trail
+            // points); a prefix of slots keeps whole trails.
+            let slots = batch.max_particles as u64;
+            let kept = particles_kept(slots as usize, particle_share) as u64;
+            particles_drawn += kept as usize;
+            let billboards = kept * (state.billboards.len() / slots.max(1));
             let additive =
                 batch.blend == crate::runtime::ParticleBlend::Additive;
             let pipeline =
@@ -4859,13 +4884,14 @@ impl SceneRenderer {
                     },
                 )
                 .map_err(|error| SceneRenderError(error.to_string()))?;
-            count_work(&recorded, 1, 0, state.billboards.len() * 2);
+            count_work(&recorded, 1, 0, billboards * 2);
             unsafe {
                 commands
-                    .draw(6, state.billboards.len() as u32, 0, 0)
+                    .draw(6, billboards as u32, 0, 0)
                     .map_err(|error| SceneRenderError(error.to_string()))?;
             }
         }
+        self.capacity.dropped_particles = particle_total - particles_drawn;
         // Debug views show raw shader output, so they skip the curve.
         let tone = match options.debug_view {
             SceneDebugView::Lit => {
@@ -9506,10 +9532,15 @@ type ParticleDraw = (bool, u32, u32, u32);
 /// one's particles far to near, then additive batches. Returns the vertices
 /// and, per draw, whether it is additive, its sprite, first instance and
 /// count.
+/// Each batch draws its first [`particles_kept`] particles at `share`: the
+/// oldest, so the kept set holds still from frame to frame.
+// ponytail: a prefix leans toward old particles; keep by spawn number if
+// thinned emitters look lopsided.
 fn particle_draws(
     batches: &[crate::runtime::ParticleBatch],
     eye: [f32; 3],
     forward: [f32; 3],
+    share: f64,
 ) -> (Vec<ParticleVertex>, Vec<ParticleDraw>) {
     use crate::runtime::{ParticleBlend, ParticleSprite};
     let depth = |p: [f32; 3]| {
@@ -9534,7 +9565,8 @@ fn particle_draws(
     let mut draws = Vec::new();
     for (additive, _, batch) in order {
         let first = vertices.len() as u32;
-        let mut instances = batch.instances.clone();
+        let kept = particles_kept(batch.instances.len(), share);
+        let mut instances = batch.instances[..kept].to_vec();
         if !additive {
             instances.sort_by(|a, b| {
                 depth(b.position).total_cmp(&depth(a.position))
@@ -10309,6 +10341,56 @@ pub fn light_budget(profile: QualityProfile) -> usize {
         QualityProfile::Balanced => MAX_LIGHTS / 2,
         QualityProfile::High | QualityProfile::Auto => MAX_LIGHTS,
     }
+}
+
+/// Particles drawn per frame for a resolved profile, CPU and GPU emitters
+/// together; past it every emitter draws the same share of its particles.
+pub fn particle_budget(profile: QualityProfile) -> usize {
+    let most = crate::runtime::MAX_GPU_PARTICLES as usize;
+    match profile {
+        QualityProfile::Eco => most / 8,
+        QualityProfile::Balanced => most / 2,
+        QualityProfile::High | QualityProfile::Auto => most,
+    }
+}
+
+/// Decals painted per frame for a resolved profile; later ones are dropped.
+pub fn decal_budget(profile: QualityProfile) -> usize {
+    match profile {
+        QualityProfile::Eco => MAX_DECALS / 4,
+        QualityProfile::Balanced => MAX_DECALS / 2,
+        QualityProfile::High | QualityProfile::Auto => MAX_DECALS,
+    }
+}
+
+/// The frame's CPU particles and GPU emitter slots.
+fn particle_total(render_world: &RenderWorld) -> usize {
+    render_world
+        .particles
+        .iter()
+        .map(|batch| batch.instances.len())
+        .chain(
+            render_world
+                .gpu_particles
+                .iter()
+                .map(|batch| batch.max_particles as usize),
+        )
+        .sum()
+}
+
+/// Share of each emitter's particles drawn: all of them when
+/// [`particle_total`] fits in `budget`, else budget / total.
+fn particle_share(total: usize, budget: usize) -> f64 {
+    if total <= budget {
+        1.0
+    } else {
+        budget as f64 / total as f64
+    }
+}
+
+/// How many of `count` particles an emitter draws at `share`.
+fn particles_kept(count: usize, share: f64) -> usize {
+    (count as f64 * share) as usize
 }
 
 /// Caps one frame's transient uploads at half the largest device-local heap,
@@ -13975,6 +14057,129 @@ mod tests {
         assert_eq!(pixel(4, 8), grey, "left half untouched");
         let right = pixel(11, 8);
         assert!(right[0] > grey[0] + 40 && right[1] < grey[1], "{right:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn effect_budgets_shrink_with_the_quality_profile() {
+        use crate::runtime::{
+            gpu_particle_batch, ParticleBatch, ParticleBlend, ParticleEmitter,
+            ParticleInstance, ParticleSimulation, ParticleSprite,
+            ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Six red decals in a row across a grey floor, and more particles
+        // than Eco draws: 140000 empty CPU particles and the last one a
+        // green square above the row, plus an idle GPU emitter's slots.
+        let extent = [32, 32];
+        let mut scene = SlabScene::with_extent(
+            &[(
+                0.0,
+                MaterialAsset {
+                    model: MaterialModel::Unlit,
+                    base_color: [0.2, 0.2, 0.2, 1.0],
+                    ..MaterialAsset::default()
+                },
+            )],
+            extent,
+        );
+        let xs: Vec<f32> = (0..6).map(|i| -0.75 + 0.3 * i as f32).collect();
+        scene.render_world.decals = xs
+            .iter()
+            .map(|&x| {
+                let matrix =
+                    Matrix4::new_translation(&Vector3::new(x, 0.0, 0.0))
+                        .prepend_nonuniform_scaling(&Vector3::new(
+                            0.12, 0.12, 0.5,
+                        ));
+                let decal = crate::runtime::Decal {
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    ..crate::runtime::Decal::default()
+                };
+                (matrix.into(), decal)
+            })
+            .collect();
+        let mut instances = vec![ParticleInstance::default(); 140_000];
+        *instances.last_mut().unwrap() = ParticleInstance {
+            position: [0.0, 0.5, 0.5],
+            size: 0.5,
+            color: [0.0, 1.0, 0.0, 1.0],
+            ..ParticleInstance::default()
+        };
+        scene.render_world.particles = vec![ParticleBatch {
+            entity: None,
+            blend: ParticleBlend::Additive,
+            sprite: ParticleSprite::Square,
+            instances,
+        }];
+        let emitter = ParticleEmitter {
+            simulation: ParticleSimulation::Gpu,
+            max_particles: 1 << 17,
+            ..ParticleEmitter::default()
+        };
+        scene.render_world.gpu_particles = vec![gpu_particle_batch(
+            bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            &emitter,
+            &ParticleSystem::default(),
+            None,
+            None,
+        )];
+        let total = 140_000 + (1 << 17);
+        // Pixels are 1/16 m.
+        let column = |x: f32| ((x + 1.0) * 16.0) as u32;
+        for (quality, decals, particle) in [
+            (QualityProfile::High, 6, true),
+            (QualityProfile::Balanced, 6, true),
+            (QualityProfile::Eco, 4, false),
+        ] {
+            scene.render_world.quality = quality;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            let pixel_at = |x: u32, y: u32| {
+                let at = ((y * extent[0] + x) * 4) as usize;
+                [pixels[at + 2], pixels[at + 1], pixels[at]]
+            };
+            let pixel = |x: u32| pixel_at(x, 16);
+            for (index, &x) in xs.iter().enumerate() {
+                let [r, g, _] = pixel(column(x));
+                assert_eq!(
+                    r > g.saturating_add(40),
+                    index < decals,
+                    "{quality:?}: decal {index}"
+                );
+            }
+            assert_eq!(
+                // y = 0.5 is row 8 or 24, whichever way the view is up.
+                pixel_at(16, 8)[1].max(pixel_at(16, 24)[1]) > 200,
+                particle,
+                "{quality:?}: last CPU particle"
+            );
+            let capacity = scene.renderer.capacity_diagnostics();
+            assert_eq!(capacity.dropped_decals, 6 - decals, "{quality:?}");
+            let budget = particle_budget(quality);
+            let dropped = capacity.dropped_particles;
+            if total <= budget {
+                assert_eq!(dropped, 0, "{quality:?}");
+            } else {
+                // Each emitter rounds its share down.
+                assert!(
+                    (total - budget..=total - budget + 2).contains(&dropped),
+                    "{quality:?}: {dropped} dropped"
+                );
+            }
+        }
     }
 
     #[test]

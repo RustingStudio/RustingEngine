@@ -2989,7 +2989,26 @@ Depends on: Milestones 3 and 4.
   Not done: debris (the engine has no fracture yet), soft-body skin
   textures, fluid surface shading beyond its material, UVs for cloth
   curved at rest.
-- [ ] Effect budget and quality-profile scaling for particles and decals.
+- [x] Effect budget and quality-profile scaling for particles and decals.
+  `particle_budget` and `decal_budget` (`src/rendering/scene_renderer.rs`,
+  next to `light_budget`) cap each frame by the resolved quality profile:
+  1048576 / 524288 / 131072 particles (High and Auto / Balanced / Eco),
+  CPU particles and GPU emitter slots together, and 16 / 8 / 4 decals.
+  Past the particle cap every emitter draws the same share of its
+  particles, a prefix (the oldest CPU particles, whole GPU slots with
+  their trails), so the kept set holds still; simulation is untouched, so
+  runs repeat on every profile. `RenderCapacityDiagnostics` gains
+  `dropped_particles` and `dropped_decals`. Docs: `docs/effects.md`
+  "Budgets", schema text for decals and particle emitters. Evidence: GPU
+  test `effect_budgets_shrink_with_the_quality_profile` (six decals paint
+  at High and Balanced, four at Eco with 2 dropped; 140000 CPU particles
+  plus a 131072-slot GPU emitter draw all at High and Balanced, while at
+  Eco the last CPU particle, a green square, is not drawn and about
+  total - budget are counted dropped). Mutations (no particle share, Eco
+  decal cap at 16) each fail it. Full check: fmt, clippy x3,
+  `cargo test --workspace` (lib 887) and the gpu-tests run (lib 1022)
+  pass.
+  Not done: per-emitter priorities, budgets by screen size or distance.
 
 ### Programmable shading
 

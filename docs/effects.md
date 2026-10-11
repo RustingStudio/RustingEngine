@@ -157,6 +157,17 @@ stopped, so `autoplay: false` with `rate: 0` makes an impact-only effect.
 Only CPU bodies have contacts here. A GPU emitter spawns impact particles
 at the emitter, and Local space particles start at the emitter.
 
+## Budgets
+
+The quality profile caps the particles drawn per frame, CPU particles and
+GPU emitter slots together: 1048576 at High and Auto, 524288 at Balanced,
+131072 at Eco. Past the cap every emitter draws the same share of its
+particles, its oldest ones, so the kept set does not flicker. Decals are
+capped too: 16 at High and Auto, 8 at Balanced, 4 at Eco, later ones in
+entity order dropped. Simulation is not thinned, only drawing, so a run
+repeats on every profile. `RenderCapacityDiagnostics::dropped_particles`
+and `dropped_decals` count what the latest frame left out.
+
 ## Determinism
 
 Every random value comes from the scene seed, keyed by the emitter's scene
