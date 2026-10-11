@@ -1183,4 +1183,63 @@ mod tests {
         assert_eq!([x, z], [5.0, -1.0]);
         assert!((0.9..1.0).contains(&y), "{second:?}");
     }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_commands_for_a_despawned_body_skip_the_one_reusing_its_slot() {
+        use crate::rendering::scene_renderer::RenderCapacityDiagnostics;
+        use crate::runtime::{
+            GpuBodyCommand, GpuPhysicsCommands, GpuStateMirror,
+            HybridPhysicsPlugin, PhysicsBody, PhysicsId, PhysicsSyncMode,
+            SimulationClass,
+        };
+
+        let mut app = App::new();
+        app.add_plugin(AssetPlugin).unwrap();
+        app.add_plugin(HybridPhysicsPlugin).unwrap();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let gpu = || PhysicsBody {
+            simulation: SimulationClass::Gpu,
+            ..PhysicsBody::default()
+        };
+        let mut capture = HeadlessCapture::new([16, 16]).unwrap();
+        let mut frames = |app: &mut App, count| {
+            for _ in 0..count {
+                capture.frame(app, Duration::from_millis(16)).unwrap();
+            }
+        };
+        let old = app.spawn((Transform::new([0.0, 5.0, 0.0]), gpu()));
+        frames(&mut app, 3);
+        let old_id = *app.world().get::<PhysicsId>(old).unwrap();
+        app.world_mut().despawn(old);
+        let new = app.spawn((
+            Transform::new([7.0, 5.0, 0.0]),
+            gpu(),
+            PhysicsSyncMode::SelectedState,
+        ));
+        frames(&mut app, 2);
+        let new_id = *app.world().get::<PhysicsId>(new).unwrap();
+        assert_eq!(new_id.slot, old_id.slot);
+        assert_ne!(new_id.generation, old_id.generation);
+        let rejected = |app: &App| {
+            app.world()
+                .resource::<RenderCapacityDiagnostics>()
+                .physics_commands_rejected
+        };
+        let before = rejected(&app);
+        // Gameplay still holding the old ID pushes a big sideways shove; the
+        // new body's own command goes through.
+        let mut commands = app.world_mut().resource_mut::<GpuPhysicsCommands>();
+        commands.push(old_id, GpuBodyCommand::Impulse([50.0, 0.0, 0.0]));
+        commands.push(new_id, GpuBodyCommand::Impulse([0.0, 0.0, 2.0]));
+        frames(&mut app, 6);
+        let mirror = app.world().get::<GpuStateMirror>(new).unwrap();
+        assert_eq!(mirror.linear_velocity[0], 0.0, "{mirror:?}");
+        assert_eq!(mirror.linear_velocity[2], 2.0, "{mirror:?}");
+        assert_eq!(mirror.transform.position[0], 7.0, "{mirror:?}");
+        assert_eq!(rejected(&app) - before, 1);
+    }
 }
