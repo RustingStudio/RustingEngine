@@ -1242,4 +1242,74 @@ mod tests {
         assert_eq!(mirror.transform.position[0], 7.0, "{mirror:?}");
         assert_eq!(rejected(&app) - before, 1);
     }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn each_body_has_one_simulation_owner_and_its_sync_mode() {
+        use crate::runtime::{
+            Collider, GpuStateMirror, HybridPhysicsPlugin, PhysicsBody,
+            PhysicsSyncMode, RigidBody, SimulationClass,
+        };
+
+        let mut app = App::new();
+        app.add_plugin(AssetPlugin).unwrap();
+        app.add_plugin(HybridPhysicsPlugin).unwrap();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let mut spawn = |x: f32, simulation, sync| {
+            app.spawn((
+                Transform::new([x, 5.0, 0.0]),
+                PhysicsBody {
+                    simulation,
+                    ..PhysicsBody::default()
+                },
+                RigidBody::default(),
+                Collider::default(),
+                sync,
+            ))
+        };
+        use PhysicsSyncMode as Sync;
+        let none = spawn(0.0, SimulationClass::None, Sync::FullState);
+        let fixed = spawn(3.0, SimulationClass::Static, Sync::FullState);
+        let cpu = spawn(6.0, SimulationClass::Cpu, Sync::FullState);
+        let gpu = [
+            Sync::None,
+            Sync::Events,
+            Sync::SelectedState,
+            Sync::FullState,
+        ]
+        .map(|sync| {
+            spawn(9.0 + 3.0 * sync as u8 as f32, SimulationClass::Gpu, sync)
+        });
+        let mut capture = HeadlessCapture::new([16, 16]).unwrap();
+        for _ in 0..30 {
+            capture.frame(&mut app, Duration::from_millis(16)).unwrap();
+        }
+        let world = app.world();
+        let height =
+            |entity| world.get::<Transform>(entity).unwrap().position[1];
+        let mirror = |entity| world.get::<GpuStateMirror>(entity);
+        // Unsimulated and static bodies stay put; only the CPU solver
+        // writes `Transform`, and only for its own body.
+        assert_eq!(height(none), 5.0);
+        assert_eq!(height(fixed), 5.0);
+        assert!(height(cpu) < 4.0, "{}", height(cpu));
+        for entity in [none, fixed, cpu] {
+            assert!(mirror(entity).is_none());
+        }
+        // GPU bodies keep their authored transform; their simulated state
+        // reaches the CPU only as far as the sync mode asks.
+        for entity in gpu {
+            assert_eq!(height(entity), 5.0);
+        }
+        assert!(mirror(gpu[0]).is_none());
+        assert!(mirror(gpu[1]).is_none());
+        for (entity, custom) in [(gpu[2], false), (gpu[3], true)] {
+            let state = mirror(entity).unwrap();
+            assert!(state.transform.position[1] < 4.0, "{state:?}");
+            assert_eq!(state.custom_values.is_some(), custom, "{state:?}");
+        }
+    }
 }

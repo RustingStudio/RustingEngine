@@ -51,6 +51,16 @@ pub enum SuiteScene {
     /// onto a floor; the error is the widest gap between joined anchors
     /// in any step, in metres.
     RagdollPile,
+    /// The [`JointChain`](Self::JointChain) hung from a fixed anchor that
+    /// carries an `Articulation`, so its joints are reduced coordinates;
+    /// the error is the widest gap between two joined anchors in any
+    /// step, in metres.
+    ArticulatedChain,
+    /// A player with the default `PlayerController` walks for `steps`
+    /// steps (4 m/s) up a stair of `size` 0.2 m steps, each 1 m deep and
+    /// the top one 20 m deep, starting 1 m before the first; the error is
+    /// how far below the top step's surface its feet end, in metres.
+    CharacterStairs,
 }
 
 /// What one run of a [`SuiteScene`] measured.
@@ -66,7 +76,7 @@ pub struct SuiteScore {
 const DT: f64 = 1.0 / 60.0;
 
 impl SuiteScene {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::StackingStability,
         Self::JointChain,
         Self::CcdBullets,
@@ -75,6 +85,8 @@ impl SuiteScene {
         Self::VehicleStress,
         Self::FractureDrop,
         Self::RagdollPile,
+        Self::ArticulatedChain,
+        Self::CharacterStairs,
     ];
 
     #[must_use]
@@ -88,6 +100,8 @@ impl SuiteScene {
             Self::VehicleStress => "vehicle_stress",
             Self::FractureDrop => "fracture_drop",
             Self::RagdollPile => "ragdoll_pile",
+            Self::ArticulatedChain => "articulated_chain",
+            Self::CharacterStairs => "character_stairs",
         }
     }
 
@@ -103,6 +117,8 @@ impl SuiteScene {
             Self::VehicleStress => "max tilt (rad)",
             Self::FractureDrop => "missing share",
             Self::RagdollPile => "max joint gap (m)",
+            Self::ArticulatedChain => "max joint gap (m)",
+            Self::CharacterStairs => "height short (m)",
         }
     }
 
@@ -148,8 +164,20 @@ impl SuiteScene {
                     .map(|&(cube, start)| distance(position(&app, cube), start))
                     .fold(0.0, f32::max)
             }
-            Self::JointChain => {
+            Self::JointChain | Self::ArticulatedChain => {
                 const HALF: f32 = 0.25;
+                let anchor = (self == Self::ArticulatedChain).then(|| {
+                    let anchor = body(
+                        &mut app,
+                        [0.0, 10.0, 0.0],
+                        ColliderShape::Sphere { radius: 0.05 },
+                        RigidBodyKind::Fixed,
+                    );
+                    app.world_mut()
+                        .entity_mut(anchor)
+                        .insert(super::Articulation::default());
+                    anchor
+                });
                 let mut links: Vec<(Entity, Option<Entity>)> = Vec::new();
                 for index in 0..size {
                     let x = HALF * (2 * index + 1) as f32;
@@ -164,12 +192,12 @@ impl SuiteScene {
                     let previous = links.last().map(|&(link, _)| link);
                     let joint = Joint::new(
                         JointKind::BallSocket,
-                        previous.unwrap_or(Entity::PLACEHOLDER),
+                        previous.or(anchor).unwrap_or(Entity::PLACEHOLDER),
                         [-HALF, 0.0, 0.0],
-                        if previous.is_some() {
-                            [HALF, 0.0, 0.0]
-                        } else {
-                            [0.0, 10.0, 0.0]
+                        match (previous, anchor) {
+                            (Some(_), _) => [HALF, 0.0, 0.0],
+                            (None, Some(_)) => [0.0; 3],
+                            (None, None) => [0.0, 10.0, 0.0],
                         },
                     );
                     app.world_mut().entity_mut(link).insert(joint);
@@ -187,6 +215,48 @@ impl SuiteScene {
                     }
                 }
                 widest
+            }
+            Self::CharacterStairs => {
+                const RISE: f32 = 0.2;
+                body(
+                    &mut app,
+                    [0.0, -0.5, 0.0],
+                    ColliderShape::Box {
+                        half_extents: [3.0, 0.5, size as f32 + 20.0],
+                    },
+                    RigidBodyKind::Fixed,
+                );
+                // Step `k` (from 1) is a block from the floor to `k * RISE`,
+                // 1 m deep, toward -Z; the last one runs on for 20 m.
+                for k in 1..=size {
+                    let height = k as f32 * RISE;
+                    let depth = if k == size { 20.0 } else { 1.0 };
+                    body(
+                        &mut app,
+                        [0.0, height / 2.0, -(k as f32) - depth / 2.0 + 1.0],
+                        ColliderShape::Box {
+                            half_extents: [3.0, height / 2.0, depth / 2.0],
+                        },
+                        RigidBodyKind::Fixed,
+                    );
+                }
+                let player = body(
+                    &mut app,
+                    [0.0, 0.95, 1.0],
+                    super::DEFAULT_PLAYER_SHAPE,
+                    RigidBodyKind::Kinematic,
+                );
+                app.world_mut()
+                    .entity_mut(player)
+                    .insert(super::PlayerController::default());
+                app.world_mut()
+                    .resource_mut::<super::RuntimeInput>()
+                    .record_key(super::KeyCode::KeyW, true);
+                for _ in 0..steps {
+                    step(&mut app, &mut elapsed);
+                }
+                // The default capsule is 1.8 m tall around its centre.
+                size as f32 * RISE - (position(&app, player)[1] - 0.9)
             }
             Self::CcdBullets => {
                 body(
@@ -572,5 +642,33 @@ mod tests {
         assert_eq!(crates.error, 0.0, "{crates:?}");
         let ragdolls = SuiteScene::RagdollPile.run(4, 120);
         assert!(ragdolls.error < 0.05, "{ragdolls:?}");
+    }
+
+    #[test]
+    fn regression_scenes_repeat_their_recorded_results() {
+        // Recorded on 2026-10-11 with the CPU solver (x86_64). Each run
+        // is bit-identical to the one before it; the tolerance only
+        // allows for another libm. A change past it is a solver change:
+        // check the scene in the example, then record the new value.
+        for (scene, size, steps, recorded) in [
+            (SuiteScene::JointChain, 8, 240, 0.207_075_94),
+            (SuiteScene::ArticulatedChain, 8, 240, 1.907_348_6e-6),
+            (SuiteScene::CharacterStairs, 4, 180, -4.085_898_4e-4),
+            (SuiteScene::VehicleStress, 1, 240, 0.068_611_324),
+            (SuiteScene::RagdollPile, 1, 120, 0.015_326_262),
+        ] {
+            let first = scene.run(size, steps);
+            let second = scene.run(size, steps);
+            assert_eq!(
+                first.error.to_bits(),
+                second.error.to_bits(),
+                "{first:?} {second:?}"
+            );
+            assert!(
+                (first.error - recorded).abs() <= 1e-4,
+                "{} recorded {recorded}, got {first:?}",
+                scene.name()
+            );
+        }
     }
 }

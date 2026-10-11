@@ -19,6 +19,8 @@ fn main() {
         (SuiteScene::VehicleStress, 25, 600),
         (SuiteScene::FractureDrop, 50, 300),
         (SuiteScene::RagdollPile, 100, 300),
+        (SuiteScene::ArticulatedChain, 20, 600),
+        (SuiteScene::CharacterStairs, 10, 240),
     ] {
         let score = scene.run(size, steps);
         println!(
