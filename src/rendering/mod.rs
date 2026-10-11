@@ -15,6 +15,7 @@ pub mod frame_pacer;
 pub mod frame_passes;
 pub mod gpu_cloth;
 mod gpu_particles;
+mod gpu_skinning;
 mod lightmap;
 mod post_effects;
 pub mod readback;

@@ -3,13 +3,17 @@
 //! extracted, the mesh is morphed, then skinned, on the CPU into a private
 //! copy that the renderer draws instead; `MeshRenderer` keeps the cooked
 //! mesh, so saving is unchanged.
+//!
+//! With the [`GpuSkinning`] resource, the copy stays undeformed and the
+//! renderer deforms it on the GPU each frame from the [`SkinJob`]s that
+//! extraction lists; the CPU path stays the reference.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy_ecs::change_detection::DetectChangesMut;
 use bevy_ecs::entity::Entity;
-use bevy_ecs::prelude::{Component, World};
+use bevy_ecs::prelude::{Component, Resource, World};
 use nalgebra::{Matrix3, Matrix4, Vector3};
 use serde::{Deserialize, Serialize};
 
@@ -58,13 +62,71 @@ pub struct SkinnedMesh {
 /// Cooked skin weights and blend shapes of one mesh.
 type Cooked = Arc<(Option<SkinWeights>, MorphTargets)>;
 
+/// Present: skinned and morphed meshes deform on the GPU instead of the
+/// CPU. Windowed runners insert it; headless tools keep the CPU path.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct GpuSkinning;
+
+/// One mesh for the renderer to deform this frame: the copy it draws, the
+/// cooked mesh it starts from, and the joint matrices and blend shape
+/// weights, as `update_skins` would apply them on the CPU.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkinJob {
+    pub mesh: Handle<MeshAsset>,
+    pub base: Handle<MeshAsset>,
+    /// Column-major; empty leaves the mesh unskinned.
+    pub matrices: Vec<[[f32; 4]; 4]>,
+    pub morph_weights: Vec<f32>,
+}
+
+impl Deformers {
+    /// The cooked skin weights and blend shapes `update_skins` read for
+    /// `base`.
+    #[must_use]
+    pub fn cooked(
+        &self,
+        base: Handle<MeshAsset>,
+    ) -> Option<&(Option<SkinWeights>, MorphTargets)> {
+        self.cooked.get(&base.key()).map(|cooked| &**cooked)
+    }
+}
+
+/// The deformations of this frame with [`GpuSkinning`], in entity order;
+/// empty without it.
+pub fn skin_jobs(world: &mut World) -> Vec<SkinJob> {
+    if !world.contains_resource::<GpuSkinning>() {
+        return Vec::new();
+    }
+    let mut query = world.query::<(Entity, &SkinnedMesh)>();
+    let mut jobs = query
+        .iter(world)
+        .map(|(entity, state)| {
+            (
+                entity,
+                SkinJob {
+                    mesh: state.mesh,
+                    base: state.base,
+                    matrices: state
+                        .matrices
+                        .iter()
+                        .map(|&matrix| matrix.into())
+                        .collect(),
+                    morph_weights: state.morph_weights.clone(),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    jobs.sort_by_key(|(entity, _)| *entity);
+    jobs.into_iter().map(|(_, job)| job).collect()
+}
+
 /// Every deformed copy in the mesh list and the entity that draws it, so
 /// copies of despawned or undeformed entities are freed, plus the cooked
 /// data read for each base mesh.
 #[derive(Debug, Default)]
 pub struct Deformers {
     copies: Vec<(Entity, Handle<MeshAsset>)>,
-    cooked: HashMap<u64, Cooked>,
+    pub(crate) cooked: HashMap<u64, Cooked>,
 }
 
 /// The blend shape weights `entity` draws with: its own, else its parent's.
@@ -262,35 +324,48 @@ pub fn update_skins(world: &mut World) {
         if copy.is_none() && skin.is_none() && morph.positions.is_empty() {
             continue;
         }
-        let mut assets = world.resource_mut::<AssetServer>();
-        let Some(cooked_mesh) = assets.meshes.get(base) else {
-            continue;
-        };
-        let mut mesh = morph_mesh(cooked_mesh, morph, &weights);
-        if let Some(skin) = skin.as_ref().filter(|_| !matrices.is_empty()) {
-            mesh = skin_mesh(&mesh, skin, &matrices);
-        }
-        if let Some(copy) = copy {
-            if let Some(slot) = assets.meshes.get_mut(copy) {
+        // On the GPU the copy keeps the cooked vertices and the renderer
+        // deforms it from the job, so only the first frame copies it.
+        let gpu = world.contains_resource::<GpuSkinning>();
+        if !(gpu && copy.is_some()) {
+            let mut assets = world.resource_mut::<AssetServer>();
+            let Some(cooked_mesh) = assets.meshes.get(base) else {
+                continue;
+            };
+            let mut mesh = if gpu {
+                cooked_mesh.clone()
+            } else {
+                morph_mesh(cooked_mesh, morph, &weights)
+            };
+            if let Some(skin) =
+                skin.as_ref().filter(|_| !gpu && !matrices.is_empty())
+            {
+                mesh = skin_mesh(&mesh, skin, &matrices);
+            }
+            if copy.is_none() {
+                let mesh = assets.meshes.insert(mesh);
+                assets.deformers.copies.push((entity, mesh));
+                world.entity_mut(entity).insert(SkinnedMesh {
+                    base,
+                    mesh,
+                    matrices,
+                    morph_weights: weights,
+                });
+                continue;
+            }
+            if let Some(slot) =
+                copy.and_then(|copy| assets.meshes.get_mut(copy))
+            {
                 *slot = mesh;
             }
-            // The drawn handle is the same, so extraction need not
-            // collect renderables again.
-            if let Some(mut state) = world.get_mut::<SkinnedMesh>(entity) {
-                let state = state.bypass_change_detection();
-                state.matrices = matrices;
-                state.morph_weights = weights;
-            }
-            continue;
         }
-        let mesh = assets.meshes.insert(mesh);
-        assets.deformers.copies.push((entity, mesh));
-        world.entity_mut(entity).insert(SkinnedMesh {
-            base,
-            mesh,
-            matrices,
-            morph_weights: weights,
-        });
+        // The drawn handle is the same, so extraction need not collect
+        // renderables again.
+        if let Some(mut state) = world.get_mut::<SkinnedMesh>(entity) {
+            let state = state.bypass_change_detection();
+            state.matrices = matrices;
+            state.morph_weights = weights;
+        }
     }
 }
 
@@ -409,5 +484,70 @@ mod tests {
         update_skins(&mut world);
         assert!(world.get::<SkinnedMesh>(first).is_none());
         assert_eq!(meshes(&world), before);
+    }
+
+    #[test]
+    fn gpu_skinning_keeps_the_copy_cooked_and_lists_a_job() {
+        let mut world = World::new();
+        world.insert_resource(AssetServer::default());
+        world.insert_resource(GpuSkinning);
+        let mut assets = world.resource_mut::<AssetServer>();
+        let base = assets.meshes.insert(MeshAsset {
+            vertices: vec![MeshVertex::default()],
+            indices: Vec::new(),
+        });
+        let material = assets.fallback_material;
+        assets.deformers.cooked.insert(
+            base.key(),
+            Arc::new((
+                None,
+                MorphTargets {
+                    positions: vec![vec![[1.0, 0.0, 0.0]]],
+                    normals: Vec::new(),
+                },
+            )),
+        );
+        let entity = world
+            .spawn((
+                Morph { weights: vec![1.0] },
+                MeshRenderer {
+                    mesh: base,
+                    material,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                },
+                GlobalTransform::default(),
+            ))
+            .id();
+        let copy_of = |world: &World| {
+            let copy = world.get::<SkinnedMesh>(entity).unwrap().mesh;
+            let assets = world.resource::<AssetServer>();
+            (
+                copy,
+                assets.meshes.get(copy).unwrap().vertices[0].position,
+                assets.meshes.revision(copy),
+            )
+        };
+        update_skins(&mut world);
+        let (copy, position, revision) = copy_of(&world);
+        assert_eq!(position, [0.0; 3]);
+        world.get_mut::<Morph>(entity).unwrap().weights[0] = 0.5;
+        update_skins(&mut world);
+        assert_eq!(copy_of(&world), (copy, position, revision));
+        assert_eq!(
+            skin_jobs(&mut world),
+            vec![SkinJob {
+                mesh: copy,
+                base,
+                matrices: Vec::new(),
+                morph_weights: vec![0.5],
+            }]
+        );
+        // Without the switch, the CPU deforms the copy and lists no job.
+        world.remove_resource::<GpuSkinning>();
+        world.get_mut::<Morph>(entity).unwrap().weights[0] = 0.25;
+        update_skins(&mut world);
+        assert_eq!(copy_of(&world).1, [0.25, 0.0, 0.0]);
+        assert!(skin_jobs(&mut world).is_empty());
     }
 }

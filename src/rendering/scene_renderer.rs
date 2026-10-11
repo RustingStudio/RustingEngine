@@ -1774,6 +1774,9 @@ pub struct SceneRenderer {
         super::gpu_particles::GpuParticleState,
     >,
     gpu_particle_pipeline: Option<Arc<ComputePipeline>>,
+    /// Unchanging inputs of each GPU-skinned copy, by copy key.
+    skin_inputs: HashMap<u64, super::gpu_skinning::SkinInputs>,
+    skinning_pipeline: Option<Arc<ComputePipeline>>,
     /// `RenderWorld::elapsed_seconds` of the last frame, for particle steps.
     particle_clock: f32,
     /// Renderer `capture_faces` reuses while the format and size match.
@@ -2220,6 +2223,8 @@ impl SceneRenderer {
             capturer: None,
             gpu_particles: HashMap::new(),
             gpu_particle_pipeline: None,
+            skin_inputs: HashMap::new(),
+            skinning_pipeline: None,
             particle_clock: 0.0,
             lightmaps,
             lightmap_key: 0,
@@ -2905,6 +2910,7 @@ impl SceneRenderer {
                 .collect(),
         )?;
         let particle_steps = self.prepare_gpu_particles(render_world)?;
+        let skin_steps = self.prepare_skinning(render_world, assets)?;
         let particle_total = particle_total(render_world);
         let particle_share = particle_share(particle_total, particle_limit);
 
@@ -4313,7 +4319,16 @@ impl SceneRenderer {
             }
             Ok(())
         };
-        self.record_gpu_particles(&mut commands, &particle_steps)?;
+        self.record_compute(
+            &mut commands,
+            self.skinning_pipeline.as_ref(),
+            &skin_steps,
+        )?;
+        self.record_compute(
+            &mut commands,
+            self.gpu_particle_pipeline.as_ref(),
+            &particle_steps,
+        )?;
         if let Some((_, _, set)) = cull_sets.first() {
             passes.begin(&mut commands, FramePass::Culling)?;
             let phase = if occlusion {
@@ -5874,17 +5889,151 @@ impl SceneRenderer {
         Ok(steps)
     }
 
-    /// Records the steps `prepare_gpu_particles` returned.
-    fn record_gpu_particles(
+    /// One dispatch per GPU skin job, writing its copy's prepared vertices.
+    /// A copy whose cooked mesh or vertex buffer is missing is skipped.
+    fn prepare_skinning(
+        &mut self,
+        render_world: &RenderWorld,
+        assets: &AssetServer,
+    ) -> Result<Vec<SkinStep>, SceneRenderError> {
+        use super::gpu_skinning::{shader, SkinInputs};
+        let error = |error: &dyn Display| SceneRenderError(error.to_string());
+        let jobs = &render_world.skin_jobs;
+        self.skin_inputs
+            .retain(|key, _| jobs.iter().any(|job| job.mesh.key() == *key));
+        let mut steps = Vec::new();
+        if jobs.is_empty() {
+            return Ok(steps);
+        }
+        let pipeline = match &self.skinning_pipeline {
+            Some(pipeline) => pipeline.clone(),
+            None => {
+                let pipeline = create_compute_pipeline(
+                    &self.queue,
+                    shader::load(self.queue.device().clone()),
+                )?;
+                self.skinning_pipeline = Some(pipeline.clone());
+                pipeline
+            }
+        };
+        for job in jobs {
+            let (Some(mesh), Some(prepared), Some((skin, morph))) = (
+                assets.meshes.get(job.base),
+                self.prepared_meshes.get(&job.mesh.key()),
+                assets.deformers.cooked(job.base),
+            ) else {
+                continue;
+            };
+            let revision = assets.meshes.revision(job.base).unwrap_or(0);
+            let inputs = match self.skin_inputs.entry(job.mesh.key()) {
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if entry.get().revision == revision =>
+                {
+                    entry.into_mut()
+                }
+                entry => {
+                    let inputs = SkinInputs::new(
+                        &self.memory_allocator,
+                        revision,
+                        mesh,
+                        skin.as_ref(),
+                        morph,
+                    )?;
+                    self.counters.upload_bytes += inputs.base.size()
+                        + inputs.joints.size()
+                        + inputs.weights.size()
+                        + inputs.morph.size();
+                    match entry {
+                        std::collections::hash_map::Entry::Occupied(
+                            mut entry,
+                        ) => {
+                            entry.insert(inputs);
+                            entry.into_mut()
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(inputs)
+                        }
+                    }
+                }
+            };
+            // The copy is prepared from the cooked vertices, so the counts
+            // match unless the cooked mesh changed under it.
+            if prepared.vertices.len() != u64::from(inputs.vertex_count) {
+                continue;
+            }
+            let transient = &self.frame_contexts[self.frame_index].transient;
+            let matrices = transient
+                .allocate_slice::<[[f32; 4]; 4]>(
+                    job.matrices.len().max(1) as u64
+                )
+                .map_err(|e| error(&e))?;
+            matrices.write().map_err(|e| error(&e))?[..job.matrices.len()]
+                .copy_from_slice(&job.matrices);
+            let targets = inputs.target_count as usize;
+            let shape_weights = transient
+                .allocate_slice::<f32>(targets.max(1) as u64)
+                .map_err(|e| error(&e))?;
+            {
+                let mut write = shape_weights.write().map_err(|e| error(&e))?;
+                write.fill(0.0);
+                for (slot, weight) in write.iter_mut().zip(&job.morph_weights) {
+                    *slot = *weight;
+                }
+            }
+            self.counters.upload_bytes +=
+                matrices.size() + shape_weights.size();
+            let set = DescriptorSet::new(
+                self.descriptor_allocator.clone(),
+                pipeline.layout().set_layouts()[0].clone(),
+                [
+                    WriteDescriptorSet::buffer(0, inputs.base.clone()),
+                    WriteDescriptorSet::buffer(1, prepared.vertices.clone()),
+                    WriteDescriptorSet::buffer(2, inputs.joints.clone()),
+                    WriteDescriptorSet::buffer(3, inputs.weights.clone()),
+                    WriteDescriptorSet::buffer(4, inputs.morph.clone()),
+                    WriteDescriptorSet::buffer(5, matrices),
+                    WriteDescriptorSet::buffer(6, shape_weights),
+                ],
+                [],
+            )
+            .map_err(|e| error(&e))?;
+            // Weights beyond the shapes are ignored, as on the CPU.
+            let any_shape =
+                job.morph_weights.iter().any(|&weight| weight != 0.0);
+            let joints = if skin.is_some() {
+                job.matrices.len()
+            } else {
+                0
+            };
+            steps.push((
+                set,
+                shader::Counts {
+                    counts: [
+                        inputs.vertex_count,
+                        joints as u32,
+                        targets as u32,
+                        u32::from(any_shape),
+                    ],
+                },
+                inputs.vertex_count.div_ceil(64),
+            ));
+        }
+        Ok(steps)
+    }
+
+    /// Records compute steps of one pipeline in order: GPU skinning's and
+    /// the GPU particles'.
+    fn record_compute<T: vulkano::buffer::BufferContents + Copy>(
         &self,
         commands: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        steps: &[GpuParticleStep],
+        pipeline: Option<&Arc<ComputePipeline>>,
+        steps: &[(Arc<DescriptorSet>, T, u32)],
     ) -> Result<(), SceneRenderError> {
         let error = |error: &dyn Display| SceneRenderError(error.to_string());
-        let Some(pipeline) = &self.gpu_particle_pipeline else {
+        let Some(pipeline) = pipeline else {
             return Ok(());
         };
-        for (set, step, groups) in steps {
+        for (set, constants, groups) in steps {
             commands
                 .bind_pipeline_compute(pipeline.clone())
                 .map_err(|e| error(&e))?
@@ -5895,7 +6044,7 @@ impl SceneRenderer {
                     set.clone(),
                 )
                 .map_err(|e| error(&e))?
-                .push_constants(pipeline.layout().clone(), 0, *step)
+                .push_constants(pipeline.layout().clone(), 0, *constants)
                 .map_err(|e| error(&e))?;
             unsafe { commands.dispatch([*groups, 1, 1]) }
                 .map_err(|e| error(&e))?;
@@ -6149,7 +6298,18 @@ impl SceneRenderer {
                 .ok_or_else(|| {
                     SceneRenderError("fallback mesh is missing".into())
                 })?;
-            let prepared = self.prepare_mesh(mesh_handle, mesh, revision)?;
+            let mut prepared =
+                self.prepare_mesh(mesh_handle, mesh, revision)?;
+            // A GPU-skinned copy moves without changing its revision, so
+            // its cooked bounds would cull it wrongly.
+            // ponytail: never culled; bound by the joints if that costs.
+            if render_world
+                .skin_jobs
+                .iter()
+                .any(|job| job.mesh == mesh_handle)
+            {
+                prepared.bounds = None;
+            }
             let name = asset_name(
                 "Mesh",
                 mesh_handle.key(),
@@ -7616,10 +7776,11 @@ impl SceneRenderer {
         mesh: &MeshAsset,
         source_revision: u64,
     ) -> Result<PreparedMesh, SceneRenderError> {
+        // Storage too: GPU skinning writes deformed copies in place.
         let vertices = Buffer::from_iter(
             self.memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
+                usage: BufferUsage::VERTEX_BUFFER | BufferUsage::STORAGE_BUFFER,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -9955,6 +10116,10 @@ fn create_particle_pipeline(
 /// constants and workgroups.
 type GpuParticleStep =
     (Arc<DescriptorSet>, super::gpu_particles::shader::Step, u32);
+
+/// One GPU skin job's compute step: descriptor set, push constants and
+/// workgroups.
+type SkinStep = (Arc<DescriptorSet>, super::gpu_skinning::shader::Counts, u32);
 
 /// One instanced particle draw: additive, sprite, first instance, count.
 type ParticleDraw = (bool, u32, u32, u32, Option<bevy_ecs::entity::Entity>);
@@ -20458,6 +20623,116 @@ mod tests {
         }
         let error = super::sky_fragment_glsl("", "#rusting sky 1").unwrap_err();
         assert!(error.contains("fog"), "{error}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_skinning_draws_what_cpu_skinning_draws() {
+        use crate::assets::{MeshAsset, MeshVertex, MorphTargets, SkinWeights};
+        use crate::runtime::{
+            morph_mesh, skin_mesh, ExtractedRenderable, GlobalTransform,
+            SkinJob,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let cooked = MeshAsset {
+            vertices: [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
+                .map(|[x, y]| MeshVertex {
+                    position: [x, y, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    ..MeshVertex::default()
+                })
+                .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+        // The left edge stays on joint 0; the right edge follows joint 1,
+        // half and fully, and a blend shape lifts the top left corner and
+        // tips every normal.
+        let skin = SkinWeights {
+            joints: vec![[0; 4], [0, 1, 0, 0], [1, 0, 0, 0], [0; 4]],
+            weights: vec![
+                [1.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+            ],
+        };
+        let morph = MorphTargets {
+            positions: vec![vec![
+                [0.0; 3],
+                [0.0; 3],
+                [0.0; 3],
+                [0.0, 0.3, 0.0],
+            ]],
+            normals: vec![vec![[0.6, 0.0, 0.0]; 4]],
+        };
+        let matrices = [
+            Matrix4::identity(),
+            Matrix4::new_translation(&Vector3::new(0.3, -0.2, 0.0))
+                * Matrix4::from_axis_angle(&Vector3::y_axis(), 0.5),
+        ];
+        let weights = vec![0.8];
+        let cpu = scene.assets.meshes.insert(skin_mesh(
+            &morph_mesh(&cooked, &morph, &weights),
+            &skin,
+            &matrices,
+        ));
+        let base = scene.assets.meshes.insert(cooked.clone());
+        let copy = scene.assets.meshes.insert(cooked);
+        scene
+            .assets
+            .deformers
+            .cooked
+            .insert(base.key(), Arc::new((Some(skin), morph)));
+        let material = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            shader: "#rusting surface 1\n\
+                     void surface(SurfaceInput i, inout Surface s) {\n\
+                         s.base_color.rgb = s.normal * 0.5 + 0.5;\n\
+                     }"
+            .into(),
+            ..MaterialAsset::default()
+        });
+        let draw = |scene: &mut SlabScene, mesh| {
+            scene.render_world.renderables = vec![ExtractedRenderable {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+                transform: GlobalTransform::default(),
+                mesh,
+                material,
+                cast_shadows: false,
+                receive_shadows: false,
+                bounds: None,
+            }];
+            scene.render_world.renderables_revision += 1;
+            render_pixel(scene, [0, 0]);
+            scene.pixels()
+        };
+        let undeformed = draw(&mut scene, copy);
+        let reference = draw(&mut scene, cpu);
+        scene.render_world.skin_jobs = vec![SkinJob {
+            mesh: copy,
+            base,
+            matrices: matrices.map(Into::into).to_vec(),
+            morph_weights: weights,
+        }];
+        let skinned = draw(&mut scene, copy);
+        assert!(scene.renderer.shader_errors().0.is_empty());
+        let differ = |a: &[u8], b: &[u8]| {
+            a.iter().zip(b).filter(|(a, b)| a.abs_diff(**b) > 2).count()
+        };
+        assert!(differ(&undeformed, &reference) > 100);
+        // Edge pixels may round the other way.
+        assert!(
+            differ(&skinned, &reference) <= 8,
+            "{} channels differ",
+            differ(&skinned, &reference)
+        );
     }
 
     #[test]

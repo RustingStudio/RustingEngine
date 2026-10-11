@@ -189,6 +189,9 @@ pub struct RenderWorld {
     pub particles: Vec<super::ParticleBatch>,
     /// Visible GPU-simulated emitters, in entity order.
     pub gpu_particles: Vec<super::GpuParticleBatch>,
+    /// Meshes the renderer deforms on the GPU this frame, with
+    /// [`super::GpuSkinning`]; empty otherwise.
+    pub skin_jobs: Vec<super::SkinJob>,
     /// Source of each emitter's [`ParticleShader`](super::ParticleShader).
     pub particle_shaders: HashMap<Entity, String>,
     pub lights_revision: u64,
@@ -273,6 +276,8 @@ impl Plugin for RenderExtractPlugin {
 
 pub fn extract_render_world(world: &mut World) {
     super::update_skins(world);
+    let skin_jobs = super::skin_jobs(world);
+    world.resource_mut::<RenderWorld>().skin_jobs = skin_jobs;
     super::terrain::build_terrains(world);
     // Most game frames do not add objects or change their CPU transforms.
     // Hashing in place is much cheaper than allocating and sorting a new list

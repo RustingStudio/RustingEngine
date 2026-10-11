@@ -115,8 +115,8 @@ pub use signals::{
     Added, Connection, Connections, Removed, Signal, SignalError, SignalEvent,
 };
 pub use skinning::{
-    joint_matrices, morph_mesh, skin_mesh, update_skins, Deformers, Morph,
-    Skin, SkinnedMesh,
+    joint_matrices, morph_mesh, skin_jobs, skin_mesh, update_skins, Deformers,
+    GpuSkinning, Morph, Skin, SkinJob, SkinnedMesh,
 };
 pub use snapshot::{SnapshotError, WorldSnapshot};
 pub use soft_body::{

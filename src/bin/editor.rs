@@ -150,9 +150,9 @@ impl EditorWindowRunner {
             .expect("failed to create editor scene renderer"),
         );
         if let Some(scene_renderer) = &self.scene_renderer {
-            runtime
-                .world_mut()
-                .insert_resource(scene_renderer.capabilities().clone());
+            let world = runtime.world_mut();
+            world.insert_resource(scene_renderer.capabilities().clone());
+            world.insert_resource(rusting_engine::runtime::GpuSkinning);
         }
         // Egui draws last, which places controls over the 3D scene.
         let painter = EguiPainter::new(
