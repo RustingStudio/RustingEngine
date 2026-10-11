@@ -1177,7 +1177,7 @@ impl GpuSimulationLod {
     /// steps over on `tick`: 1 at full rate, `reduced_stride` on its reduced
     /// ticks, 0 while it waits or is frozen. `slot` is its
     /// [`PhysicsId::slot`], which spreads reduced bodies over the stride.
-    /// The reference for `lod_steps` in `physics_shapes.glsl`.
+    /// The reference for `lod_steps` in `physics_lod.glsl`.
     #[must_use]
     pub fn steps(&self, distance_squared: f32, tick: u64, slot: u32) -> u32 {
         let stride = self.reduced_stride.max(1);
