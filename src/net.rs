@@ -1844,4 +1844,173 @@ mod tests {
         assert!(elapsed >= Duration::from_millis(250), "{elapsed:?}");
         assert!(elapsed < Duration::from_millis(600), "{elapsed:?}");
     }
+
+    #[test]
+    fn rpcs_replication_and_prediction_survive_a_lossy_loopback() {
+        use crate::runtime::{SceneComponentRegistry, SceneId};
+        use crate::Transform;
+        use bevy_ecs::prelude::World;
+        use predict::Prediction;
+        use replicate::{Check, Replica, Replicated, Replication, TRANSFORM};
+        use rpc::{Authority, Reliability, Rpcs};
+
+        let (host, clients) = NetSession::loopback(1);
+        let client = &clients[0];
+        host.poll();
+        // Both ends lose a third of their messages, which come back one
+        // round trip later, with jitter on top.
+        for (end, seed) in [(&host, 1), (client, 2)] {
+            end.simulate(NetConditions {
+                latency: Duration::from_millis(2),
+                jitter: Duration::from_millis(3),
+                loss: 0.33,
+                seed,
+            });
+        }
+        let mut rpcs = Rpcs::new();
+        rpcs.register("move", Authority::Owner, Reliability::Reliable);
+        rpcs.set_owner("Hero", 1);
+        let mut replication = Replication::new();
+        replication.component(TRANSFORM);
+        let mut replica = Replica::new(&replication);
+        let world = || {
+            let mut world = World::new();
+            world.insert_resource(SceneComponentRegistry::default());
+            world
+        };
+        let (mut host_world, mut client_world) = (world(), world());
+        let hero = host_world
+            .spawn((Replicated, SceneId::new(), Transform::default()))
+            .id();
+
+        // The client predicts its hero's x from its own moves; the host
+        // applies the same moves and answers with the tick and x.
+        let step = |x: &mut f32, dx: &f32| *x += dx;
+        let mut prediction = Prediction::new();
+        let (mut predicted, mut host_x, mut moves) = (0.0_f32, 0.0_f32, 0);
+        let mut reconciled = 0.0_f32;
+        for tick in 1..=60_u64 {
+            if tick <= 40 {
+                let dx = (tick % 3) as f32 - 0.5;
+                prediction.push(tick, dx);
+                step(&mut predicted, &dx);
+                let args =
+                    [tick.to_le_bytes(), u64::from(dx.to_bits()).to_le_bytes()]
+                        .concat();
+                rpcs.call(client, "Hero", "move", &args).unwrap();
+            }
+            host_world.get_mut::<Transform>(hero).unwrap().position[0] += 0.25;
+            replication.snapshot(&mut host_world).unwrap();
+            host.send_unreliable(1, &replication.snapshot_for(1).unwrap())
+                .unwrap();
+            for event in host.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                if let Some(ack) = replication.accept(from, &bytes) {
+                    ack.unwrap();
+                    continue;
+                }
+                let call = rpcs.accept(from, &bytes).unwrap().unwrap();
+                let (move_tick, dx) = call.args.split_at(8);
+                let move_tick =
+                    u64::from_le_bytes(move_tick.try_into().unwrap());
+                let dx = f32::from_bits(u64::from_le_bytes(
+                    dx.try_into().unwrap(),
+                ) as u32);
+                moves += 1;
+                assert_eq!(move_tick, moves, "moves arrive once and in order");
+                step(&mut host_x, &dx);
+                let state = [
+                    move_tick.to_le_bytes(),
+                    u64::from(host_x.to_bits()).to_le_bytes(),
+                ]
+                .concat();
+                host.send(1, &state).unwrap();
+            }
+            for event in client.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                if let Some(applied) =
+                    replica.apply(&mut client_world, from, &bytes)
+                {
+                    applied.unwrap();
+                    client.send(HOST, &replica.ack().unwrap()).unwrap();
+                    continue;
+                }
+                let acked = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                let x = f32::from_bits(u64::from_le_bytes(
+                    bytes[8..].try_into().unwrap(),
+                ) as u32);
+                reconciled = prediction.reconcile(acked, x, step);
+                assert_eq!(reconciled, predicted, "tick {tick}");
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Let the held messages arrive, then compare.
+        let start = Instant::now();
+        while (moves < 40 || prediction.pending().next().is_some())
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            for event in host.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                if replication.accept(from, &bytes).is_some() {
+                    continue;
+                }
+                let call = rpcs.accept(from, &bytes).unwrap().unwrap();
+                let dx = f32::from_bits(u64::from_le_bytes(
+                    call.args[8..].try_into().unwrap(),
+                ) as u32);
+                moves += 1;
+                step(&mut host_x, &dx);
+                let state = [
+                    moves.to_le_bytes(),
+                    u64::from(host_x.to_bits()).to_le_bytes(),
+                ]
+                .concat();
+                host.send(1, &state).unwrap();
+            }
+            for event in client.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                if replica.apply(&mut client_world, from, &bytes).is_some() {
+                    continue;
+                }
+                let acked = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                let x = f32::from_bits(u64::from_le_bytes(
+                    bytes[8..].try_into().unwrap(),
+                ) as u32);
+                reconciled = prediction.reconcile(acked, x, step);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(moves, 40);
+        assert_eq!((reconciled, host_x), (predicted, predicted));
+        let stats = host.stats();
+        assert_eq!(stats.held, 0);
+
+        // The last snapshot gets through once the host sends it again.
+        let checksum = replication.checksum();
+        host.send(1, &replication.snapshot_for(1).unwrap()).unwrap();
+        host.send(1, &checksum).unwrap();
+        let events = wait(client, 2);
+        let mut verified = None;
+        for event in events {
+            let NetEvent::Message { from, bytes } = event else {
+                continue;
+            };
+            if let Some(applied) =
+                replica.apply(&mut client_world, from, &bytes)
+            {
+                applied.unwrap();
+            } else {
+                verified = replica.verify(&mut client_world, from, &bytes);
+            }
+        }
+        assert_eq!(verified, Some(Ok(Check::Match)));
+    }
 }
