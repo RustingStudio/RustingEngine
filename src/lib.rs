@@ -8,6 +8,7 @@ pub mod asset_import;
 pub mod assets;
 pub mod cookbook;
 pub mod core;
+pub mod crash;
 pub mod debug_session;
 pub mod demo;
 pub mod diagnostics;

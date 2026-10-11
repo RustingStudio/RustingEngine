@@ -2721,7 +2721,7 @@ pub fn package_game_files(
         std::fs::write(
             temporary.join("README.txt"),
             format!(
-                "{project_name}\n\nRun {executable_name} to start the game.\nThe system needs a Vulkan-capable graphics driver.\n\nSettings and saves live in the user data folder: ~/.local/share/{binary_name} on Linux,\n~/Library/Application Support/{binary_name} on macOS, %APPDATA%\\{binary_name} on Windows.\nSet RUSTING_USER_DATA=<folder> to use another one.\n\nRUSTING_HEADLESS_TICKS=<n> runs n ticks with no window and exits, for smoke tests;\ncommand-line arguments reach the game code through std::env::args().\n"
+                "{project_name}\n\nRun {executable_name} to start the game.\nThe system needs a Vulkan-capable graphics driver.\n\nSettings and saves live in the user data folder: ~/.local/share/{binary_name} on Linux,\n~/Library/Application Support/{binary_name} on macOS, %APPDATA%\\{binary_name} on Windows.\nCrash reports go to the crashes folder there.\nSet RUSTING_USER_DATA=<folder> to use another one.\n\nRUSTING_HEADLESS_TICKS=<n> runs n ticks with no window and exits, for smoke tests;\ncommand-line arguments reach the game code through std::env::args().\n"
             ),
         )
         .map_err(|error| error.to_string())?;

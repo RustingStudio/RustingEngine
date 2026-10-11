@@ -227,5 +227,28 @@ Rust target installed. The folder is named after the system, such as
 `my_game_windows_export`. A cross-target export cannot run here, so it is
 not checked and export warns `EXPORT_NOT_VERIFIED`.
 
+### Crash reports
+
+When game code or the engine panics, the game writes a crash report
+before it exits and prints its path:
+
+```text
+crash report written to /home/you/.local/share/my_game/crashes/crash-1791682755782.txt
+```
+
+Reports go to `crashes/` in the user data folder, the same folder as
+saves. Each one holds the engine version, the system, the panic message
+and where it happened, and the stack trace with function names, such as
+`my_game::update`. The folder keeps the 20 newest reports. Ask players
+to send the newest file with a bug report.
+
+A release build has function names but no file and line numbers in the
+trace. To add them, put this in the game's `Cargo.toml`:
+
+```toml
+[profile.release]
+debug = "line-tables-only"
+```
+
 Before you ship, run `rusting asset list` and add the credits that
 `CC-BY` assets need to your README.

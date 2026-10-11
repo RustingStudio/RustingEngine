@@ -5487,6 +5487,10 @@ pub fn run_project<P: Plugin>(
     plugin: P,
 ) -> Result<(), Box<dyn Error>> {
     GAME_START.get_or_init(Instant::now);
+    // Unit tests share one process, and its panics are expected.
+    if !cfg!(test) {
+        crate::crash::install_crash_reporter();
+    }
     if std::env::var_os(crate::debug_session::DEBUG_SESSION_ENV).is_some() {
         let mut runtime = load_project_runtime(&scene_path.into(), plugin)?;
         crate::debug_session::run_debug_session(

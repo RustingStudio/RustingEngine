@@ -2982,7 +2982,7 @@ Depends on: Milestones 3 and 6.
 - [ ] macOS through MoltenVK, with capability fallbacks for missing Vulkan features.
 - [ ] Android export with touch input, lifecycle handling, and mobile quality profiles.
 - [ ] Platform services abstraction for save paths, achievements, and storefront SDK hooks.
-- [ ] Crash reporting with symbolicated stack traces.
+- [x] Crash reporting with symbolicated stack traces. Done 2026-10-11: `run_project` installs `crash::install_crash_reporter` (not in unit tests). It chains the previous hook, so the panic still prints. A panic writes `crashes/crash-<unix ms>.txt` in the user data folder, holding the engine version, OS and architecture, executable, thread, panic message and location, and a `std::backtrace` trace. It prints the path, and the folder keeps the newest `MAX_CRASH_REPORTS` (20). Release builds have function names; `debug = "line-tables-only"` adds file and line. The exported README.txt names the folder. Docs: `docs/assets.md` "Crash reports". Evidence: unit test `crash::tests::crash_reports_name_the_panic_and_its_functions_and_stay_bounded` (the trace names the test's own function; other files in the folder stay). By hand, a release game that indexes past an empty Vec in `update` wrote a report with `panic: index out of bounds ...`, `at: src/main.rs:5:18` and the frame `boom::update`. The same game built with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` added `at <file>:<line>` to each frame. Full check: fmt, clippy (default, no-default-features, gpu-tests), rustdoc, tests (lib 884, 1001 with gpu-tests) green.
 - [ ] Record web, iOS, and console export as post-1.0 decisions with the blocking technical reasons.
 
 ### Exit gate
