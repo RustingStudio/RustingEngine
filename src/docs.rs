@@ -39,6 +39,7 @@ const PAGES: &[(&str, &str, &str)] = &[
     ),
     ("manual/input", "manual", include_str!("../docs/input.md")),
     ("manual/assets", "manual", include_str!("../docs/assets.md")),
+    ("manual/2d", "manual", include_str!("../docs/2d.md")),
     (
         "manual/dev-environment",
         "manual",
