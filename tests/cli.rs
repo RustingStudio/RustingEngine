@@ -2042,3 +2042,70 @@ fn every_template_and_sample_builds_and_runs_headless() {
     }
     let _ = std::fs::remove_dir_all(parent);
 }
+
+/// Exports a game through one preset per supported platform (Linux and
+/// Windows, `docs/getting-started.md`). The Linux export runs its own
+/// headless check; the Windows one is run under Wine when it is installed.
+#[test]
+#[ignore = "runs release builds for two platforms"]
+fn every_platform_preset_exports_a_game_that_runs() {
+    let parent = temporary_parent();
+    let (output, created) = run(&[
+        "new",
+        parent.to_str().unwrap(),
+        "Smoke",
+        "--template",
+        "starter",
+    ]);
+    assert!(output.status.success(), "{created}");
+    let root = parent.join("Smoke");
+    let manifest = root.join("project.json");
+    let mut project: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap())
+            .unwrap();
+    project["export_presets"] = serde_json::json!({
+        "linux": {},
+        "windows": {"target": "x86_64-pc-windows-gnu"},
+    });
+    std::fs::write(&manifest, project.to_string()).unwrap();
+    let target =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/export-smoke");
+    let export = |preset: &str| {
+        let out = parent.join(preset);
+        std::fs::create_dir(&out).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(["export", root.to_str().unwrap(), out.to_str().unwrap()])
+            .args(["--preset", preset, "--json"])
+            .env("CARGO_TARGET_DIR", &target)
+            .output()
+            .unwrap();
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{preset}: {value}");
+        value
+    };
+
+    let linux = export("linux");
+    assert_eq!(linux["data"]["verified"]["exit_code"], 0, "{linux}");
+
+    let windows = export("windows");
+    assert_eq!(windows["diagnostics"][0]["code"], "EXPORT_NOT_VERIFIED");
+    let folder =
+        PathBuf::from(windows["data"]["export_path"].as_str().unwrap());
+    let exe = folder.join("smoke.exe");
+    assert!(std::fs::read(&exe).unwrap().starts_with(b"MZ"), "{windows}");
+    match Command::new("wine")
+        .arg(&exe)
+        .current_dir(&folder)
+        .env("RUSTING_HEADLESS_TICKS", "60")
+        .env("WINEDEBUG", "-all")
+        .output()
+    {
+        Ok(ran) => assert!(
+            ran.status.success(),
+            "smoke.exe under Wine: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        ),
+        Err(_) => eprintln!("no Wine: smoke.exe was built but not run"),
+    }
+    let _ = std::fs::remove_dir_all(&parent);
+}
