@@ -856,6 +856,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"resolution": 16}),
     },
     ComponentSection {
+        key: "rusting.foliage",
+        summary: "On an object with a mesh_renderer: draws count copies of its mesh in place of the object, scattered over a disc of radius metres on its local XZ plane, each turned and scaled between scale_min and scale_max at random by seed. The copies share the material, so they draw as one instanced batch and cull one by one. Force fields (wind gusts most of all) lean every copy away from its base by sway metres per metre of height for each m/s² of push, so grass inside a rusting.force_field of kind Wind ripples with its gusts. At most 65536 copies.",
+        gpu: "one instance per copy in the object's batch; the lean is CPU work per copy and frame while fields touch it",
+        example: || json!({"count": 100, "radius": 5.0, "seed": 0, "scale_min": 0.8, "scale_max": 1.2, "sway": 0.03}),
+    },
+    ComponentSection {
         key: "rusting.fog",
         summary: "Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre. Brighter toward the sun by sun_scatter; sky_affect fades the background too. light_shafts lets the sun's shadow map darken that glow, showing shafts behind shadow casters. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
         gpu: "a few instructions per pixel, plus one full-screen sky pass when sky_affect > 0; light_shafts > 0 adds 16 shadow-map taps per fogged pixel",

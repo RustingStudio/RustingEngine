@@ -2895,7 +2895,27 @@ Depends on: Milestones 3 and 4.
   Not done: fracture survival or invalidation (the engine has no fracture
   yet), decal normals and roughness, decals on skinned or moving objects
   following them.
-- [ ] Instanced multi-mesh rendering and foliage scattering with wind driven by physics force fields.
+- [x] Instanced multi-mesh rendering and foliage scattering with wind driven by physics force fields.
+  Evidence: `rusting.foliage` (`Foliage`) on an object with a mesh_renderer
+  draws `count` copies of its mesh (at most 65536) in place of the object,
+  scattered over a disc of `radius` with a seeded yaw and scale. Extraction
+  expands the copies into renderables that share the owner's entity, so
+  they join the existing mesh+material instanced batches and cull one by
+  one; each mesh in a multi-mesh scatter is its own Foliage object. Every
+  frame `PhysicsWorld::field_accelerations` samples the force fields at
+  each copy's base, and the copy leans by `sway` per m/s² of push (a shear
+  keeping heights, capped at 45 degrees), so Wind fields ripple foliage
+  with their gusts. Unit test
+  `foliage_scatters_copies_that_lean_with_wind_fields` (50 copies inside
+  the disc, deterministic layout, 0.3 m/m lean under 10 m/s² wind at sway
+  0.03, upright again once the field is removed); GPU test
+  `foliage_copies_lean_in_wind_fields_when_drawn` (a pillar extracted
+  through a real app: upright pixels lit in still air, the top shifted
+  0.36 m right under wind). Mutation (lean zeroed) fails both tests.
+  Full check: workspace lib 879 passed, gpu-tests run 1010 passed.
+  Not done: lean in the vertex shader (CPU per copy and frame now), rule
+  scattering by slope, height or mask (Milestone 20 item), lean from GPU
+  physics fields alone.
 - [ ] Heightmap terrain rendering with texture splatting and LOD.
 - [ ] Automatic mesh LOD generation at import.
 - [ ] Rendering of deformables, fluid surfaces, and debris produced by Milestone 11.

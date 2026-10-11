@@ -20355,6 +20355,95 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn foliage_copies_lean_in_wind_fields_when_drawn() {
+        use crate::runtime::{
+            Collider, ColliderShape, FieldKind, Foliage, ForceField,
+            MeshRenderer, PhysicsBody, RenderExtractPlugin, RigidBody,
+            RigidBodyKind,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // One copy of a 0.2 x 1.6 m pillar at the origin, extracted through
+        // a real app so the wind comes from the CPU physics fields.
+        let extract = |wind: bool| {
+            let mut app = crate::App::new();
+            app.add_plugin(RenderExtractPlugin).unwrap();
+            let server = AssetServer::default();
+            let renderer = MeshRenderer {
+                mesh: server.fallback_mesh,
+                material: server.fallback_material,
+                cast_shadows: false,
+                receive_shadows: false,
+            };
+            app.insert_resource(server);
+            let pillar = crate::Transform {
+                scale: [0.2, 1.6, 0.2],
+                ..crate::Transform::default()
+            };
+            app.spawn((
+                pillar,
+                renderer,
+                Foliage {
+                    count: 1,
+                    radius: 0.0,
+                    scale_min: 1.0,
+                    scale_max: 1.0,
+                    sway: 0.05,
+                    ..Foliage::default()
+                },
+            ));
+            if wind {
+                app.spawn((
+                    crate::Transform::default(),
+                    PhysicsBody::default(),
+                    RigidBody {
+                        kind: RigidBodyKind::Fixed,
+                        ..RigidBody::default()
+                    },
+                    Collider {
+                        shape: ColliderShape::Box {
+                            half_extents: [3.0; 3],
+                        },
+                        sensor: true,
+                        ..Collider::default()
+                    },
+                    ForceField {
+                        kind: FieldKind::Wind,
+                        strength: 10.0,
+                        direction: [1.0, 0.0, 0.0],
+                        ..ForceField::default()
+                    },
+                ));
+            }
+            for _ in 0..3 {
+                app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                    .unwrap();
+            }
+            app.world().resource::<RenderWorld>().renderables.clone()
+        };
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        // Pixels are 1/16 m; row 4 is 0.72 m up, near the pillar's top.
+        let lit = |pixel: [u8; 3]| pixel.iter().any(|&channel| channel > 40);
+        scene.render_world.renderables = extract(false);
+        assert_eq!(scene.render_world.renderables.len(), 1);
+        let upright = [16, 4];
+        // 0.5 m lean per metre: the top sits 0.36 m to the right.
+        let leaned = [21, 4];
+        assert!(lit(render_pixel(&mut scene, upright)), "still air: upright");
+        assert!(!lit(render_pixel(&mut scene, leaned)));
+        scene.render_world.renderables = extract(true);
+        scene.render_world.renderables_revision += 1;
+        assert!(lit(render_pixel(&mut scene, leaned)), "wind leans the top");
+        assert!(!lit(render_pixel(&mut scene, upright)));
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn gpu_sub_emitters_spawn_where_parent_particles_die() {
         use crate::runtime::{
             gpu_particle_batch, ColorKey, ParticleEmitter, ParticleSimulation,

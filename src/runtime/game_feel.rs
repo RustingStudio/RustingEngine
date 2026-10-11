@@ -1365,6 +1365,96 @@ impl Default for Lightmap {
     }
 }
 
+/// Scatters `count` copies of this object's mesh over a disc of `radius`
+/// metres on its local XZ plane, each turned and scaled at random by
+/// `seed`, in place of the single object. Copies share the object's
+/// material, so they draw as one instanced batch. Wind and other force
+/// fields lean each copy away from its base by `sway` per m/s² of push.
+// ponytail: the lean is computed on the CPU per copy and frame; move it
+// into the vertex shader if scattered counts reach the 100k range.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Foliage {
+    /// Copies drawn, at most [`MAX_FOLIAGE_COPIES`].
+    pub count: u32,
+    /// Disc radius in metres.
+    pub radius: f32,
+    /// Picks the scatter; the same seed gives the same layout.
+    pub seed: u32,
+    /// Smallest and largest uniform scale of a copy.
+    pub scale_min: f32,
+    pub scale_max: f32,
+    /// Lean per m/s² of force field push, in metres per metre of height.
+    pub sway: f32,
+}
+
+/// Most copies one [`Foliage`] draws.
+pub const MAX_FOLIAGE_COPIES: u32 = 65_536;
+
+impl Default for Foliage {
+    fn default() -> Self {
+        Self {
+            count: 100,
+            radius: 5.0,
+            seed: 0,
+            scale_min: 0.8,
+            scale_max: 1.2,
+            sway: 0.03,
+        }
+    }
+}
+
+impl Foliage {
+    /// Local matrix of each copy: a point in the disc, a yaw and a scale.
+    #[must_use]
+    pub fn placements(&self) -> Vec<nalgebra::Matrix4<f32>> {
+        let seed = crate::runtime::RandomSeed(u64::from(self.seed));
+        let streams = [
+            "foliage_angle",
+            "foliage_distance",
+            "foliage_yaw",
+            "foliage_scale",
+        ]
+        .map(|name| crate::runtime::RandomSeed::stream(name, 0));
+        (0..u64::from(self.count.min(MAX_FOLIAGE_COPIES)))
+            .map(|index| {
+                let [angle, distance, yaw, scale] =
+                    streams.map(|stream| seed.unit(index, stream));
+                // sqrt spreads copies evenly over the disc's area.
+                let distance = self.radius.max(0.0) * distance.sqrt();
+                let angle = angle * TAU;
+                let scale =
+                    self.scale_min + (self.scale_max - self.scale_min) * scale;
+                nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
+                    distance * angle.cos(),
+                    0.0,
+                    distance * angle.sin(),
+                )) * nalgebra::Matrix4::from_axis_angle(
+                    &nalgebra::Vector3::y_axis(),
+                    yaw * TAU,
+                ) * nalgebra::Matrix4::new_scaling(scale)
+            })
+            .collect()
+    }
+}
+
+/// Shear that leans everything above world point `base` by `lean` (x and
+/// z metres per metre of height), keeping heights.
+#[must_use]
+pub fn lean_matrix(base: [f32; 3], lean: [f32; 2]) -> nalgebra::Matrix4<f32> {
+    let base = nalgebra::Vector3::from(base);
+    #[rustfmt::skip]
+    let shear = nalgebra::Matrix4::new(
+        1.0, lean[0], 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, lean[1], 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    );
+    nalgebra::Matrix4::new_translation(&base)
+        * shear
+        * nalgebra::Matrix4::new_translation(&-base)
+}
+
 /// Exponential height fog: the scene fades into `color` with distance, and
 /// the fog thins out above `height`. Looking toward the sun brightens it.
 /// The one on the entity with the lowest ID is used.

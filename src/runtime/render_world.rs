@@ -238,9 +238,12 @@ pub struct RenderWorld {
     pub flashes: Vec<(Entity, [f32; 4])>,
     /// Index of each entity in `renderables`.
     index: HashMap<Entity, usize>,
+    /// Each `Foliage` copy: its place in `renderables`, its unleaned
+    /// matrix and its owner's `sway`.
+    foliage: Vec<(usize, [[f32; 4]; 4], f32)>,
     renderables_signature: Option<u64>,
     /// Tick and component counts seen by the last signature hash.
-    renderables_fingerprint: Option<(Tick, [usize; 6])>,
+    renderables_fingerprint: Option<(Tick, [usize; 7])>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -503,6 +506,13 @@ pub fn extract_render_world(world: &mut World) {
     );
 
     let flashes = collect_flashes(world);
+    let new_foliage = renderables
+        .as_ref()
+        .map(|renderables| collect_foliage(world, renderables));
+    let leaned = {
+        let previous = &world.resource::<RenderWorld>().foliage;
+        lean_foliage(world, new_foliage.as_ref().unwrap_or(previous), seconds)
+    };
     let mut render_world = world.resource_mut::<RenderWorld>();
     render_world.flashes = flashes;
     match renderables {
@@ -565,6 +575,21 @@ pub fn extract_render_world(world: &mut World) {
             render_world.renderables_layout_revision =
                 render_world.renderables_layout_revision.wrapping_add(1);
         }
+    }
+    if let Some(foliage) = new_foliage {
+        render_world.foliage = foliage;
+    }
+    let mut leaned_any = false;
+    for (at, matrix) in leaned {
+        let transform = &mut render_world.renderables[at].transform;
+        if transform.matrix != matrix {
+            transform.matrix = matrix;
+            leaned_any = true;
+        }
+    }
+    if leaned_any {
+        render_world.renderables_revision =
+            render_world.renderables_revision.wrapping_add(1);
     }
     render_world.renderables_signature = renderables_signature;
     render_world.active_camera = active_camera;
@@ -735,7 +760,7 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
     let newer = |tick: Tick| {
         last_run.is_none_or(|last_run| tick.is_newer_than(last_run, this_run))
     };
-    let mut counts = [0; 6];
+    let mut counts = [0; 7];
     let mut changed = false;
     let mut moved = Vec::new();
     let mut query = world.query_filtered::<(
@@ -746,15 +771,25 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
         Option<Ref<super::Parent>>,
         Option<Ref<RenderBounds>>,
         Option<Ref<super::SkinnedMesh>>,
+        Option<Ref<super::Foliage>>,
     ), Or<(
         With<MeshRenderer>,
         With<Visibility>,
         With<super::Parent>,
         With<RenderBounds>,
     )>>();
-    for (entity, transform, renderer, visibility, parent, bounds, skinned) in
-        query.iter(world)
+    for (
+        entity,
+        transform,
+        renderer,
+        visibility,
+        parent,
+        bounds,
+        skinned,
+        foliage,
+    ) in query.iter(world)
     {
+        let scattered = foliage.is_some();
         let ticks = [
             transform.map(|value| value.last_changed()),
             renderer.map(|value| value.last_changed()),
@@ -762,12 +797,15 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
             parent.map(|value| value.last_changed()),
             bounds.map(|value| value.last_changed()),
             skinned.map(|value| value.last_changed()),
+            foliage.map(|value| value.last_changed()),
         ];
         for (slot, (count, tick)) in counts.iter_mut().zip(ticks).enumerate() {
             if let Some(tick) = tick {
                 *count += 1;
                 if newer(tick) {
-                    if slot == 0 {
+                    // Foliage copies share their owner's entity, so a
+                    // moved owner rescatters through a rebuild.
+                    if slot == 0 && !scattered {
                         moved.push(entity);
                     } else {
                         changed = true;
@@ -800,9 +838,12 @@ fn renderables_signature(world: &mut World) -> u64 {
         &MeshRenderer,
         Option<&RenderBounds>,
         Option<&super::SkinnedMesh>,
+        Option<&super::Foliage>,
     )>();
     let world = &*world;
-    for (entity, transform, renderer, bounds, skinned) in query.iter(world) {
+    for (entity, transform, renderer, bounds, skinned, foliage) in
+        query.iter(world)
+    {
         if !visible_in_hierarchy(world, entity) {
             continue;
         }
@@ -815,7 +856,7 @@ fn renderables_signature(world: &mut World) -> u64 {
         renderer.material.key().hash(&mut hasher);
         renderer.cast_shadows.hash(&mut hasher);
         renderer.receive_shadows.hash(&mut hasher);
-        format!("{bounds:?}").hash(&mut hasher);
+        format!("{bounds:?}{foliage:?}").hash(&mut hasher);
         for row in transform.matrix {
             for value in row {
                 value.to_bits().hash(&mut hasher);
@@ -879,6 +920,52 @@ fn collect_flashes(world: &mut World) -> Vec<(Entity, [f32; 4])> {
     flashes
 }
 
+/// Each `Foliage` copy in `renderables` with its unleaned matrix and sway.
+fn collect_foliage(
+    world: &World,
+    renderables: &[ExtractedRenderable],
+) -> Vec<(usize, [[f32; 4]; 4], f32)> {
+    renderables
+        .iter()
+        .enumerate()
+        .filter_map(|(at, renderable)| {
+            let foliage = world.get::<super::Foliage>(renderable.entity)?;
+            Some((at, renderable.transform.matrix, foliage.sway))
+        })
+        .collect()
+}
+
+/// Each foliage copy's matrix leaned by the force fields at its base.
+fn lean_foliage(
+    world: &World,
+    foliage: &[(usize, [[f32; 4]; 4], f32)],
+    seconds: f32,
+) -> Vec<(usize, [[f32; 4]; 4])> {
+    let bases = foliage
+        .iter()
+        .map(|(_, matrix, _)| [matrix[3][0], matrix[3][1], matrix[3][2]])
+        .collect::<Vec<_>>();
+    let pushes = match world.get_resource::<super::PhysicsWorld>() {
+        Some(physics) if !foliage.is_empty() => {
+            physics.field_accelerations(world, &bases, seconds)
+        }
+        _ => vec![[0.0; 3]; foliage.len()],
+    };
+    foliage
+        .iter()
+        .zip(bases)
+        .zip(pushes)
+        .map(|((&(at, rest, sway), base), push)| {
+            let lean = nalgebra::Vector2::new(push[0], push[2]) * sway;
+            // Past 45 degrees a copy would stretch more than it leans.
+            let lean = lean.cap_magnitude(1.0);
+            let matrix = super::lean_matrix(base, [lean.x, lean.y])
+                * nalgebra::Matrix4::from(rest);
+            (at, matrix.into())
+        })
+        .collect()
+}
+
 fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
     let mut query = world.query::<(
         Entity,
@@ -886,13 +973,14 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
         &MeshRenderer,
         Option<&RenderBounds>,
         Option<&super::SkinnedMesh>,
+        Option<&super::Foliage>,
     )>();
     let world_ref = &*world;
     let mut renderables = query
         .iter(world_ref)
         .filter(|(entity, ..)| visible_in_hierarchy(world_ref, *entity))
-        .map(|(entity, transform, renderer, bounds, skinned)| {
-            ExtractedRenderable {
+        .flat_map(|(entity, transform, renderer, bounds, skinned, foliage)| {
+            let renderable = ExtractedRenderable {
                 entity,
                 transform: *transform,
                 mesh: skinned.map_or(renderer.mesh, |skinned| skinned.mesh),
@@ -900,9 +988,24 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
                 cast_shadows: renderer.cast_shadows,
                 receive_shadows: renderer.receive_shadows,
                 bounds: bounds.copied(),
-            }
+            };
+            let Some(foliage) = foliage else {
+                return vec![renderable];
+            };
+            let model = nalgebra::Matrix4::from(transform.matrix);
+            foliage
+                .placements()
+                .into_iter()
+                .map(|local| ExtractedRenderable {
+                    transform: GlobalTransform {
+                        matrix: (model * local).into(),
+                    },
+                    ..renderable
+                })
+                .collect()
         })
         .collect::<Vec<_>>();
+    // The sort is stable, so one owner's copies keep their scatter order.
     renderables.sort_by_key(|renderable| {
         (
             renderable.mesh.key(),
@@ -1168,6 +1271,80 @@ mod tests {
             material: server.fallback_material,
             cast_shadows: true,
             receive_shadows: true,
+        }
+    }
+
+    #[test]
+    fn foliage_scatters_copies_that_lean_with_wind_fields() {
+        use crate::runtime::{
+            Collider, ColliderShape, FieldKind, Foliage, ForceField,
+            PhysicsBody, RigidBody, RigidBodyKind,
+        };
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let server = AssetServer::default();
+        let renderer = renderer(&server);
+        app.insert_resource(server);
+        let foliage = Foliage {
+            count: 50,
+            radius: 2.0,
+            ..Foliage::default()
+        };
+        let owner =
+            app.spawn((Transform::new([10.0, 0.0, 0.0]), renderer, foliage));
+        app.spawn((Transform::default(), renderer));
+        let wind = app.spawn((
+            Transform::new([10.0, 0.0, 0.0]),
+            PhysicsBody::default(),
+            RigidBody {
+                kind: RigidBodyKind::Fixed,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::Box {
+                    half_extents: [3.0; 3],
+                },
+                sensor: true,
+                ..Collider::default()
+            },
+            ForceField {
+                kind: FieldKind::Wind,
+                strength: 10.0,
+                direction: [1.0, 0.0, 0.0],
+                ..ForceField::default()
+            },
+        ));
+        let step = |app: &mut App| {
+            for _ in 0..3 {
+                app.update(Duration::from_secs_f64(1.0 / 60.0)).unwrap();
+            }
+        };
+        step(&mut app);
+        let copies = |app: &App| {
+            app.world()
+                .resource::<RenderWorld>()
+                .renderables
+                .iter()
+                .filter(|renderable| renderable.entity == owner)
+                .map(|renderable| renderable.transform.matrix)
+                .collect::<Vec<_>>()
+        };
+        let leaned = copies(&app);
+        assert_eq!(leaned.len(), 50, "the owner draws only its copies");
+        assert_eq!(app.world().resource::<RenderWorld>().renderables.len(), 51);
+        assert_eq!(foliage.placements(), foliage.placements());
+        for matrix in &leaned {
+            let [x, _, z, _] = matrix[3];
+            assert!(((x - 10.0).powi(2) + z * z).sqrt() <= 2.0 + 1e-4);
+            // Steady 10 m/s² wind along +x at sway 0.03: 0.3 m per metre.
+            let [lean_x, up, lean_z, _] = matrix[1];
+            assert!((lean_x / up - 0.3).abs() < 1e-4, "{lean_x} {up}");
+            assert!(lean_z.abs() < 1e-4);
+        }
+        app.world_mut().entity_mut(wind).remove::<ForceField>();
+        step(&mut app);
+        for matrix in copies(&app) {
+            assert!(matrix[1][0].abs() < 1e-6, "no wind, standing straight");
         }
     }
 

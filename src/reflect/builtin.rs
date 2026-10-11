@@ -15,11 +15,11 @@ use crate::runtime::{
     CameraShake, ColorGrading, ColorLut, CombineMode, Connection, Connections,
     Counter, CullingMode, Decal, DepthOfField, DeterminismMode, Dialogue,
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
-    FluidBlock, Fog, FogVolume, ForceField, GravityVolume, GroundSurface,
-    Health, Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
-    JointKind, JointMotor, JointSpring, LightCookie, LightProbeGrid, Lightmap,
-    LootEntry, LootTable, MeshSurfaces, MotionBlur, ObjectState,
-    PhysicsMaterial, PhysicsSettings, PhysicsSyncMode, Pickup,
+    FluidBlock, Fog, FogVolume, Foliage, ForceField, GravityVolume,
+    GroundSurface, Health, Heightfield, HudAnchor, HudElement, InputAction,
+    Joint, JointAxis, JointKind, JointMotor, JointSpring, LightCookie,
+    LightProbeGrid, Lightmap, LootEntry, LootTable, MeshSurfaces, MotionBlur,
+    ObjectState, PhysicsMaterial, PhysicsSettings, PhysicsSyncMode, Pickup,
     PlatformerController, PlayerController, Polygon2d, PostVolume,
     ProceduralSky, QualityProfile, RandomSeed, ReflectionProbe, RenderBounds,
     RenderSettings, ReverbZone, SceneBackground, SceneInstance, ShadowQuality,
@@ -1111,6 +1111,26 @@ crate::reflect! {
         resolution: u32 {
             unit: "texels", min: 2.0, max: 64.0,
             doc: "texels along each side of each of the six faces",
+        },
+    }
+}
+
+crate::reflect! {
+    struct Foliage {
+        count: u32 {
+            unit: "copies", min: 0.0, max: 65536.0,
+            doc: "copies of the mesh scattered over the disc",
+        },
+        radius: f32 {
+            unit: "m", min: 0.0,
+            doc: "disc radius on the object's local XZ plane",
+        },
+        seed: u32 { doc: "picks the scatter; the same seed gives the same layout" },
+        scale_min: f32 { unit: "factor", min: 0.0, doc: "smallest copy scale" },
+        scale_max: f32 { unit: "factor", min: 0.0, doc: "largest copy scale" },
+        sway: f32 {
+            unit: "m per m/s²", min: 0.0,
+            doc: "lean per m/s² of force field push, per metre of height",
         },
     }
 }
