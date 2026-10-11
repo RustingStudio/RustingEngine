@@ -3095,7 +3095,20 @@ Depends on: Milestones 3 and 4.
   `shader` (needs a cooked format version); the depth prepass and shadows
   ignore the surface shader; post shaders cannot read depth.
 - [ ] A visual shader graph that compiles to the same language.
-- [ ] Shader hot reload with error reporting in the editor.
+- [x] Shader hot reload with error reporting in the editor.
+  Evidence: the renderer keys every shader build by its source text and
+  drops builds no material, emitter or scene uses, so editing a shader in
+  the Inspector rebuilds it the next frame. `SceneRenderer::shader_errors`
+  gathers surface, sky/fog, particle, post and condition errors into the
+  `ShaderErrors` resource; the editor inserts it each frame and Render
+  Settings lists it under "Shader errors". `surface_shaders_color_their_material_per_pixel`
+  now fixes a broken material in place and sees its error leave while an
+  unfixed one stays, and the gradient return; it failed with the
+  surface cache's pruning disabled. `panels_expose_missing_assets_and_physics_overflow`
+  checks the panel text; it failed with the error label removed. Full
+  check: fmt, clippy x3, `cargo test --workspace` (lib 889) and the
+  gpu-tests run (lib 1030) pass.
+  Not done: shaders read from files on disk (sources live in scene text).
 - [x] Material instancing with per-instance parameter overrides.
   Evidence: `rusting.material_override` (base_color, emissive, metallic,
   roughness, uv_scale, uv_offset; null keeps the material's value) is

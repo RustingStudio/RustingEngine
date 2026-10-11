@@ -321,6 +321,7 @@ impl EditorWindowRunner {
         world.insert_resource(scene_renderer.render_counters());
         world.insert_resource(scene_renderer.capacity_diagnostics());
         world.insert_resource(scene_renderer.culling_stats());
+        world.insert_resource(scene_renderer.shader_errors());
         world.insert_resource(scene_renderer.gpu_pass_times());
         scene_renderer
             .write_cpu_timings(&mut world.resource_mut::<CpuFrameTimings>());

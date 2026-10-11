@@ -1657,6 +1657,13 @@ pub const MAX_LIGHTS: usize = 1024;
 
 /// Capacity and asset fallbacks the renderer took instead of failing the
 /// frame.
+/// Compiler messages of the shaders that failed to build in the latest
+/// frame, each starting with its kind (`surface:`, `sky:`, `particle:`,
+/// `post:` or `condition:`), sorted. Shaders rebuild when their source
+/// changes, so fixing one clears its message on the next frame.
+#[derive(bevy_ecs::prelude::Resource, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShaderErrors(pub Vec<String>);
+
 #[derive(
     bevy_ecs::prelude::Resource, Clone, Copy, Debug, Default, PartialEq, Eq,
 )]
@@ -7105,6 +7112,27 @@ impl SceneRenderer {
             .values()
             .filter_map(|result| result.as_ref().err().map(String::as_str))
             .collect()
+    }
+
+    /// Every shader error of the latest frame; see [`ShaderErrors`].
+    #[must_use]
+    pub fn shader_errors(&self) -> ShaderErrors {
+        let mut errors: Vec<String> = [
+            ("surface", self.surface_shader_errors()),
+            ("sky", self.sky_shader_error().into_iter().collect()),
+            ("particle", self.particle_shader_errors()),
+            ("post", self.post_shader_error().into_iter().collect()),
+            ("condition", self.condition_shader_errors()),
+        ]
+        .into_iter()
+        .flat_map(|(kind, errors)| {
+            errors
+                .into_iter()
+                .map(move |error| format!("{kind}: {error}"))
+        })
+        .collect();
+        errors.sort();
+        ShaderErrors(errors)
     }
 
     /// Compiler messages of particle shaders that failed to build. Their
@@ -20550,6 +20578,22 @@ mod tests {
             errors
                 .iter()
                 .any(|error| error.contains(":3:") && error.contains("oops")),
+            "{errors:?}"
+        );
+        let errors = scene.renderer.shader_errors().0;
+        assert!(
+            errors.len() == 2
+                && errors.iter().all(|e| e.starts_with("surface: ")),
+            "{errors:?}"
+        );
+        // Fixing the source in place rebuilds the shader and clears its
+        // error; the unfixed one keeps reporting.
+        scene.assets.materials.get_mut(typo).unwrap().shader =
+            scene.assets.materials.get(gradient).unwrap().shader.clone();
+        assert_eq!(render_pixel(&mut scene, [26, 16]), far);
+        let errors = scene.renderer.shader_errors().0;
+        assert!(
+            errors.len() == 1 && errors[0].contains("version"),
             "{errors:?}"
         );
     }

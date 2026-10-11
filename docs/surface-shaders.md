@@ -73,6 +73,12 @@ in messages count lines of your source. A shader that fails draws the
 material's built-in surface instead, prints the error once, and
 `SceneRenderer::surface_shader_errors` keeps it.
 
+Shaders reload while you work: the renderer keys each build by its source
+text, so editing a shader in the Inspector rebuilds it on the next frame.
+`SceneRenderer::shader_errors` gathers every kind's errors, and the
+editor's **Render Settings** area lists them under "Shader errors" until
+the source is fixed.
+
 Materials that share a surface shader and textures still share one batch.
 `Unlit` materials run the shader too and draw its `base_color`.
 
