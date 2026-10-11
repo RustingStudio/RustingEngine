@@ -120,5 +120,10 @@ path = "src/examples/physics_bench.rs"
 required-features = ["window"]
 
 [[example]]
+name = "black_hole"
+path = "src/examples/black_hole.rs"
+required-features = ["window"]
+
+[[example]]
 name = "render_bench"
 path = "src/examples/render_bench.rs"

@@ -2,7 +2,7 @@
 
 <!--[![CI](https://github.com/RustingStudio/RustingEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/RustingStudio/RustingEngine/actions/workflows/ci.yml)-->
 
-**10,000 GPU-simulated cubes at more than 2,000 FPS on an RTX 3060.**
+**50,000 colliding GPU cubes at 119 FPS on an RTX 3060.**
 
 RustingEngine is a game engine written in Rust, made for big physics scenes:
 thousands of falling, flying and colliding objects that would make most
@@ -13,6 +13,12 @@ engines give up long before your graphics card is even busy.
 One planet, 10,000 moving cubes, 2,191 FPS at 1920×1080 on an RTX 3060 and a
 Ryzen 5 7600X. The GPU was only 35% busy. This is a stress scene made to show
 what the engine can do, not a promise that every game runs this fast.
+
+![A black hole eating planets, 60,000 disk particles at 65 FPS](docs/images/BHv1.jpg)
+
+A black hole with a 60,000-particle accretion disk and five planets spiraling
+in, at 65 FPS on the same machine. Every particle is a GPU body; one condition
+shader of about 25 lines of GLSL adds the gravity and swallows the planets.
 
 ## The idea
 
@@ -86,6 +92,13 @@ See the 10,000 cubes for yourself:
 ```bash
 cd testGame
 cargo run --release
+```
+
+Or the black hole, and 50,000 colliding cubes:
+
+```bash
+cargo run --release --features window --example black_hole
+cargo run --release --features window --example physics_bench -- falling 50000
 ```
 
 New here? Start with [Getting started](docs/getting-started.md) and the

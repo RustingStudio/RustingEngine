@@ -1101,7 +1101,7 @@ struct PhysicsContactGrid {
 
 impl PhysicsContactGrid {
     /// `CELL_SLOTS` in `physics_contacts.comp`.
-    const CELL_SLOTS: u64 = 8;
+    const CELL_SLOTS: u64 = 16;
 
     fn new(
         allocator: &Arc<StandardMemoryAllocator>,
@@ -15341,8 +15341,8 @@ mod tests {
     fn contact_grid_hash_stays_inside_its_memory_budget() {
         // Plenty of memory: two cells per body.
         assert_eq!(PhysicsContactGrid::hash_cells(1024, 1 << 30), 2048);
-        // 36 bytes per cell: 64 KiB affords 1820 cells, rounded down to 1024.
-        assert_eq!(PhysicsContactGrid::hash_cells(1024, 64 << 10), 1024);
+        // 68 bytes per cell: 64 KiB affords 963 cells, rounded down to 512.
+        assert_eq!(PhysicsContactGrid::hash_cells(1024, 64 << 10), 512);
         // Even no budget keeps one cell; the rest go to the fallback list.
         assert_eq!(PhysicsContactGrid::hash_cells(1024, 0), 1);
     }
@@ -15401,9 +15401,9 @@ mod tests {
             sphere(2, [20.0, 3.0, 0.0], 3.0),
             sphere(3, [20.0, 6.45, 0.0], 0.4),
         ];
-        // Twelve overlapping pebbles in one 0.8 m cell, which holds eight.
-        for index in 0..12 {
-            let (column, row) = (index % 4, index / 4);
+        // Twenty overlapping pebbles in one 0.8 m cell, which holds sixteen.
+        for index in 0..20 {
+            let (column, row) = (index % 5, index / 5);
             bodies.push(sphere(
                 4 + index,
                 [-9.5 + 0.15 * column as f32, 0.1, 0.1 + 0.15 * row as f32],
@@ -15454,7 +15454,7 @@ mod tests {
         assert_eq!(counters.physics_event_bytes, 32);
         // The test blocks on each frame, so nothing waits a frame.
         assert_eq!(counters.physics_readback_latency_frames, 0);
-        assert_eq!(states.len(), 16);
+        assert_eq!(states.len(), 24);
         let height = |slot: usize| states[slot].transform.position[1];
         for (slot, expected) in [(0, 0.4), (1, 1.2), (2, 3.0), (3, 6.4)] {
             assert!(
@@ -15465,13 +15465,13 @@ mod tests {
         }
         // The pebbles pushed each other apart, including the ones that did
         // not fit their cell.
-        for a in 4..16 {
+        for a in 4..24 {
             assert!(
                 (height(a) - 0.1).abs() < 0.03,
                 "pebble {a} at {}",
                 height(a)
             );
-            for b in a + 1..16 {
+            for b in a + 1..24 {
                 let [ax, _, az] = states[a].transform.position;
                 let [bx, _, bz] = states[b].transform.position;
                 let gap = ((ax - bx).powi(2) + (az - bz).powi(2)).sqrt();
