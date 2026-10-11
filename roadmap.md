@@ -2362,6 +2362,9 @@ Depends on: Milestones 5, 6, and 10. Deformable and fluid tooling follows Milest
 ### Benchmarks and evidence
 
 - [ ] Standard benchmark scenes: stacking stability, 100K pile, ragdoll count, joint-chain stability, CCD bullets, vehicle stress, cloth, fluid, and fracture.
+  - [x] Stacking stability, joint-chain stability and CCD bullets. `SuiteScene::run(size, steps)` builds the same bodies every run, steps them at 60 Hz on the CPU solver and returns a `SuiteScore`: mean step time and one error number. For stacking it is the largest cube drift. For the chain it is the widest gap between joined anchors over the run. For bullets it is the share that passes a 10 cm wall at 300 m/s. `cargo run --release --example physics_suite` prints them. Measured (release, this machine): a 10-cube tower drifts 3.5 cm, 15 cubes 16 cm, and 20 cubes fall over (66 m at 600 steps). A swinging 20-link ball-socket chain opens 0.43 m (10 links: 0.29 m). 400 bullets: none tunnel, 1.2 ms per step. Evidence: `physics_suite::tests::standard_scenes_stay_within_their_error_bounds` holds 10-cube drift < 5 cm, chain gap < 0.5 m (the current baseline) and zero tunnelling. fmt, all three clippy configurations, `cargo test --workspace` (lib 901) and the gpu-tests run (lib 1020) pass.
+  - [ ] Solver quality the suite exposed: a 20-cube tower must stand (drift under 5 cm) and a 20-link chain must stay under 5 cm of joint gap. Likely fixes: more iterations or substeps for tall islands, and block-solving ball-socket rows. Then tighten the test bounds.
+  - [ ] 100K pile (GPU; `physics_bench` times it but does not score it), ragdoll count, vehicle stress, cloth, fluid and fracture scenes.
 - [ ] Reference implementations of the same scenes on Jolt, PhysX, Rapier, and Godot Physics, run by the same harness.
 - [ ] Publish results with hardware, driver, and settings; regressions against stored baselines fail CI.
 

@@ -30,6 +30,7 @@ pub mod journal;
 pub mod lease;
 mod particles;
 mod physics_benchmark;
+mod physics_suite;
 pub mod picking;
 mod player;
 mod ragdoll;
@@ -103,6 +104,7 @@ pub use particles::*;
 pub use physics_benchmark::{
     BenchmarkBody, PhysicsBenchmark, BENCHMARK_TOWER_HEIGHT,
 };
+pub use physics_suite::{SuiteScene, SuiteScore};
 pub use player::*;
 pub use ragdoll::*;
 pub use render_benchmark::*;
