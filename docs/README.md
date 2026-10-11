@@ -47,6 +47,9 @@ were run against this version of the engine.
   catalog, and `rusting docs show api/GameScene` indexes the gameplay
   methods. For the Rust crates, `cargo doc --workspace --no-deps --open`
   builds the full reference; CI fails on a broken link in it.
+- [Physics guide](physics.md): CPU or GPU ownership, how state and events
+  travel between them and how late, determinism, and which solver fits
+  which job.
 - [Determinism](determinism.md): what makes a simulation reproducible, state
   hashes, `rusting determinism`, and replays.
 - [Architecture](../architecture.md): how the runtime, renderer, and editor

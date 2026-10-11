@@ -369,7 +369,9 @@ bodies stay on the GPU. The CPU does not download their transforms every
 frame. Instead you attach **rules** (`GpuPhysicsRule`: "position Y below
 -20", "colliding", "timer elapsed") to an object or a whole **class**, and the
 GPU sends back an event only when a rule matches. See
-[Tutorial 4](tutorials/04-gpu-cube-rain.md).
+[Tutorial 4](tutorials/04-gpu-cube-rain.md), and the
+[Physics guide](physics.md) for ownership, readback latency and solver
+choice.
 
 `rigid_body.kind` is `Dynamic` (moved by forces), `Kinematic` (moved by your
 code or a controller), or `Fixed`.
