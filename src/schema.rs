@@ -392,8 +392,8 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "export",
-        usage: "export <project-root> <parent-directory> [--target TRIPLE] [--json]",
-        summary: "Cook, build a release, and package the game into a new folder under the parent. A native export is verified by running a copy for 60 headless ticks from a fresh temporary folder.",
+        usage: "export <project-root> <parent-directory> [--target TRIPLE | --preset NAME] [--json]",
+        summary: "Cook, build a release, and package the game into a new folder under the parent. --preset uses a named entry of project.json `export_presets`: its target, Cargo features, and asset exclude patterns. A native export is verified by running a copy for 60 headless ticks from a fresh temporary folder.",
         gpu: NO_GPU,
         defaults: &[("--target", "host")],
         example: "export my_game exports --json",
@@ -1175,7 +1175,7 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         key: "rusting.hud",
         summary: "Text label or button drawn over the game view. offset points inward from the anchor, in logical pixels, and {tr:key} shows the current locale's text for key (scene.set_locale reads assets/locales/<locale>.json) and may itself hold {counter} placeholders; the text is measured after {counter} values are filled in, so right and bottom anchors keep their margin. {state:Name} shows that object's rusting.state, translated when the locale has it as a key, and {dialogue:Name} and {dialogue:Name/n} show a rusting.dialogue's line and choices. A button whose whole text is {binding:action} shows that rusting.input_action's inputs and, when clicked, rebinds the action to the next key pressed, keeping its inputs on the other device (keyboard and mouse, or gamepad) (Escape cancels; Press a key, or the binding.waiting translation, shows meanwhile). An element whose text fills to nothing is not drawn. A clicked button sends HudButtonPressed. follow names an object: the element then sits on that object's place on screen plus follow_offset (world metres, [0, 2, 0] is above a head), aligned by anchor (Bottom puts the text's bottom edge there) with offset in pixels, +y down, and hides while the object is behind the camera: name tags, health bars, waypoint markers.",
         gpu: "a few egui triangles",
-        example: || json!({"text": "Score: 0", "anchor": "TopRight", "offset": [24.0, 24.0], "font_size": 24.0, "color": [1.0, 0.9, 0.4, 1.0], "button": false, "requires": null, "camera": null, "follow": null, "follow_offset": [0.0, 0.0, 0.0]}),
+        example: || json!({"text": "Score: 0", "anchor": "TopRight", "offset": [24.0, 24.0], "font_size": 24.0, "color": [1.0, 0.9, 0.4, 1.0], "button": false, "requires": null, "camera": null, "follow": null, "follow_offset": [0.0, 0.0, 0.0], "font": null}),
     },
     ComponentSection {
         key: "rusting.input_action",
@@ -1583,6 +1583,7 @@ pub fn json_schemas() -> Value {
                     "properties": {"tick": {"type": "integer", "minimum": 0}},
                     "required": ["tick"]}},
                 "keep_going": {"type": "boolean"},
+                "realtime": {"type": "boolean"},
                 "annotate": {"type": "boolean"},
                 "contact_sheet": {"type": "string"},
                 "audio_out": {"type": "string"},
@@ -1634,6 +1635,21 @@ pub fn json_schemas() -> Value {
                     "description": "[width, height] in pixels the HUD is laid out for; it scales uniformly to fit the window, keeping its aspect ratio. Unset: drawn at the desktop's DPI scale."},
                 "window_title": {"type": "string",
                     "description": "Window title when the game opens from the project folder."},
+                "icon": {"type": "string",
+                    "description": "Window icon image (PNG), relative to the project folder; keep it under assets/ so exports carry it."},
+                "export_presets": {"type": "object",
+                    "description": "Named export settings for `rusting export --preset <name>`.",
+                    "additionalProperties": {"type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "target": {"type": "string",
+                                "description": "Rust target triple; unset builds for this machine."},
+                            "features": {"type": "array", "items": {"type": "string"},
+                                "description": "Cargo features of the game crate to turn on."},
+                            "exclude": {"type": "array", "items": {"type": "string"},
+                                "description": "Files under assets/ and scenes/ to leave out, relative to the project: * within one name, ** any folders."},
+                            "sign": {"type": "array", "items": {"type": "string"},
+                                "description": "Code-signing command run on the exported executable before verification: program then arguments, {exe} becomes its path."}}}},
             },
             "required": ["name", "main_scene", "cooked_scene"],
         },
@@ -1812,12 +1828,42 @@ pub fn catalog() -> Value {
             },
             "gpu": "{\"gpu\": true}: top-level; opens the headless Vulkan device so GPU bodies simulate and GPU events arrive in `rusting test`. A scenario with a `capture` step does this too, but without either the GPU bodies stay where they spawned and GPU rules never fire. Fails with `gpu: no Vulkan device` when none opens; software Vulkan (lavapipe) works but is slow",
             "explore": "{\"explore\": {\"goals\": [\"Coin\"], \"ticks_per_goal\": 600}}: top-level; an explorer bot walks the PlayerController toward each goal, an entity name or an [x, y, z] point, so a list of points walks a route (empty: every sensor collider, nearest first) with the player.* actions, jumps when it stops getting closer, and fails naming the goals it did not reach within ticks_per_goal; the report lists `explore.goals` (name, reached tick or null) and `explore.stuck`",
-            "fuzz": "{\"fuzz\": {\"seed\": 3, \"actions\": [\"jump\"], \"rate\": 0.1}}: top-level; before each tick from 1, each action (empty: every action the scene binds) flips between pressed and released with chance `rate`, seeded by `seed`; the report lists the presses as `fuzz_steps`. `rusting fuzz` sets it per seed",
+            "fuzz": "{\"fuzz\": {\"seed\": 3, \"actions\": [\"jump\"], \"rate\": 0.1}}: top-level; before each tick from 1, each action (empty: every action the scene binds) flips between pressed and released with chance `rate`, seeded by `seed`; the report lists the presses as `fuzz_steps`. `rusting fuzz` sets the seed per run and keeps these actions and rate unless given `--action`",
             "invariants": "{\"invariants\": [{\"entity\": \"Player\", \"path\": \"/transform/position\", \"finite\": true}, {\"entity\": \"Player\", \"path\": \"/transform/position/1\", \"greater_than\": -5.0}]}: top-level; same fields as `expect` plus `finite` (no NaN or infinite number). Checked after every tick; the first tick one fails is reported as `invariant N:`. A missing entity or path passes unless `exists` is set",
             "budgets": "{\"budgets\": {\"p95_tick_ms\": 8.0, \"max_draws\": 200}}: top-level; each limit exceeded fails the run with a `budget:` step. Timing is wall-clock and machine-dependent: set headroom and read `perf.environment` (engine version, OS, arch, debug or release, device, `cpus` and the one-minute `load_average` on Linux); a timing failure on a machine with load above half its CPUs says so, because other builds and tests slow every tick 2-3x in `rusting test --json`. `mean_cpu_ms` limits `perf.cpu_ms_mean`, the CPU time of all game threads per tick over the whole run (Linux only, 10 ms steps over the run, so give it a few hundred ticks; not checked elsewhere): other processes slow it far less than wall time, so it suits a shared machine. Draw and triangle limits draw every tick through headless Vulkan, no capture step needed, and fill `perf.render` (draws, triangles, gpu_ms, and `cameras` with each camera's gpu_ms, draws and triangles). `max_lights` limits `perf.render.lights`, the directional, point and spot lights the last frame uploaded (at most 64; `dropped_lights` counts the rest), and draws every tick like `max_draws`. `max_entities` limits `perf.entities_max`, the most live entities (scene objects, spawned copies, counters; not engine resources) after any tick. `perf.render` is null only in a scenario with no render budget, no `\"gpu\": true` and no capture or expect_pixels step",
             "tick_length_seconds": 1.0 / 60.0,
         },
     })
+}
+
+/// What is wrong with a written command line (the words after `rusting`,
+/// `[...]` brackets allowed): no command its words name, or a flag that
+/// command does not take.
+#[cfg(test)]
+pub(crate) fn command_problem(args: &str) -> Option<String> {
+    let words: Vec<_> = args
+        .split_whitespace()
+        .map(|word| word.trim_matches(['[', ']']))
+        .collect();
+    let named: Vec<_> = words
+        .iter()
+        .filter(|w| !w.starts_with('-'))
+        .copied()
+        .collect();
+    let operation = OPERATIONS
+        .iter()
+        .filter(|op| named.starts_with(&op.name.split(' ').collect::<Vec<_>>()))
+        .max_by_key(|op| op.name.len());
+    let global = ["--json", "--read-only", "--confine", "--help", "--version"];
+    for flag in words.iter().filter(|word| word.starts_with("--")) {
+        if !global.contains(flag)
+            && !operation.is_some_and(|op| op.usage.contains(flag))
+        {
+            return Some(format!("`rusting {args}` takes no {flag}"));
+        }
+    }
+    (operation.is_none() && !named.is_empty())
+        .then(|| format!("`rusting {args}` names no command"))
 }
 
 #[cfg(test)]
@@ -1844,7 +1890,7 @@ mod tests {
         );
     }
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::runtime::{
@@ -1900,6 +1946,8 @@ mod tests {
             window: None,
             ui_base_size: None,
             window_title: None,
+            icon: None,
+            export_presets: Default::default(),
         };
         let mut keys = written_keys(&project);
         keys.extend(
@@ -1909,6 +1957,8 @@ mod tests {
                 "window",
                 "ui_base_size",
                 "window_title",
+                "icon",
+                "export_presets",
             ]
             .map(String::from),
         );
@@ -1918,6 +1968,159 @@ mod tests {
         {
             assert_eq!(schemas[name]["$schema"], JSON_SCHEMA_DRAFT, "{name}");
         }
+    }
+
+    /// Where `value` breaks `schema`, for the keywords `json_schemas` uses.
+    fn violations(schema: &Value, value: &Value, at: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut fail = |what: String| out.push(format!("{at}: {what}"));
+        if schema.get("const").is_some_and(|wanted| wanted != value) {
+            fail(format!("is not {}", schema["const"]));
+        }
+        let is = |kind: &str| match kind {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => panic!("unknown type {kind}"),
+        };
+        let kinds = match &schema["type"] {
+            Value::String(kind) => vec![kind.as_str()],
+            Value::Array(kinds) => {
+                kinds.iter().filter_map(Value::as_str).collect()
+            }
+            _ => Vec::new(),
+        };
+        if !kinds.is_empty() && !kinds.iter().any(|kind| is(kind)) {
+            fail(format!("is not {kinds:?}"));
+            return out;
+        }
+        let number = value.as_f64();
+        if let (Some(n), Some(min)) = (number, schema["minimum"].as_f64()) {
+            if n < min {
+                fail(format!("is below {min}"));
+            }
+        }
+        if let (Some(n), Some(max)) = (number, schema["maximum"].as_f64()) {
+            if n > max {
+                fail(format!("is above {max}"));
+            }
+        }
+        if let Some(object) = value.as_object() {
+            for key in schema["required"].as_array().into_iter().flatten() {
+                if !object.contains_key(key.as_str().unwrap()) {
+                    fail(format!("misses {key}"));
+                }
+            }
+            for (key, item) in object {
+                let at = format!("{at}/{key}");
+                match (
+                    &schema["properties"][key],
+                    &schema["additionalProperties"],
+                ) {
+                    (Value::Null, Value::Bool(false)) => {
+                        out.push(format!("{at}: is not allowed"))
+                    }
+                    (Value::Null, Value::Null) => {}
+                    (Value::Null, other) | (other, _) => {
+                        out.extend(violations(other, item, &at))
+                    }
+                }
+            }
+        }
+        if let Some(items) = value.as_array() {
+            let count = items.len() as u64;
+            if schema["minItems"].as_u64().is_some_and(|min| count < min)
+                || schema["maxItems"].as_u64().is_some_and(|max| count > max)
+            {
+                out.push(format!("{at}: has {count} items"));
+            }
+            if !schema["items"].is_null() {
+                for (index, item) in items.iter().enumerate() {
+                    out.extend(violations(
+                        &schema["items"],
+                        item,
+                        &format!("{at}/{index}"),
+                    ));
+                }
+            }
+        }
+        if let Some(branches) = schema["oneOf"].as_array() {
+            let matching = branches
+                .iter()
+                .filter(|branch| violations(branch, value, at).is_empty())
+                .count();
+            if matching != 1 {
+                out.push(format!("{at}: matches {matching} of oneOf"));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn json_schemas_validate_every_scene_patch_scenario_and_project() {
+        let schemas = json_schemas();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        let mut folders = vec![root.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(folder).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy();
+                if path.is_dir() {
+                    // Skip hidden folders and generated, ignored output.
+                    if !name.starts_with('.')
+                        && name != "target"
+                        && name != "build"
+                    {
+                        folders.push(path);
+                    }
+                } else if name.ends_with(".json") || name.ends_with(".rscene") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut checked = BTreeMap::<&str, usize>::new();
+        let mut check = |kind: &'static str, value: &Value, origin: &str| {
+            *checked.entry(kind).or_default() += 1;
+            let found = violations(&schemas[kind], value, "");
+            assert!(
+                found.is_empty(),
+                "{origin} breaks the {kind} schema: {found:?}"
+            );
+        };
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let value: Value = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let kind = if value.get("entities").is_some() {
+                "scene"
+            } else if value.get("operations").is_some() {
+                "scene_patch"
+            } else if value.get("ticks").is_some() {
+                "scenario"
+            } else if path.ends_with("project.json") {
+                "project"
+            } else {
+                continue;
+            };
+            check(kind, &value, &path.display().to_string());
+        }
+        for info in crate::diagnostics::CODES {
+            if info.example.starts_with('{') {
+                let value = serde_json::from_str(info.example).unwrap();
+                check("scene_patch", &value, info.code);
+            }
+        }
+        // A broken document must not pass.
+        let bad = json!({"operations": [{"op": "set", "path": 3}]});
+        assert!(!violations(&schemas["scene_patch"], &bad, "").is_empty());
+        let counts: Vec<_> = checked.values().copied().collect();
+        assert!(counts.iter().all(|&count| count >= 10), "{checked:?}");
+        assert_eq!(counts.len(), 4, "{checked:?}");
     }
 
     #[test]

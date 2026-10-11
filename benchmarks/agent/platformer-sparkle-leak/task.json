@@ -1,0 +1,24 @@
+{
+  "kind": "performance",
+  "template": "2d",
+  "request": "We gave the goal in this platformer a steady sparkle so players can spot it from afar. Since then the level gets heavier the longer anyone plays: the scene keeps growing and frames slow down, even though only a few sparks are ever in view. Find the cause and fix it, keeping the steady sparkle and the burst when the player reaches the goal.",
+  "seed": [
+    {
+      "file": "scenes/main.rscene",
+      "find": "\"rusting.burst_emitter\": \"{\\\"count\\\":24,\\\"speed\\\":4.0,\\\"lifetime\\\":0.8,\\\"particle_scale\\\":0.25,\\\"gravity\\\":9.81,\\\"on_collision\\\":true,\\\"rate\\\":0.0,",
+      "replace": "\"rusting.burst_emitter\": \"{\\\"count\\\":24,\\\"speed\\\":4.0,\\\"lifetime\\\":30.0,\\\"particle_scale\\\":0.25,\\\"gravity\\\":9.81,\\\"on_collision\\\":true,\\\"rate\\\":12.0,"
+    }
+  ],
+  "remove": [],
+  "reference": [
+    {
+      "file": "scenes/main.rscene",
+      "find": "\"rusting.burst_emitter\": \"{\\\"count\\\":24,\\\"speed\\\":4.0,\\\"lifetime\\\":30.0,\\\"particle_scale\\\":0.25,\\\"gravity\\\":9.81,\\\"on_collision\\\":true,\\\"rate\\\":12.0,",
+      "replace": "\"rusting.burst_emitter\": \"{\\\"count\\\":24,\\\"speed\\\":4.0,\\\"lifetime\\\":0.8,\\\"particle_scale\\\":0.25,\\\"gravity\\\":9.81,\\\"on_collision\\\":true,\\\"rate\\\":12.0,"
+    }
+  ],
+  "hidden": [
+    "../../../src/templates/platformer_run.json",
+    "hidden/sparkle.json"
+  ]
+}

@@ -518,8 +518,8 @@ fn docs_lists_searches_shows_and_briefs_within_a_token_budget() {
     assert!(shown["data"]["tokens"].as_u64().unwrap() <= 50);
     assert!(shown["data"]["total_tokens"].as_u64().unwrap() > 50);
 
-    let (_, brief) = run(&["docs", "--brief", "--budget", "500"]);
-    assert!(brief["data"]["tokens"].as_u64().unwrap() <= 500);
+    let (_, brief) = run(&["docs", "--brief", "--budget", "600"]);
+    assert!(brief["data"]["tokens"].as_u64().unwrap() <= 600);
     assert!(brief["data"]["text"]
         .as_str()
         .unwrap()
@@ -1505,6 +1505,94 @@ fn serve_answers_json_rpc_lines_with_the_cli_envelope() {
 }
 
 #[test]
+fn cli_serve_and_mcp_give_the_same_envelope_for_each_operation() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let project =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/putt_course");
+    // Command words, then the rest of the arguments.
+    let operations: [(&str, &[&str]); 9] = [
+        ("validate", &[]),
+        ("lint", &[]),
+        ("project inspect", &["--summary"]),
+        ("scene inspect", &["scenes/main.rscene", "--limit", "3"]),
+        (
+            "scene query",
+            &["scenes/main.rscene", "--component", "camera"],
+        ),
+        ("scene inspect", &["missing.rscene"]),
+        ("explain", &["SCENE_IO"]),
+        ("schema", &["scene"]),
+        ("asset list", &[]),
+    ];
+    // Sends one request line per operation and reads one reply per line.
+    let talk = |command: &[&str], lines: Vec<String>| -> Vec<Value> {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(command)
+            .current_dir(&project)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        for line in lines {
+            writeln!(stdin, "{line}").unwrap();
+        }
+        drop(stdin);
+        let output = child.wait_with_output().unwrap();
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    let served = talk(
+        &["serve"],
+        operations
+            .iter()
+            .enumerate()
+            .map(|(id, (method, params))| {
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
+            })
+            .collect(),
+    );
+    let called = talk(
+        &["mcp", "."],
+        operations
+            .iter()
+            .enumerate()
+            .map(|(id, (method, params))| {
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": method.replace(' ', "_"), "arguments": {"args": params}}}).to_string()
+            })
+            .collect(),
+    );
+    assert_eq!(served.len(), operations.len());
+    assert_eq!(called.len(), operations.len());
+    for (id, (method, params)) in operations.iter().enumerate() {
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(method.split(' '))
+            .args(*params)
+            .arg("--json")
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mcp: Value = serde_json::from_str(
+            called[id]["result"]["content"][0]["text"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(served[id]["result"], cli, "serve differs on {method}");
+        assert_eq!(mcp, cli, "mcp differs on {method}");
+        assert_eq!(
+            called[id]["result"]["isError"],
+            !cli["ok"].as_bool().unwrap(),
+        );
+    }
+    assert_eq!(served[5]["result"]["ok"], false);
+}
+
+#[test]
 #[ignore = "runs a real cargo build of a generated project"]
 fn debug_session_steps_and_inspects_a_running_game() {
     use std::io::Write;
@@ -1705,4 +1793,344 @@ fn scene_retarget_saves_a_clip_on_the_other_rig() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(missing["diagnostics"][0]["code"], "RETARGET_FAILED");
     std::fs::remove_dir_all(parent).unwrap();
+}
+
+/// Fenced code blocks of the agent guides as `(language, body)`.
+fn guide_blocks() -> Vec<(&'static str, &'static str)> {
+    let skill = include_str!("../skills/rusting-game/SKILL.md");
+    let agents = include_str!("../src/project_agents.md");
+    [skill, agents]
+        .iter()
+        .flat_map(|text| text.split("```").skip(1).step_by(2))
+        .map(|block| block.split_once('\n').unwrap())
+        .collect()
+}
+
+#[test]
+fn agent_guide_examples_run_in_a_new_project() {
+    let parent = temporary_parent();
+    let project = generated_project(&parent);
+    let cli = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(args)
+            .arg("--json")
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8(output.stdout).unwrap(),
+        )
+    };
+    let (mut patches, mut scenarios) = (0, 0);
+    for (language, body) in guide_blocks() {
+        if language != "json" {
+            continue;
+        }
+        if body.contains("\"operations\"") {
+            std::fs::write(project.join("patch.json"), body).unwrap();
+            let (ok, out) = cli(&[
+                "scene",
+                "patch",
+                "scenes/main.rscene",
+                "patch.json",
+                "--dry-run",
+            ]);
+            assert!(ok, "{body}\n{out}");
+            patches += 1;
+        } else {
+            // Scenarios name a guide's example game, so they only parse.
+            serde_json::from_str::<rusting_engine::scenario::Scenario>(body)
+                .unwrap_or_else(|e| panic!("{body}\n{e}"));
+            scenarios += 1;
+        }
+    }
+    assert!(patches > 0 && scenarios > 0);
+    // Commands with no placeholder that write nothing must succeed.
+    let skill = include_str!("../skills/rusting-game/SKILL.md");
+    let agents = include_str!("../src/project_agents.md");
+    let mut ran = 0;
+    for code in [skill, agents]
+        .iter()
+        .flat_map(|text| text.split('`').skip(1).step_by(2))
+    {
+        let Some(args) = code.strip_prefix("rusting ") else {
+            continue;
+        };
+        let args: Vec<&str> = args.split_whitespace().collect();
+        let placeholder = args.iter().any(|arg| {
+            arg.contains(['<', '[', ','])
+                || arg.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                    && !arg.contains('_')
+        });
+        let quiet = rusting_engine::cli::READ_ONLY_COMMANDS
+            .iter()
+            .any(|command| args.starts_with(command))
+            || args == ["fix", "--dry-run"];
+        if placeholder || !quiet || args.iter().any(|a| a.contains("build/")) {
+            continue;
+        }
+        let (ok, out) = cli(&args);
+        assert!(ok, "`{code}` fails: {out}");
+        ran += 1;
+    }
+    assert!(ran > 15, "only {ran} commands ran");
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+/// Each whole game in the agent guides builds as a project's `main.rs`.
+#[test]
+#[ignore = "runs real cargo builds of a generated project"]
+fn agent_guide_games_build() {
+    let parent = temporary_parent();
+    let project = generated_project(&parent);
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/cli-games");
+    let mut built = 0;
+    for (language, body) in guide_blocks() {
+        if language != "rust" || !body.contains("rusting_game!(update)") {
+            continue;
+        }
+        std::fs::write(project.join("src/main.rs"), body).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(["check", ".", "--json"])
+            .current_dir(&project)
+            .env("CARGO_TARGET_DIR", &target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{body}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        built += 1;
+    }
+    assert!(built >= 2, "only {built} games");
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+/// Per sample: a scenario and the component whose removal must fail it.
+/// `forever_bear_booth` has none: game code alone drives what its scenario
+/// checks, so no scene component can be left out.
+const SAMPLE_STRENGTH: [(&str, Option<(&str, &str)>); 13] = [
+    ("brick_bounce", Some(("first_hit.json", "collider"))),
+    ("core_defense", Some(("aimed_shot.json", "collider"))),
+    ("crate_keeper", Some(("solve.json", "rusting.tile_map"))),
+    ("ember_arena", Some(("ember_burns.json", "collider"))),
+    ("forever_bear_booth", None),
+    ("hammer_run", Some(("first_gem.json", "rusting.pickup"))),
+    ("lantern_grid", Some(("solve.json", "collider"))),
+    ("night_vault", Some(("heist.json", "rusting.pickup"))),
+    ("putt_course", Some(("sink.json", "rigid_body"))),
+    ("sky_hop", Some(("first_coin.json", "rusting.pickup"))),
+    ("snake_trail", Some(("crash.json", "rusting.tile_map"))),
+    ("target_range", Some(("first_shot.json", "collider"))),
+    ("tower_topple", Some(("topple_pyramid.json", "rigid_body"))),
+];
+
+/// Every sample game has a fuzzable `tests/invariants.json` whose
+/// invariants name entities of its scene, and a strength check.
+#[test]
+fn every_sample_has_invariants_to_fuzz() {
+    let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+    let mut games: Vec<String> = std::fs::read_dir(&samples)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.join("tests").is_dir())
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    games.sort();
+    let named: Vec<_> = SAMPLE_STRENGTH.iter().map(|row| row.0).collect();
+    assert_eq!(games, named);
+    for (game, strength) in SAMPLE_STRENGTH {
+        let root = samples.join(game);
+        if let Some((scenario, _)) = strength {
+            assert!(root.join("tests").join(scenario).is_file(), "{game}");
+        }
+        let text = std::fs::read_to_string(root.join("tests/invariants.json"))
+            .unwrap();
+        let parsed: rusting_engine::scenario::Scenario =
+            serde_json::from_str(&text).unwrap();
+        assert!(parsed.fuzz.is_some_and(|fuzz| !fuzz.actions.is_empty()));
+        let scene =
+            std::fs::read_to_string(root.join("scenes/main.rscene")).unwrap();
+        let invariants: Value = serde_json::from_str(&text).unwrap();
+        let invariants = invariants["invariants"].as_array().unwrap();
+        assert!(invariants.len() >= 2, "{game}");
+        for invariant in invariants {
+            let entity = invariant["entity"].as_str().unwrap();
+            assert!(
+                scene.contains(&format!("\"name\": \"{entity}\"")),
+                "{game} has no entity {entity}"
+            );
+        }
+    }
+}
+
+/// Every sample passes `rusting lint`, all its scenarios, 100 fuzz seeds of
+/// its invariants, and fails its strength scenario without the component.
+#[test]
+#[ignore = "builds and runs every sample game for many minutes"]
+fn samples_pass_lint_scenarios_fuzz_and_strength_check() {
+    let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/samples");
+    for (game, strength) in SAMPLE_STRENGTH {
+        let root = samples.join(game);
+        let mut runs = vec![
+            vec!["lint".to_owned(), ".".to_owned()],
+            vec!["test".to_owned(), ".".to_owned()],
+            ["fuzz", ".", "tests/invariants.json", "--seeds", "100"]
+                .map(str::to_owned)
+                .to_vec(),
+        ];
+        if let Some((scenario, component)) = strength {
+            runs.push(vec![
+                "test".to_owned(),
+                ".".to_owned(),
+                format!("tests/{scenario}"),
+                "--without".to_owned(),
+                component.to_owned(),
+            ]);
+        }
+        for args in runs {
+            let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+                .args(&args)
+                .arg("--json")
+                .current_dir(&root)
+                .env("CARGO_TARGET_DIR", &target)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{game} {args:?}\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "builds and runs every template and sample game for many minutes"]
+fn every_template_and_sample_builds_and_runs_headless() {
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/samples");
+    let parent = std::env::temp_dir()
+        .join(format!("rusting-templates-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&parent).unwrap();
+    let mut roots = Vec::new();
+    for template in rusting_engine::project::ProjectTemplate::ALL {
+        let name = format!("Template {}", template.name());
+        let (output, created) = run(&[
+            "new",
+            parent.to_str().unwrap(),
+            &name,
+            "--template",
+            template.name(),
+        ]);
+        assert!(output.status.success(), "{created}");
+        roots.push(parent.join(name));
+    }
+    let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+    roots.extend(SAMPLE_STRENGTH.map(|row| samples.join(row.0)));
+    for root in roots {
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(["run", root.to_str().unwrap(), "--ticks", "120", "--json"])
+            .env("CARGO_TARGET_DIR", &target)
+            .output()
+            .unwrap();
+        let run: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{}: {run}", root.display());
+        assert_eq!(run["data"]["headless_ticks"], 120, "{run}");
+    }
+    let _ = std::fs::remove_dir_all(parent);
+}
+
+/// Runs `rusting determinism` on every sample game: debug, release, and
+/// release pinned to one CPU (one bevy and rayon worker thread) must give
+/// the same state hash on every tick.
+#[test]
+#[ignore = "builds every sample game in debug and release"]
+fn every_sample_hashes_alike_in_debug_release_and_on_one_cpu() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (sample, _) in SAMPLE_STRENGTH {
+        // A relative root, as people type it.
+        let root = format!("samples/{sample}");
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(["determinism", &root, "--ticks", "300", "--json"])
+            .current_dir(repository)
+            .env("CARGO_TARGET_DIR", repository.join("target/samples"))
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{sample}: {report}");
+        let configurations =
+            report["data"]["configurations"].as_array().unwrap();
+        let names: Vec<_> = configurations.iter().map(|c| &c["name"]).collect();
+        assert_eq!(names, ["debug", "release", "release-one-cpu"], "{report}");
+    }
+}
+
+/// Exports a game through one preset per supported platform (Linux and
+/// Windows, `docs/getting-started.md`). The Linux export runs its own
+/// headless check; the Windows one is run under Wine when it is installed.
+#[test]
+#[ignore = "runs release builds for two platforms"]
+fn every_platform_preset_exports_a_game_that_runs() {
+    let parent = temporary_parent();
+    let (output, created) = run(&[
+        "new",
+        parent.to_str().unwrap(),
+        "Smoke",
+        "--template",
+        "starter",
+    ]);
+    assert!(output.status.success(), "{created}");
+    let root = parent.join("Smoke");
+    let manifest = root.join("project.json");
+    let mut project: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap())
+            .unwrap();
+    project["export_presets"] = serde_json::json!({
+        "linux": {},
+        "windows": {"target": "x86_64-pc-windows-gnu"},
+    });
+    std::fs::write(&manifest, project.to_string()).unwrap();
+    let target =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/export-smoke");
+    let export = |preset: &str| {
+        let out = parent.join(preset);
+        std::fs::create_dir(&out).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+            .args(["export", root.to_str().unwrap(), out.to_str().unwrap()])
+            .args(["--preset", preset, "--json"])
+            .env("CARGO_TARGET_DIR", &target)
+            .output()
+            .unwrap();
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{preset}: {value}");
+        value
+    };
+
+    let linux = export("linux");
+    assert_eq!(linux["data"]["verified"]["exit_code"], 0, "{linux}");
+
+    let windows = export("windows");
+    assert_eq!(windows["diagnostics"][0]["code"], "EXPORT_NOT_VERIFIED");
+    let folder =
+        PathBuf::from(windows["data"]["export_path"].as_str().unwrap());
+    let exe = folder.join("smoke.exe");
+    assert!(std::fs::read(&exe).unwrap().starts_with(b"MZ"), "{windows}");
+    match Command::new("wine")
+        .arg(&exe)
+        .current_dir(&folder)
+        .env("RUSTING_HEADLESS_TICKS", "60")
+        .env("WINEDEBUG", "-all")
+        .output()
+    {
+        Ok(ran) => assert!(
+            ran.status.success(),
+            "smoke.exe under Wine: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        ),
+        Err(_) => eprintln!("no Wine: smoke.exe was built but not run"),
+    }
+    let _ = std::fs::remove_dir_all(&parent);
 }

@@ -593,6 +593,9 @@ add the `mod` line and call it reports to `src/main.rs` (`rusting recipe list`).
   scenario runs on and reports every failure. `rusting test --json` lists
   the `log` lines of each scenario; `rusting run --ticks N --json` reports
   `timings.headless_ms_per_tick`.
+- `"realtime": true` runs a scenario at one tick per fixed step of real
+  time instead of as fast as possible: use it for a client scenario
+  against a server started with `rusting run --server`.
 - `rusting inspect --tick N [--entity NAME]` runs the game to tick N and prints each
   entity's state after that tick, without writing a scenario.
   It runs without scenario input; to see a value during a scenario, add a

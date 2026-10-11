@@ -120,3 +120,73 @@ fn sync_bindings(world: &mut World, scene: &mut SceneBindings) {
         scene.declared = declared;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_actions_follow_their_components_and_keep_code_bindings() {
+        assert_eq!(parse_input("KeyF"), Ok(InputBinding::Key(KeyCode::KeyF)));
+        assert_eq!(
+            parse_input("MouseRight"),
+            Ok(InputBinding::Mouse(MouseButton::Right))
+        );
+        assert_eq!(
+            parse_input("PadSouth"),
+            Ok(InputBinding::Pad(PadButton::South))
+        );
+        assert!(parse_input("PadNope").unwrap_err().contains("gamepad"));
+        assert!(parse_input("KeyQQ").unwrap_err().contains("KeyQQ"));
+
+        let mut world = World::new();
+        install(&mut world);
+        // Game code bound F to fire itself; the scene must leave it alone.
+        world
+            .resource_mut::<ActionMap>()
+            .bind("fire", InputBinding::Key(KeyCode::KeyF));
+        let action = |inputs: &[&str]| InputAction {
+            action: "fire".into(),
+            inputs: inputs.iter().map(|&name| name.to_owned()).collect(),
+        };
+        let entity = world.spawn(action(&["KeyF", "MouseLeft"])).id();
+        world.spawn(action(&["MouseLeft"]));
+        bind_input_actions(&mut world);
+        let fire = |world: &World| {
+            world.resource::<ActionMap>().bindings("fire").to_vec()
+        };
+        assert_eq!(
+            fire(&world),
+            [
+                InputBinding::Key(KeyCode::KeyF),
+                InputBinding::Mouse(MouseButton::Left)
+            ],
+            "each binding once"
+        );
+
+        world.entity_mut(entity).insert(action(&["PadSouth"]));
+        bind_input_actions(&mut world);
+        assert_eq!(
+            fire(&world),
+            [
+                InputBinding::Key(KeyCode::KeyF),
+                InputBinding::Mouse(MouseButton::Left),
+                InputBinding::Pad(PadButton::South)
+            ]
+        );
+
+        let all: Vec<_> = world
+            .query_filtered::<bevy_ecs::entity::Entity, bevy_ecs::query::With<InputAction>>()
+            .iter(&world)
+            .collect();
+        for entity in all {
+            world.despawn(entity);
+        }
+        bind_input_actions(&mut world);
+        assert_eq!(
+            fire(&world),
+            [InputBinding::Key(KeyCode::KeyF)],
+            "only the game code's binding stays"
+        );
+    }
+}

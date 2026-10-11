@@ -533,6 +533,42 @@ mod tests {
     }
 
     #[test]
+    fn deep_self_and_preexisting_cycles_are_rejected() {
+        let mut world = world_with_diagnostics();
+        let root = world.spawn(Transform::new([1.0, 0.0, 0.0])).id();
+        let middle = world.spawn(Transform::new([0.0, 2.0, 0.0])).id();
+        let leaf = world.spawn(Transform::new([0.0, 0.0, 3.0])).id();
+        set_parent(&mut world, middle, root).unwrap();
+        set_parent(&mut world, leaf, middle).unwrap();
+        for (child, parent) in [(root, leaf), (root, middle), (leaf, leaf)] {
+            assert_eq!(
+                set_parent(&mut world, child, parent),
+                Err(HierarchyError::Cycle { child, parent })
+            );
+        }
+        propagate_transforms(&mut world);
+        assert_eq!(
+            world.get::<GlobalTransform>(leaf).unwrap().matrix[3],
+            [1.0, 2.0, 3.0, 1.0]
+        );
+
+        // A loop written past `set_parent` ends the ancestor walk too.
+        let first = world.spawn_empty().id();
+        let second = world.spawn_empty().id();
+        world.entity_mut(first).insert(Parent(second));
+        world.entity_mut(second).insert(Parent(first));
+        let outsider = world.spawn_empty().id();
+        assert_eq!(
+            set_parent(&mut world, outsider, first),
+            Err(HierarchyError::Cycle {
+                child: outsider,
+                parent: first
+            })
+        );
+        assert!(world.get::<Parent>(outsider).is_none());
+    }
+
+    #[test]
     fn missing_child_and_parent_are_reported() {
         let mut world = World::new();
         let child = world.spawn_empty().id();

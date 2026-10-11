@@ -545,14 +545,26 @@ fn run_command(args: &[String]) -> CliResult {
                 &actions,
             )
         }
-        ["export", root, parent] => {
-            cli::export_game_project(Path::new(root), Path::new(parent), None)
-        }
+        ["export", root, parent] => cli::export_game_project(
+            Path::new(root),
+            Path::new(parent),
+            None,
+            None,
+        ),
         ["export", root, parent, "--target", target] => {
             cli::export_game_project(
                 Path::new(root),
                 Path::new(parent),
                 Some(target),
+                None,
+            )
+        }
+        ["export", root, parent, "--preset", preset] => {
+            cli::export_game_project(
+                Path::new(root),
+                Path::new(parent),
+                None,
+                Some(preset),
             )
         }
         ["preset", "list"] => cli::list_presets(),

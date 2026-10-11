@@ -1,0 +1,8 @@
+{
+  "name": "sparkle: the goal sparkles for ten seconds while the scene stays small",
+  "ticks": 600,
+  "budgets": {
+    "max_entities": 120
+  },
+  "steps": []
+}

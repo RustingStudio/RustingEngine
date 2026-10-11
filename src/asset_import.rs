@@ -30,6 +30,7 @@ pub enum ImportedKind {
     Image,
     Gltf,
     Audio,
+    Font,
 }
 
 impl ImportedKind {
@@ -41,6 +42,7 @@ impl ImportedKind {
             "png" | "jpg" | "jpeg" | "bmp" | "tga" => Some(Self::Image),
             "gltf" | "glb" => Some(Self::Gltf),
             "wav" | "ogg" => Some(Self::Audio),
+            "ttf" | "otf" => Some(Self::Font),
             _ => None,
         }
     }
@@ -332,6 +334,25 @@ fn validate(
             let bytes = std::fs::read(path).map_err(io(path))?;
             audio_size(&bytes).map_err(|message| invalid(message.into()))
         }
+        ImportedKind::Font => {
+            let bytes = std::fs::read(path).map_err(io(path))?;
+            let magic = bytes.get(..4).unwrap_or_default();
+            if ![&[0, 1, 0, 0][..], b"OTTO", b"true"].contains(&magic) {
+                return Err(invalid("not a TrueType or OpenType font".into()));
+            }
+            // egui is what draws HUD and sign text; make sure it can.
+            #[cfg(feature = "ui")]
+            if crate::text_texture::text_texture_in_font(
+                "Aa",
+                crate::text_texture::TextStyle::default(),
+                &bytes,
+            )
+            .is_none()
+            {
+                return Err(invalid("egui cannot read this font".into()));
+            }
+            Ok([0, 0])
+        }
     }
 }
 
@@ -450,7 +471,9 @@ fn copy_in(
     let kind = ImportedKind::from_path(source)
         .ok_or_else(|| AssetImportError::Unsupported(source.to_owned()))?;
     let dependencies = match kind {
-        ImportedKind::Image | ImportedKind::Audio => Vec::new(),
+        ImportedKind::Image | ImportedKind::Audio | ImportedKind::Font => {
+            Vec::new()
+        }
         ImportedKind::Gltf => gltf_dependencies(source)?,
     };
     let size = validate(kind, source)?;
@@ -801,13 +824,16 @@ pub fn generate_asset(
 
 /// Generator hook names built into the engine; a project hook with the same
 /// name wins.
-pub const BUILTIN_GENERATORS: [&str; 4] = ["sfx", "texture", "sprite", "mesh"];
+pub const BUILTIN_GENERATORS: [&str; 5] =
+    ["sfx", "texture", "sprite", "mesh", "font"];
 
 /// A built-in generator: `prompt` is a preset and an optional seed (`coin`
 /// or `coin 7`). `sfx` synthesizes a WAV with [`crate::sfx::synth`];
 /// `texture` draws a tileable PNG with [`crate::texgen::synth`], and
-/// `sprite` a transparent PNG shape with [`crate::texgen::sprite`], and
-/// `mesh` a low-poly binary glTF with [`crate::meshgen::synth`].
+/// `sprite` a transparent PNG shape with [`crate::texgen::sprite`],
+/// `mesh` a low-poly binary glTF with [`crate::meshgen::synth`], and
+/// `font` a pixel TrueType font with [`crate::fontgen::synth`], which
+/// takes no seed.
 fn generate_builtin(
     project_root: &Path,
     hook: &str,
@@ -837,7 +863,18 @@ fn generate_builtin(
         ))
     };
     let output_dir = Staging::new("generated")?;
-    let file = if hook == "sfx" {
+    let file = if hook == "font" {
+        if prompt.split_whitespace().count() > 1 {
+            return Err(failed(format!(
+                "`{prompt}`: a font preset takes no seed"
+            )));
+        }
+        let font = crate::fontgen::synth(preset)
+            .ok_or_else(|| unknown(&crate::fontgen::PRESETS))?;
+        let file = output_dir.0.join(format!("{preset}.ttf"));
+        std::fs::write(&file, font).map_err(io(&file))?;
+        file
+    } else if hook == "sfx" {
         let samples = crate::sfx::synth(preset, seed)
             .ok_or_else(|| unknown(&crate::sfx::PRESETS))?;
         let file = output_dir.0.join(format!("{preset}_{seed}.wav"));
@@ -867,7 +904,11 @@ fn generate_builtin(
         original: format!("generator:{hook}"),
         license: Some("CC0-1.0".to_owned()),
         generator: Some(format!("rusting {hook}")),
-        notes: Some(format!("preset {preset}, seed {seed}")),
+        notes: Some(if hook == "font" {
+            format!("preset {preset}")
+        } else {
+            format!("preset {preset}, seed {seed}")
+        }),
         ..AssetProvenance::default()
     };
     match target {

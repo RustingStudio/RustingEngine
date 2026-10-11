@@ -2111,11 +2111,27 @@ pub fn save_scene(
     path: impl AsRef<Path>,
     name: impl Into<String>,
 ) -> Result<(), SceneIoError> {
-    let mut document = scene_document(world, name)?;
+    write_scene(scene_document(world, name)?, path.as_ref())
+}
+
+/// Like [`save_scene`], but keeps an entity whose mesh or textures were made
+/// in code without its `mesh_renderer`, as [`scene_document_lenient`] does.
+/// For a snapshot of state to query, never for a scene to load and edit.
+pub fn save_scene_state(
+    world: &mut World,
+    path: impl AsRef<Path>,
+    name: impl Into<String>,
+) -> Result<(), SceneIoError> {
+    write_scene(scene_document_lenient(world, name)?, path.as_ref())
+}
+
+fn write_scene(
+    mut document: SceneDocument,
+    path: &Path,
+) -> Result<(), SceneIoError> {
     // Instance members come back from their source file on the next load,
     // with the overrides this writes.
     super::scene_instance::fold_instance_members(&mut document)?;
-    let path = path.as_ref();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         relativize_scene_assets(&mut document, parent)?;
@@ -3371,6 +3387,42 @@ mod tests {
     }
 
     #[test]
+    fn a_state_save_keeps_objects_whose_mesh_was_made_in_code() {
+        // `rusting run --ticks` saves the end state for `scene query`; a
+        // render target or generated mesh must not fail that save.
+        let mut app = scene_app();
+        let (mesh, material) = {
+            let mut assets = app.world_mut().resource_mut::<AssetServer>();
+            let copy =
+                assets.meshes.get(assets.fallback_mesh).cloned().unwrap();
+            (assets.meshes.insert(copy), assets.fallback_material)
+        };
+        app.spawn((
+            SceneId::new(),
+            Name("Screen".into()),
+            MeshRenderer {
+                mesh,
+                material,
+                cast_shadows: true,
+                receive_shadows: true,
+            },
+        ));
+        let folder = std::env::temp_dir()
+            .join(format!("rusting-state-save-{}", Uuid::new_v4()));
+        let path = folder.join("final.rscene");
+        assert!(matches!(
+            save_scene(app.world_mut(), &path, "Main"),
+            Err(SceneIoError::UnsavedMesh(_))
+        ));
+        save_scene_state(app.world_mut(), &path, "Main").unwrap();
+        let document: SceneDocument =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document.entities[0].name.as_deref(), Some("Screen"));
+        assert!(document.entities[0].mesh_renderer.is_none());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
     fn tools_keep_unregistered_components_through_a_round_trip() {
         let mut app = scene_app();
         app.spawn((Name("Flag".into()), Transform::default()));
@@ -3744,6 +3796,88 @@ mod tests {
             .copied()
             .collect::<Vec<_>>();
         assert_eq!(saved_bounds, [bounds]);
+    }
+
+    #[test]
+    fn every_registered_component_round_trips_through_source_and_cooked_scenes()
+    {
+        // Moves every number and flips every flag, so a field that does not
+        // save comes back as its default and shows up.
+        fn nudge(value: &mut Value) {
+            match value {
+                Value::Bool(flag) => *flag = !*flag,
+                Value::Number(number) => {
+                    *value = match number.as_u64() {
+                        // Flipping the low bit keeps `u32::MAX` in range.
+                        Some(n) => (n ^ 1).into(),
+                        None => (number.as_f64().unwrap() + 0.25).into(),
+                    };
+                }
+                Value::Array(items) => items.iter_mut().for_each(nudge),
+                Value::Object(fields) => fields.values_mut().for_each(nudge),
+                Value::Null | Value::String(_) => {}
+            }
+        }
+
+        let mut app = scene_app();
+        let names = registered_component_names(app.world());
+        assert!(names.len() > 30, "{names:?}");
+        for name in &names {
+            let entity = app.spawn(Name(name.clone()));
+            let world = app.world_mut();
+            add_registered_component(world, entity, name).unwrap();
+            let (_, text) = registered_component_values(world, entity)
+                .unwrap()
+                .into_iter()
+                .find(|(saved, _)| saved == name)
+                .unwrap_or_else(|| panic!("{name} does not save"));
+            let default: Value = serde_json::from_str(&text).unwrap();
+            let mut value = default.clone();
+            nudge(&mut value);
+            set_registered_component(world, entity, name, &value.to_string())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let (_, text) = registered_component_values(world, entity)
+                .unwrap()
+                .into_iter()
+                .find(|(saved, _)| saved == name)
+                .unwrap();
+            let stored: Value = serde_json::from_str(&text).unwrap();
+            assert!(value == default || stored != default, "{name} ignored");
+        }
+        let document = scene_document(app.world_mut(), "Every").unwrap();
+        let saved = |document: &SceneDocument, name: &str| {
+            document
+                .entities
+                .iter()
+                .find(|entity| entity.name.as_deref() == Some(name))
+                .and_then(|entity| entity.components.get(name))
+                .cloned()
+        };
+        for name in &names {
+            assert!(saved(&document, name).is_some(), "{name} not saved");
+        }
+
+        let source = serde_json::to_vec(&document).unwrap();
+        let mut cooked = COMPILED_MAGIC.to_vec();
+        cooked.extend(bincode::serialize(&document).unwrap());
+        for bytes in [source, cooked] {
+            let decoded = decode_scene(&bytes).unwrap();
+            let mut loaded = scene_app();
+            load_scene_document(
+                loaded.world_mut(),
+                &decoded,
+                SceneLoadMode::Replace,
+            )
+            .unwrap();
+            let again = scene_document(loaded.world_mut(), "Every").unwrap();
+            for name in &names {
+                assert_eq!(
+                    saved(&again, name),
+                    saved(&document, name),
+                    "{name}"
+                );
+            }
+        }
     }
 
     #[test]

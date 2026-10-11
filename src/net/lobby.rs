@@ -5,9 +5,13 @@
 //! connection gets a fresh [`PeerId`] when it comes back, but keeps its
 //! player, and its place in the match, by sending the reconnect token the
 //! host gave it on joining.
+//!
+//! A spectator says [`spectate`] instead of [`hello`]: it gets no player,
+//! receives state like everyone else, and the host takes no input from it
+//! ([`Lobby::accepts_input`]).
 
 use super::{NetEvent, NetSession, PeerId, HOST};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -16,6 +20,7 @@ const MAGIC: &[u8; 4] = b"\0lob";
 const HELLO: u8 = 0;
 const READY: u8 = 1;
 const WELCOME: u8 = 2;
+const SPECTATE: u8 = 3;
 
 /// A player, stable across reconnects. Numbered from 1 in join order.
 pub type PlayerId = u32;
@@ -42,6 +47,10 @@ pub enum LobbyEvent {
     Dropped(PlayerId),
     /// A dropped player's grace time ran out; it is gone.
     Left(PlayerId),
+    /// A peer joined to watch.
+    Spectating(PeerId),
+    /// A spectator's connection closed.
+    SpectatorLeft(PeerId),
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +66,7 @@ struct Player {
 #[derive(Clone, Debug)]
 pub struct Lobby {
     players: BTreeMap<PlayerId, Player>,
+    spectators: BTreeSet<PeerId>,
     next: PlayerId,
     grace: Duration,
 }
@@ -66,6 +76,7 @@ impl Lobby {
     pub fn new(grace: Duration) -> Self {
         Self {
             players: BTreeMap::new(),
+            spectators: BTreeSet::new(),
             next: 1,
             grace,
         }
@@ -81,6 +92,9 @@ impl Lobby {
     ) -> Option<Result<LobbyEvent, String>> {
         match event {
             NetEvent::Disconnected(peer) => {
+                if self.spectators.remove(peer) {
+                    return Some(Ok(LobbyEvent::SpectatorLeft(*peer)));
+                }
                 let (&id, player) = self
                     .players
                     .iter_mut()
@@ -103,8 +117,15 @@ impl Lobby {
         from: PeerId,
         body: &[u8],
     ) -> Result<LobbyEvent, String> {
+        if self.spectators.contains(&from) {
+            return Err(format!("peer {from}: spectators only watch"));
+        }
         let current = self.player(from);
         match (body, current) {
+            ([SPECTATE], None) => {
+                self.spectators.insert(from);
+                Ok(LobbyEvent::Spectating(from))
+            }
             ([READY], Some(id)) => {
                 let player = self.players.get_mut(&id).expect("listed");
                 if player.stage == Stage::Joined {
@@ -201,6 +222,18 @@ impl Lobby {
         Some(self.players.get(&player)?.stage)
     }
 
+    /// Whether to take game input from `peer`: only from a player in the
+    /// match, never from a spectator or a peer that has not said hello.
+    pub fn accepts_input(&self, peer: PeerId) -> bool {
+        self.player(peer)
+            .is_some_and(|id| self.stage(id) == Some(Stage::InMatch))
+    }
+
+    /// Connected spectators, in peer order.
+    pub fn spectators(&self) -> impl Iterator<Item = PeerId> + '_ {
+        self.spectators.iter().copied()
+    }
+
     /// Every player, dropped ones included, in id order.
     pub fn players(&self) -> impl Iterator<Item = PlayerId> + '_ {
         self.players.keys().copied()
@@ -238,6 +271,12 @@ pub fn hello(session: &NetSession, rejoin: Option<Rejoin>) -> io::Result<()> {
         bytes.extend(rejoin.token.to_le_bytes());
     }
     session.send(HOST, &bytes)
+}
+
+/// Client: joins to watch, instead of [`hello`]. The host sends state
+/// and takes no input from this client.
+pub fn spectate(session: &NetSession) -> io::Result<()> {
+    session.send(HOST, &[MAGIC.as_slice(), &[SPECTATE]].concat())
 }
 
 /// Client: tells the host this player is ready.
@@ -337,5 +376,46 @@ mod tests {
         assert_eq!(lobby.expire(later), [LobbyEvent::Left(2)]);
         assert_eq!(lobby.players().collect::<Vec<_>>(), [1]);
         assert_eq!(welcome_from(2, b"\0lob\x02"), None);
+    }
+
+    #[test]
+    fn spectators_watch_without_a_player_or_input() {
+        let (host, clients) = NetSession::loopback(2);
+        host.poll();
+        let mut lobby = Lobby::new(Duration::from_secs(30));
+        let handle = |lobby: &mut Lobby| {
+            host.poll()
+                .iter()
+                .filter_map(|event| lobby.handle(&host, event))
+                .collect::<Vec<_>>()
+        };
+        hello(&clients[0], None).unwrap();
+        spectate(&clients[1]).unwrap();
+        assert_eq!(
+            handle(&mut lobby),
+            [Ok(LobbyEvent::Joined(1)), Ok(LobbyEvent::Spectating(2))]
+        );
+        ready(&clients[0]).unwrap();
+        ready(&clients[1]).unwrap();
+        hello(&clients[1], None).unwrap();
+        let events = handle(&mut lobby);
+        assert_eq!(events[0], Ok(LobbyEvent::Ready(1)));
+        assert!(events[1..].iter().all(Result::is_err), "{events:?}");
+        assert_eq!(lobby.start_match(), [1]);
+        assert!(lobby.accepts_input(1));
+        assert!(!lobby.accepts_input(2), "a spectator sends no input");
+        assert_eq!(lobby.player(2), None);
+        assert_eq!(lobby.spectators().collect::<Vec<_>>(), [2]);
+        // Spectators still receive what the host broadcasts.
+        host.broadcast(b"state").unwrap();
+        assert!(matches!(
+            clients[1].poll().last(),
+            Some(NetEvent::Message { bytes, .. }) if bytes == b"state"
+        ));
+        assert_eq!(
+            lobby.handle(&host, &NetEvent::Disconnected(2)),
+            Some(Ok(LobbyEvent::SpectatorLeft(2)))
+        );
+        assert_eq!(lobby.spectators().count(), 0);
     }
 }

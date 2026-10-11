@@ -39,15 +39,15 @@
    "press": "player.right"
   },
   {
-   "tick": 365,
+   "tick": 374,
    "release": "player.right"
   },
   {
-   "tick": 365,
+   "tick": 374,
    "expect": {
     "entity": "Player",
     "path": "/transform/position/0",
-    "greater_than": 17.0
+    "greater_than": 18.3
    }
   },
   {

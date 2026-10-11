@@ -1,0 +1,34 @@
+{
+  "kind": "performance",
+  "template": "racing",
+  "request": "Players say this racing game gets heavier the longer they drive: after a few minutes every frame does more work and the game starts to stutter, and saved games keep growing. Find the cause and fix it without changing how the car drives or what the speedometer (`shown_speed`) shows.",
+  "seed": [
+    {
+      "file": "src/main.rs",
+      "find": "const CHECKPOINT_REACH: f32 = 5.0;\n",
+      "replace": "const CHECKPOINT_REACH: f32 = 5.0;\n/// Frames the speedometer averages over.\nconst SMOOTHING: i32 = 30;\n"
+    },
+    {
+      "file": "src/main.rs",
+      "find": "    scene.set_counter(\"speed\", (speed * 100.0).round() as i32);\n",
+      "replace": "    scene.set_counter(\"speed\", (speed * 100.0).round() as i32);\n    // The speedometer shows the average speed over the last SMOOTHING frames.\n    let frame = scene.add_to_counter(\"frame\", 1);\n    scene.set_counter(&format!(\"speed_at_{frame}\"), (speed * 100.0).round() as i32);\n    let first = (frame - SMOOTHING + 1).max(1);\n    let sum: i32 = (first..=frame)\n        .map(|f| scene.counter_value(&format!(\"speed_at_{f}\")))\n        .sum();\n    scene.set_counter(\"shown_speed\", sum / (frame - first + 1));\n"
+    }
+  ],
+  "remove": [],
+  "reference": [
+    {
+      "file": "src/main.rs",
+      "find": "format!(\"speed_at_{frame}\")",
+      "replace": "format!(\"speed_at_{}\", frame % SMOOTHING)"
+    },
+    {
+      "file": "src/main.rs",
+      "find": "format!(\"speed_at_{f}\")",
+      "replace": "format!(\"speed_at_{}\", f % SMOOTHING)"
+    }
+  ],
+  "hidden": [
+    "../../../src/templates/racing_lap.json",
+    "hidden/speedo.json"
+  ]
+}

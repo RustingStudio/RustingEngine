@@ -1,0 +1,12 @@
+{
+  "name": "flash: towers light a muzzle flash on each hit, and spent flashes leave the light count",
+  "ticks": 1200,
+  "budgets": {
+    "max_lights": 3
+  },
+  "steps": [
+    {"tick": 5, "tap": "build_1"},
+    {"tick": 6, "tap": "build_2"},
+    {"tick": 181, "expect": {"entity": "Flash 1", "exists": true}}
+  ]
+}

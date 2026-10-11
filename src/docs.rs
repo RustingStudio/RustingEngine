@@ -33,6 +33,14 @@ const PAGES: &[(&str, &str, &str)] = &[
         include_str!("../docs/determinism.md"),
     ),
     (
+        "manual/physics",
+        "manual",
+        include_str!("../docs/physics.md"),
+    ),
+    ("manual/input", "manual", include_str!("../docs/input.md")),
+    ("manual/assets", "manual", include_str!("../docs/assets.md")),
+    ("manual/2d", "manual", include_str!("../docs/2d.md")),
+    (
         "manual/dev-environment",
         "manual",
         include_str!("../docs/dev-environment.md"),
@@ -58,6 +66,27 @@ const PAGES: &[(&str, &str, &str)] = &[
         include_str!("../docs/tutorials/04-gpu-cube-rain.md"),
     ),
     (
+        "tutorial/physics-sandbox",
+        "tutorial",
+        include_str!("../docs/tutorials/05-physics-sandbox.md"),
+    ),
+    (
+        "tutorial/multiplayer-physics",
+        "tutorial",
+        include_str!("../docs/tutorials/06-multiplayer-physics.md"),
+    ),
+    // The agent guides come first, so `rusting docs --brief` lists them.
+    (
+        "guide/agent-skill",
+        "guide",
+        include_str!("../skills/rusting-game/SKILL.md"),
+    ),
+    (
+        "guide/project-agents",
+        "guide",
+        include_str!("project_agents.md"),
+    ),
+    (
         "guide/gpu-condition-shaders",
         "guide",
         include_str!("../docs/gpu-condition-shaders.md"),
@@ -73,16 +102,6 @@ const PAGES: &[(&str, &str, &str)] = &[
         "guide/menus-and-ui",
         "guide",
         include_str!("../docs/menus-and-ui.md"),
-    ),
-    (
-        "guide/agent-skill",
-        "guide",
-        include_str!("../skills/rusting-game/SKILL.md"),
-    ),
-    (
-        "guide/project-agents",
-        "guide",
-        include_str!("project_agents.md"),
     ),
     ("guide/effects", "guide", include_str!("../docs/effects.md")),
     (
@@ -119,6 +138,11 @@ const PAGES: &[(&str, &str, &str)] = &[
         "guide/surface-shaders",
         "guide",
         include_str!("../docs/surface-shaders.md"),
+    ),
+    (
+        "guide/platforms",
+        "guide",
+        include_str!("../docs/platforms.md"),
     ),
 ];
 
@@ -1675,6 +1699,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn agent_guides_name_only_real_commands_codes_pages_and_schemas() {
+        let skill = include_str!("../skills/rusting-game/SKILL.md");
+        let agents = include_str!("project_agents.md");
+        let mut commands = 0;
+        for text in [skill, agents] {
+            for code in text.split('`').skip(1).step_by(2) {
+                let Some(args) = code.strip_prefix("rusting ") else {
+                    continue;
+                };
+                commands += 1;
+                if let Some(problem) = crate::schema::command_problem(args) {
+                    panic!("{problem}");
+                }
+                // `<...>` and `CODE` are placeholders.
+                match args.split_whitespace().collect::<Vec<_>>()[..] {
+                    ["explain", name, ..] if name.contains('_') => assert!(
+                        crate::diagnostics::lookup(name).is_some(),
+                        "`{code}`: no such code"
+                    ),
+                    ["docs", "show", id, ..] if !id.contains('<') => assert!(
+                        super::find(id).is_some(),
+                        "`{code}`: no such page"
+                    ),
+                    ["schema", name, ..] if !name.starts_with('-') => {
+                        crate::schema::catalog_entry(name)
+                            .unwrap_or_else(|e| panic!("`{code}`: {e}"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(commands > 60, "only {commands} commands");
     }
 
     #[test]

@@ -166,6 +166,24 @@ lobby::ready(&session)?;
   a new token on every rejoin. Only a dropped player can be taken over,
   so a token seen on the wire cannot steal a connected player.
 
+### Spectators
+
+A client that only watches calls `lobby::spectate(&session)` instead of
+`hello`. The host's lobby reports `LobbyEvent::Spectating(peer)` and,
+when it leaves, `SpectatorLeft(peer)`. A spectator has no player, cannot
+ready up or join a match, and receives everything the host broadcasts
+or sends each peer, replication included. Take game input only from
+peers the lobby accepts:
+
+```rust
+NetEvent::Message { from, bytes } if players.accepts_input(from) => {
+    // validate, then buffer the input
+}
+```
+
+`accepts_input` is true only for a player in the match. `spectators()`
+lists who is watching.
+
 ## Agreeing on the tick
 
 Predicted inputs carry a tick, and the host should get each one before
@@ -225,7 +243,10 @@ authority:
   (`x.is_finite() && x.abs() <= 1.0`), ticks near the host's, names
   ones you registered. Drop the message on any failure.
 - `net::rpc` already checks who may call a method, and
-  `net::replicate` only moves state from the host to clients.
+  `net::replicate` only moves state from the host to clients: the
+  host's `Replication::accept` returns an error for a delta, snapshot,
+  whole state or checksum a client sends. Drop the message, or the
+  client.
 - Limit how often each client may send with `net::limit::RateLimit`:
 
 ```rust
@@ -339,7 +360,7 @@ match replica.apply(world, from, &bytes) {
 
   Fields without a step travel at full `f64` precision.
 - Objects are matched by their scene id; ones the client lacks are
-  spawned. To update an object both sides loaded from the same scene in
+  spawned (with a `Transform` only if the host sends one). To update an object both sides loaded from the same scene in
   place, mark it `Replicated` on the client too.
 - A replica takes messages only from the host, only for the components
   its `Replication` lists, and only for objects marked `Replicated`, and
@@ -389,6 +410,151 @@ if let Some(ack) = replica.ack() {
   client's real acknowledgement, fixes it.
 - Use snapshots or deltas for a set of objects, not both.
 
+### Detecting and repairing a desync
+
+A client's copy can drift from the host's: a bug, a local script that
+moves a replicated object, a lost message. Compare state hashes now and
+then, and resynchronize on a mismatch:
+
+```rust
+use rusting_engine::net::replicate::{Check, FromClient};
+
+// Host, about once a second, after the delta or snapshot it goes with:
+session.broadcast(&replication.checksum())?;
+// Host, for each client message:
+match replication.accept(from, &bytes) {
+    Some(Ok(FromClient::Resync)) => session.send(from, &replication.full())?, // deltas only
+    Some(Ok(FromClient::Ack)) | None => {}
+    Some(Err(reason)) => eprintln!("{reason}"),
+}
+
+// Client, for each message from the host:
+match replica.verify(world, from, &bytes) {
+    Some(Ok(Check::Desync)) => {
+        eprintln!("desync: resynchronizing");
+        session.send(HOST, &replica.resync())?;
+    }
+    Some(Ok(Check::Match | Check::Stale)) | None => {}
+    Some(Err(reason)) => eprintln!("{reason}"),
+}
+```
+
+- The hash covers every replicated component, quantized the same way
+  on both sides, of every object marked `Replicated`. An interpolated
+  client hashes `NetTransform`, not the drawn `Transform`.
+- With snapshots the hash names its snapshot; a client that has not
+  applied that one answers `Stale` and waits for the next hash. With
+  deltas, send the hash reliably right after the delta.
+- Each checksum lets a client resynchronize once; `accept` refuses a
+  second request before the next checksum, so a client cannot make the
+  host send the whole state over and over.
+- After a resync request the next snapshot for that client is whole.
+  A whole snapshot, and `full()`, replace the client's replicated
+  objects: changed values are set back, and replicated objects the host
+  does not have are despawned.
+
+### Commands instead of bodies
+
+A deterministic simulation, such as physics bodies, does not need its
+state sent at all: send what happened each tick and let every peer run
+it. Mark those objects `net::replicate::Simulated` on every peer, and
+send each tick's commands with `net::lockstep`:
+
+```rust
+use rusting_engine::net::lockstep::{self, CommandStream};
+use rusting_engine::runtime::world_state_hash;
+
+// Host, every tick, before running it:
+lockstep::send(&session, tick, world_state_hash(world), &commands)?;
+run_tick(world, &commands);
+
+// Client: buffer the host's commands, then run every tick that arrived.
+let mut stream = CommandStream::<MyCommand>::new(start_tick);
+if let Some(Err(reason)) = stream.accept(from, &bytes) {
+    eprintln!("{reason}");
+}
+while let Some(tick) = stream.ready() {
+    if world_state_hash(world) != tick.hash {
+        eprintln!("tick {}: simulation drifted", tick.tick);
+    }
+    run_tick(world, &tick.commands);
+}
+```
+
+- A `Simulated` object's transform is never replicated or hashed by
+  `Replication`; its other listed components still are. Spawn it on
+  every peer, from the shared scene or by a command, since a replicated
+  spawn carries no transform for it.
+- Send every tick, in order, with no commands if nothing happened; a
+  client waits for each tick before running it. Commands for a tick more
+  than `input::MAX_AHEAD` ahead, repeated, or not from the host are
+  refused.
+- The hash is whatever the game computes of the state before the tick.
+  `world_state_hash` fits when every peer built its world the same way.
+  A mismatch means the simulation is not deterministic there: remove
+  `Simulated` from those objects on every peer and their transforms are
+  replicated again.
+
+### Bandwidth per client
+
+Cap what the host sends each client with `net::limit::Bandwidth`, a byte
+budget per client that also measures what each one got:
+
+```rust
+use rusting_engine::net::limit::Bandwidth;
+
+let mut budget = Bandwidth::new(16_000.0, 4_000); // 16 KB/s, bursts of 4 KB
+// Host, every tick, instead of session.send_unreliable:
+for peer in session.peers() {
+    if let Some(bytes) = replication.snapshot_for(peer) {
+        budget.send_unreliable(&session, peer, &bytes, Instant::now())?;
+    }
+}
+let usage = budget.usage(peer); // bytes_sent, bytes_per_second, messages_dropped
+// On NetEvent::Disconnected(peer):
+budget.forget(peer);
+```
+
+- A message over the budget is not sent and counts in
+  `messages_dropped`. Snapshots suit this: the next one, encoded against
+  the client's last acknowledgement, carries what the dropped one had.
+  Do not send deltas or other messages that build on each other through
+  it.
+- The burst must hold the largest message; a bigger one is an error.
+- Budgets count payload bytes; `NetSession::stats` adds the headers.
+
+## Smoothing remote objects
+
+Updates arrive a few times a second, each late by a different amount.
+`net::interpolate::Interpolation` shows every remote object where it was
+a fixed delay ago, blending between the two updates around that time:
+
+```rust
+use rusting_engine::net::interpolate::Interpolation;
+use std::time::Duration;
+
+let mut replica = Replica::new(&replication).interpolated();
+let mut smooth = Interpolation::new(Duration::from_millis(100));
+
+// After each replica.apply(...) that returns Some(Ok(())):
+smooth.record(world, host_time); // e.g. clock.host_tick(tick) * step
+// Every frame, before drawing:
+smooth.present(world, client_time);
+```
+
+- An `interpolated()` replica writes the host's transform into
+  `NetTransform`; `present` sets `Transform`, which is what the client
+  draws. Positions and scales blend linearly; rotations take the short
+  way around.
+- The delay is the trade: longer hides more jitter and loss, shorter
+  shows the host's state sooner. A bit more than two update intervals
+  hides one lost update (100 ms at 20 Hz). Change it with `set_delay`.
+- Past the newest update an object holds still rather than guessing
+  ahead. Use the same clock for `record` and `present`.
+- `record` skips the object marked `Predicted` (the local hero), so
+  `present` never moves it; the game sets its `Transform` from the
+  prediction.
+
 ## Predicting the player's own object
 
 Waiting a round trip for the host makes a player's own raft feel slow.
@@ -418,8 +584,34 @@ position = prediction.reconcile(acked_tick, host_position, steer);
 - `steer` must be the same code on both sides, with the same fixed step.
 - It keeps at most `MAX_PENDING` (240) inputs. Inputs over UDP can be
   lost: send the last few ticks' inputs in each message.
-- A correction snaps. Ease the drawn position toward the result for a
-  few frames if it shows.
+- A correction would snap. `net::predict::Smoothing` hides it in the
+  drawing only:
+
+  ```rust
+  use rusting_engine::net::predict::Smoothing;
+
+  let mut smoothing = Smoothing::new(Duration::from_millis(100), 2.0);
+  // On the host's reply:
+  let before = drawn;
+  position = prediction.reconcile(acked_tick, host_position, steer);
+  smoothing.correct(before, position);
+  // Every frame:
+  drawn = smoothing.shown(position, frame_time);
+  transform.position = drawn;
+  ```
+
+  The simulation keeps the reconciled `position`; only the drawn one
+  lags, halving its error every half-life (100 ms here). A correction
+  longer than the snap distance (2 m here: a teleport or respawn) shows
+  at once. Never feed `drawn` back into `steer` or the host.
+- Predict only the local hero. Mark it with
+  `net::predict::predict_only(world, hero)`, which removes `Predicted`
+  from any other object, and use an `interpolated()` replica so the
+  host's updates land in its `NetTransform`, not its `Transform`. Show
+  everything else from host state. Never predict terrain destruction or
+  other host-simulated results: that needs a simulation proven to match
+  the host's exactly, which the engine does not promise across machines
+  yet.
 
 ## Testing a bad connection
 
@@ -490,6 +682,39 @@ for event in host.poll() {
 }
 ```
 
+## HTTP requests
+
+`net::http` talks to web services and downloads files over plain HTTP/1.1,
+using only the standard library.
+
+- `http::get(url)`, `http::post(url, content_type, body)` and
+  `http::request(method, url, headers, body)` block until the whole
+  response is in and return its `status`, `headers` (names in lower case)
+  and `body`. Any status is a response, so check `status`. Bodies over
+  `MAX_BODY` (64 MiB) fail.
+- `http::download(url, path)` streams the body into a file. It writes
+  `<path>.part` and renames it only when the body is whole, so a failed
+  download never leaves a cut-off file. Any status but 2xx fails.
+- `http::fetch(method, url, headers, body)` runs `request` on its own
+  thread. Poll the returned `PendingHttp` once a frame, so a slow server
+  never stalls the game:
+
+```rust
+use rusting_engine::net::http;
+
+let mut scores = http::fetch("GET", "http://scores.example.com/top", &[], &[]);
+// Each frame:
+if let Some(result) = scores.poll() {
+    let top = result?.text();
+}
+```
+
+Redirects to another `http://` URL are followed, up to five. Headers you
+pass, such as an `Authorization` token, go only to the first URL's host and
+are left off once a redirect points anywhere else. A URL with a space or a
+control character fails; %-encode them. A connect or a wait for the next
+bytes gives up after 30 seconds.
+
 ## Limits
 
 - Reliable messages ride TCP, so a lost packet delays the messages behind
@@ -508,6 +733,9 @@ for event in host.poll() {
 - One player who connects and then sends nothing does not hold up anyone
   else's join; each handshake runs on its own thread and must finish
   within 5 seconds. The relay counts an IPv6 /64 as one address.
+- `net::http` has no TLS, so `https://` URLs fail with
+  `ErrorKind::Unsupported`. Most public services need HTTPS; reach them
+  through a proxy you run, or wait for TLS support.
 - Passwords and relay tokens must fit in a 64 KiB handshake.
 - The wire protocol has a version (`PROTOCOL_VERSION`); a host or relay
   refuses clients built with another one.

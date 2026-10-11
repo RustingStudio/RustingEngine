@@ -198,6 +198,9 @@ each other. `rusting export` finds the binary in the shared directory.
 
 ## Data assets
 
+Images, models and sounds are imported files, not data assets; see
+[Assets](assets.md).
+
 A data asset is a file of typed values that several objects share, like a
 Godot `Resource` saved as `.tres`. Enemy stats, loot tables and dialogue
 settings are typical. Describe the type with `reflect!`, give it a name, and
@@ -369,7 +372,9 @@ bodies stay on the GPU. The CPU does not download their transforms every
 frame. Instead you attach **rules** (`GpuPhysicsRule`: "position Y below
 -20", "colliding", "timer elapsed") to an object or a whole **class**, and the
 GPU sends back an event only when a rule matches. See
-[Tutorial 4](tutorials/04-gpu-cube-rain.md).
+[Tutorial 4](tutorials/04-gpu-cube-rain.md), and the
+[Physics guide](physics.md) for ownership, readback latency and solver
+choice.
 
 `rigid_body.kind` is `Dynamic` (moved by forces), `Kinematic` (moved by your
 code or a controller), or `Fixed`.
@@ -509,7 +514,8 @@ state. The engine binds `player.forward`, `player.back`, `player.left`,
 `player.right` (WASD and arrows), `player.jump` (Space), and
 `player.sprint` (Shift), and `player.crouch` (C or left Ctrl; the
 controller crouches only with `crouch_height` above 0). Scenario tests press and release actions by name,
-so a game that uses actions is testable without a keyboard.
+so a game that uses actions is testable without a keyboard. See
+[Input](input.md) for gamepads, rebinding and raw input.
 
 ## Tests you can run without a screen
 
@@ -562,7 +568,8 @@ in the project. The export must be built for the machine that runs the test.
 To find input that breaks a game, give a scenario `invariants` and fuzz it:
 `rusting fuzz <project> tests/invariants.json --seeds 50`. Each seed runs the
 scenario with seeded random presses and releases of the scene's actions (or
-the `--action` names; name actions that game code binds this way), each
+the `--action` names, or the scenario's own `fuzz` actions; name actions that
+game code binds this way), each
 flipping with chance 0.1 per tick. The first seed that fails a step or an
 invariant, or crashes the game, is written to `build/fuzz/seed-N.json` with
 the presses as ordinary steps up to the failing tick, so `rusting test`

@@ -1,0 +1,15 @@
+{
+ "name": "Random runs and jumps keep the player finite and the counters in range",
+ "ticks": 600,
+ "fuzz": {"actions": ["player.left", "player.right", "player.jump"]},
+ "invariants": [
+  {"entity": "Player", "path": "/transform/position", "finite": true},
+  {"entity": "Player", "path": "/transform/position/1", "greater_than": -100.0},
+  {"entity": "Coins", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Coins", "path": "/components/rusting.counter/value", "less_than": 5},
+  {"entity": "Goal Count", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Goal Count", "path": "/components/rusting.counter/value", "less_than": 2},
+  {"entity": "Falls", "path": "/components/rusting.counter/value", "greater_than": -1}
+ ],
+ "steps": []
+}

@@ -25,6 +25,12 @@ were run against this version of the engine.
    scenes.
 4. [GPU cube rain](tutorials/04-gpu-cube-rain.md): simulate thousands of
    bodies on the GPU and get only the events you ask for back in Rust.
+5. [Physics sandbox](tutorials/05-physics-sandbox.md): make a ball bouncy,
+   throw balls from the camera with an input action, test it first, and
+   check that debug and release builds simulate the same.
+6. [Multiplayer physics](tutorials/06-multiplayer-physics.md): turn the
+   sandbox into a networked game with a dedicated server, and test a client
+   against it.
 
 ## Guides and reference
 
@@ -41,6 +47,17 @@ were run against this version of the engine.
   catalog, and `rusting docs show api/GameScene` indexes the gameplay
   methods. For the Rust crates, `cargo doc --workspace --no-deps --open`
   builds the full reference; CI fails on a broken link in it.
+- [Assets](assets.md): importing images, models and sounds with their
+  license record, generating assets, and exporting the game.
+- [Platforms](platforms.md): supported systems, and why web, iOS and
+  consoles wait until after 1.0.
+- [2D games](2d.md): orthographic cameras, sprites, tile maps, platformer
+  movement and bodies kept in the plane.
+- [Input](input.md): actions bound to keys, mouse and gamepad, reading
+  them per frame or per tick, rebinding, and pressing them in tests.
+- [Physics guide](physics.md): CPU or GPU ownership, how state and events
+  travel between them and how late, determinism, and which solver fits
+  which job.
 - [Determinism](determinism.md): what makes a simulation reproducible, state
   hashes, `rusting determinism`, and replays.
 - [Architecture](../architecture.md): how the runtime, renderer, and editor

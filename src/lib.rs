@@ -8,6 +8,7 @@ pub mod asset_import;
 pub mod assets;
 pub mod cookbook;
 pub mod core;
+pub mod crash;
 pub mod debug_session;
 pub mod demo;
 pub mod diagnostics;
@@ -19,10 +20,12 @@ pub mod cli;
 #[cfg(feature = "editor")]
 pub mod editor;
 pub mod engine;
+pub mod fontgen;
 pub mod geometry;
 pub mod input;
 pub mod meshgen;
 pub mod net;
+pub mod platform;
 pub mod project;
 #[cfg(feature = "window")]
 pub mod project_runner;

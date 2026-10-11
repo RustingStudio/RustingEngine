@@ -1,0 +1,39 @@
+{
+  "kind": "performance",
+  "template": "tower-defense",
+  "request": "Players say this tower defense game gets slower the longer a round goes: every tower shot makes each later frame cost a little more on the GPU, and long rounds start to drop frames. Find the cause and fix it without changing how the game plays or how the towers' muzzle flashes look.",
+  "seed": [
+    {
+      "file": "scenes/main.rscene",
+      "find": "  \"entities\": [\n",
+      "replace": "  \"entities\": [\n    {\n      \"id\": \"5b0d3f4e-8a61-4c2e-9d7a-1f3c6e2b9a40\",\n      \"parent\": null,\n      \"name\": \"Flash Template\",\n      \"classes\": [],\n      \"visible\": false,\n      \"transform\": {\n        \"position\": [0.0, -20.0, 0.0],\n        \"rotation\": [0.0, 0.0, 0.0],\n        \"scale\": [1.0, 1.0, 1.0]\n      },\n      \"point_light\": {\"color\": [1.0, 0.8, 0.45], \"intensity\": 0.0, \"range\": 4.0}\n    },\n"
+    },
+    {
+      "file": "src/main.rs",
+      "find": "const BOUNTY: i32 = 10;\n",
+      "replace": "const BOUNTY: i32 = 10;\n/// How long a tower's muzzle flash stays lit after a volley.\nconst FLASH_MS: i32 = 200;\n/// Muzzle flash brightness.\nconst FLASH_INTENSITY: f32 = 1500.0;\n"
+    },
+    {
+      "file": "src/main.rs",
+      "find": "    // Towers fire each time the clock passes a whole volley.\n",
+      "replace": "    // Muzzle flashes go out FLASH_MS after their volley.\n    if clock % VOLLEY_MS >= FLASH_MS {\n        for flash in scene.in_class(\"flash\") {\n            scene.set_light(&flash, None, Some(0.0), None);\n        }\n    }\n\n    // Towers fire each time the clock passes a whole volley.\n"
+    },
+    {
+      "file": "src/main.rs",
+      "find": "        scene.flash(&tower);\n",
+      "replace": "        scene.flash(&tower);\n        // A muzzle flash lights the ground around the tower.\n        let flash = format!(\"Flash {}\", scene.add_to_counter(\"flashes\", 1));\n        scene.spawn_copy(\"Flash Template\", &flash, [from[0], 1.5, from[2]]);\n        scene.set_visible(&flash, true);\n        scene.set_light(&flash, None, Some(FLASH_INTENSITY), None);\n        scene.add_class(&flash, \"flash\");\n"
+    }
+  ],
+  "remove": [],
+  "reference": [
+    {
+      "file": "src/main.rs",
+      "find": "            scene.set_light(&flash, None, Some(0.0), None);\n",
+      "replace": "            scene.despawn(&flash);\n"
+    }
+  ],
+  "hidden": [
+    "../../../src/templates/tower_defense_defend.json",
+    "hidden/flash.json"
+  ]
+}

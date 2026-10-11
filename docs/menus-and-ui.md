@@ -94,7 +94,8 @@ fn update(scene: &mut GameScene<'_>, _time: &FrameTime) {
   as `settings.json` or `saves/1.json`.
 - The folder is `~/.local/share/<game>` on Linux,
   `~/Library/Application Support/<game>` on macOS and `%APPDATA%\<game>` on
-  Windows. The `RUSTING_USER_DATA` variable overrides it.
+  Windows. The `RUSTING_USER_DATA` variable overrides it, and so do
+  platform services with their own save folder (below).
 - Store values with `rusting_engine::serde_json`.
 - `scene.counters()` lists every counter's name and value, so a save can
   hold them all.
@@ -107,6 +108,28 @@ fn update(scene: &mut GameScene<'_>, _time: &FrameTime) {
   the game starts.
 - For UI that game code paints itself, `scene.cursor()` gives the cursor in
   pixels and `scene.viewport_size()` gives the view size.
+
+## Achievements, stats and storefronts
+
+```rust
+use rusting_engine::platform;
+
+platform::unlock_achievement("night_5"); // unlocking again is fine
+platform::set_stat("nights_survived", 5);
+if platform::achievement_unlocked("night_5") { /* show the badge */ }
+```
+
+- By default the calls keep achievements and stats in `platform.json` in
+  the user data folder, so a game with no storefront still remembers them.
+- A storefront plugs in by implementing `platform::PlatformServices` over
+  its SDK in the game crate (unlock, query, set and read stats, and an
+  optional own save folder such as a cloud-synced one). Install it once at
+  start with `platform::set_platform_services(Box::new(MyStore::new()))`;
+  game code keeps calling the same functions.
+- The engine ships no storefront SDK yet: Steamworks waits on the owner's
+  approval of the `steamworks` crate (see `rusting_engine::steam`).
+- Achievements and stats are presentation, like audio. Never let them
+  change simulation state, or replays stop matching.
 
 ## Video settings
 
@@ -156,6 +179,20 @@ optional; one left out keeps the default dark look. Colours are RGBA from
   colours menu widgets.
 - `rusting lint` judges HUD button text contrast against the theme's
   `button_fill`, so light buttons need dark text.
+
+A HUD element draws in its own font when its `font` names a TTF or OTF
+file under `assets/`. `rusting asset generate . font pixel --to fonts`
+makes a placeholder pixel font (`pixel` or `bold`) in the chunky style
+of the other generated placeholders:
+
+```json
+"rusting.hud": {"text": "Score {coins}", "font": "fonts/pixel.ttf", "font_size": 24.0}
+```
+
+Characters the font lacks come from the built-in font. A missing or
+unreadable file warns once and the text keeps the built-in font. A new
+font shows from the second frame, so a capture at tick 0 still shows the
+built-in one.
 
 ## Scaling the HUD to the window
 

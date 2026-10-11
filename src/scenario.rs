@@ -607,6 +607,11 @@ pub struct Scenario {
     /// reach. The report lists them as `explore`.
     #[serde(default)]
     pub explore: Option<Explore>,
+    /// Runs one tick per fixed step of real time, as a played game does,
+    /// instead of as fast as possible. Use it for a client that talks to a
+    /// server running in real time, such as `rusting run --server`.
+    #[serde(default)]
+    pub realtime: bool,
 }
 
 /// A scenario's random input, see [`Scenario::fuzz`].
@@ -2103,7 +2108,14 @@ pub fn run_scenario(
     // Invariants that already failed.
     let mut broken = vec![false; scenario.invariants.len()];
 
+    let fixed_delta = app.world().resource::<FrameTime>().fixed_delta;
     'ticks: for tick in 0..=scenario.ticks {
+        if scenario.realtime {
+            let due = run_started + fixed_delta * tick;
+            std::thread::sleep(
+                due.saturating_duration_since(std::time::Instant::now()),
+            );
+        }
         for (index, step) in scenario.steps.iter().enumerate() {
             if step.tick + 1 == tick {
                 // The press already reported any unbound action.
@@ -3492,9 +3504,11 @@ fn check_value(world: &mut World, expect: &Expectation) -> Check {
     let subject = format!("`{}` {}", expect.entity, expect.path);
     let state = reflected(world, &expect.entity);
     if let Some(wanted) = expect.exists {
-        let found = state
-            .as_ref()
-            .is_ok_and(|state| state.pointer(&expect.path).is_some());
+        // A counter nobody created reads as 0 but does not exist.
+        let found = state.as_ref().is_ok_and(|state| {
+            state.get("missing").is_none()
+                && state.pointer(&expect.path).is_some()
+        });
         if found != wanted {
             let missing = if wanted {
                 "does not exist"
@@ -4881,7 +4895,10 @@ mod tests {
         // A counter nobody created yet reads as 0, as in game code.
         let unborn = super::tests::scenario(
             1,
-            json!([{"tick": 1, "expect": {"counter": "plays", "equals": 0}}]),
+            json!([
+                {"tick": 1, "expect": {"counter": "plays", "equals": 0}},
+                {"tick": 1, "expect": {"counter": "plays", "exists": false}},
+            ]),
         );
         let report = run_scenario(&mut game(), &unborn, Path::new("."));
         assert!(report.passed, "{report:#?}");
@@ -4892,6 +4909,17 @@ mod tests {
         let neither =
             scenario_from(json!({"tick": 1, "expect": {"equals": 1}}));
         assert!(neither.validate().is_err());
+    }
+
+    #[test]
+    fn a_realtime_scenario_runs_one_tick_per_fixed_step_of_real_time() {
+        let mut app = game();
+        let step = app.world().resource::<FrameTime>().fixed_delta;
+        let mut paced = scenario(6, json!([]));
+        paced.realtime = true;
+        let started = std::time::Instant::now();
+        assert!(run_scenario(&mut app, &paced, Path::new(".")).passed);
+        assert!(started.elapsed() >= step * 6, "{:?}", started.elapsed());
     }
 
     #[test]

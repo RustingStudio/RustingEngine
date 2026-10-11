@@ -652,6 +652,10 @@ pub struct HudElement {
     /// the camera or missing.
     pub follow: Option<String>,
     pub follow_offset: [f32; 3],
+    /// A TTF or OTF file relative to `assets/`, such as `fonts/pixel.ttf`;
+    /// none uses the built-in font. Glyphs the file lacks come from the
+    /// built-in font.
+    pub font: Option<String>,
 }
 
 impl Default for HudElement {
@@ -667,6 +671,7 @@ impl Default for HudElement {
             camera: None,
             follow: None,
             follow_offset: [0.0; 3],
+            font: None,
         }
     }
 }
@@ -2393,6 +2398,62 @@ fn draw_captions(
         });
 }
 
+/// The font files HUD elements asked for, loaded into egui.
+#[cfg(feature = "ui")]
+#[derive(Default)]
+pub(super) struct HudFonts {
+    /// Every file asked for, false when it did not load.
+    tried: BTreeMap<String, bool>,
+    definitions: egui::FontDefinitions,
+}
+
+/// The egui family for `font` under `assets`, loading the file on first
+/// use. `None` when the file is not a readable font, and on the frame it
+/// loads: egui binds new fonts at the start of the next pass, and naming an
+/// unbound family panics.
+#[cfg(feature = "ui")]
+fn hud_font(
+    context: &egui::Context,
+    fonts: &mut HudFonts,
+    assets: &std::path::Path,
+    font: &str,
+) -> Option<egui::FontFamily> {
+    let family = egui::FontFamily::Name(font.into());
+    if let Some(&loaded) = fonts.tried.get(font) {
+        return (loaded && context.fonts(|f| f.families().contains(&family)))
+            .then_some(family);
+    }
+    let path = assets.join(font);
+    let bytes = std::fs::read(&path).ok().filter(|bytes| {
+        // egui panics on a font it cannot parse; this one checks safely.
+        crate::text_texture::text_texture_in_font(
+            "Aa",
+            crate::text_texture::TextStyle::default(),
+            bytes,
+        )
+        .is_some()
+    });
+    fonts.tried.insert(font.to_owned(), bytes.is_some());
+    let Some(bytes) = bytes else {
+        eprintln!(
+            "warning: rusting.hud: {} is not a readable TTF or OTF font; \
+             the text uses the built-in font.",
+            path.display()
+        );
+        return None;
+    };
+    let definitions = &mut fonts.definitions;
+    definitions.font_data.insert(
+        font.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+    );
+    let fallback = definitions.families[&egui::FontFamily::Proportional].iter();
+    let list = std::iter::once(font.to_owned()).chain(fallback.cloned());
+    definitions.families.insert(family, list.collect());
+    context.set_fonts(definitions.clone());
+    None
+}
+
 /// Per frame: draws HUD elements in reading order and reports clicks.
 #[cfg(feature = "ui")]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -2421,7 +2482,15 @@ pub(super) fn draw_hud(
         Option<Res<RebindWait>>,
         Query<(&super::Name, &GlobalTransform)>,
     ),
+    (folder, mut fonts): (
+        Option<Res<crate::project_runner::ProjectFolder>>,
+        bevy_ecs::system::Local<HudFonts>,
+    ),
 ) {
+    let assets = folder.map_or_else(
+        || std::path::PathBuf::from("assets"),
+        |folder| folder.0.join("assets"),
+    );
     let scale = text_scale.map_or(1.0, |scale| scale.0);
     let captions = caption_settings.as_deref().cloned().unwrap_or_default();
     draw_perf_overlay(ui.context(), perf.as_deref());
@@ -2566,9 +2635,16 @@ pub(super) fn draw_hud(
         if filled.trim().is_empty() {
             continue;
         }
-        let text = egui::RichText::new(filled)
+        let mut text = egui::RichText::new(filled)
             .size(element.font_size * scale)
             .color(egui::Color32::from_rgba_unmultiplied(r, g, b, a));
+        if let Some(font) = &element.font {
+            if let Some(family) =
+                hud_font(ui.context(), &mut fonts, &assets, font)
+            {
+                text = text.family(family);
+            }
+        }
         // Measure this frame's text: an anchored egui area places itself by
         // last frame's size, so a value that grew ran past the edge.
         let context = ui.context();
@@ -2607,5 +2683,58 @@ pub(super) fn draw_hud(
                     pressed.send(HudButtonPressed { entity });
                 }
             });
+    }
+}
+
+#[cfg(all(test, feature = "ui"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hud_fonts_bind_on_the_pass_after_they_load() {
+        let assets = std::env::temp_dir()
+            .join(format!("rusting-hud-font-{}", std::process::id()));
+        std::fs::create_dir_all(assets.join("fonts")).unwrap();
+        let pixel = crate::fontgen::synth("pixel").unwrap();
+        std::fs::write(assets.join("fonts/pixel.ttf"), pixel).unwrap();
+        std::fs::write(assets.join("fonts/bad.ttf"), "no").unwrap();
+        let context = egui::Context::default();
+        let mut fonts = HudFonts::default();
+        let mut pass = |font: &str| {
+            let mut family = None;
+            let _ = context.run(egui::RawInput::default(), |context| {
+                family = hud_font(context, &mut fonts, &assets, font);
+            });
+            family
+        };
+        // Loaded on the first pass, usable from the second.
+        assert_eq!(pass("fonts/pixel.ttf"), None);
+        let family = pass("fonts/pixel.ttf").expect("bound after one pass");
+        assert_eq!(family, egui::FontFamily::Name("fonts/pixel.ttf".into()));
+        for font in ["fonts/bad.ttf", "fonts/missing.ttf"] {
+            assert_eq!(pass(font), None);
+            assert_eq!(pass(font), None, "{font} never binds");
+        }
+        // The pixel font draws text differently from the built-in one,
+        // and the fallback keeps characters it lacks.
+        let width = |family: egui::FontFamily, text: &str| {
+            context.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap(
+                        text.into(),
+                        egui::FontId::new(16.0, family),
+                        egui::Color32::WHITE,
+                    )
+                    .size()
+                    .x
+            })
+        };
+        let proportional = egui::FontFamily::Proportional;
+        assert_ne!(
+            width(family.clone(), "Score"),
+            width(proportional, "Score")
+        );
+        assert!(width(family, "é") > 0.0);
+        std::fs::remove_dir_all(assets).unwrap();
     }
 }

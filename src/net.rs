@@ -41,9 +41,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub mod clock;
+pub mod http;
 pub mod input;
+pub mod interpolate;
 pub mod limit;
 pub mod lobby;
+pub mod lockstep;
 pub mod predict;
 pub mod replicate;
 pub mod rpc;
@@ -1675,12 +1678,38 @@ mod tests {
     fn a_host_refuses_another_protocol_version() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let _host = NetSession::host_on(listener, "").unwrap();
+        let direct = NetSession::host_on(listener, "").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
         write_frame(&mut stream, JOIN, HOST, &99u16.to_le_bytes()).unwrap();
         let (kind, _, reason) = read_frame(&mut stream, MAX_MESSAGE).unwrap();
         assert_eq!(kind, REJECT);
         assert!(String::from_utf8_lossy(&reason).contains("99"));
+        assert!(direct.poll().is_empty(), "a refused client never joins");
+
+        // A relay refuses an old host and an old client the same way, and
+        // a payload too short to hold a version.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = listener.local_addr().unwrap();
+        std::thread::spawn(move || run_relay(listener, ""));
+        let host = NetSession::host_room(relay, "").unwrap();
+        let code = host.room_code().unwrap().to_owned();
+        let mut old_join = 99u16.to_le_bytes().to_vec();
+        old_join.push(u8::try_from(code.len()).unwrap());
+        old_join.extend(code.as_bytes());
+        for (kind, payload, expected) in [
+            (HOST_ROOM, 99u16.to_le_bytes().to_vec(), "99"),
+            (JOIN, old_join, "99"),
+            (JOIN, vec![1], "missing protocol version"),
+        ] {
+            let mut stream = TcpStream::connect(relay).unwrap();
+            write_frame(&mut stream, kind, HOST, &payload).unwrap();
+            let (answer, _, reason) =
+                read_frame(&mut stream, MAX_MESSAGE).unwrap();
+            assert_eq!(answer, REJECT);
+            let reason = String::from_utf8_lossy(&reason);
+            assert!(reason.contains(expected), "{reason}");
+        }
+        assert!(host.poll().is_empty(), "a refused client never joins");
     }
 
     #[test]
@@ -1814,5 +1843,625 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(elapsed >= Duration::from_millis(250), "{elapsed:?}");
         assert!(elapsed < Duration::from_millis(600), "{elapsed:?}");
+    }
+
+    #[test]
+    fn rpcs_replication_and_prediction_survive_a_lossy_loopback() {
+        use crate::runtime::{SceneComponentRegistry, SceneId};
+        use crate::Transform;
+        use bevy_ecs::prelude::World;
+        use predict::Prediction;
+        use replicate::{Check, Replica, Replicated, Replication, TRANSFORM};
+        use rpc::{Authority, Reliability, Rpcs};
+
+        let (host, clients) = NetSession::loopback(1);
+        let client = &clients[0];
+        host.poll();
+        // Both ends lose a third of their messages, which come back one
+        // round trip later, with jitter on top.
+        for (end, seed) in [(&host, 1), (client, 2)] {
+            end.simulate(NetConditions {
+                latency: Duration::from_millis(2),
+                jitter: Duration::from_millis(3),
+                loss: 0.33,
+                seed,
+            });
+        }
+        let mut rpcs = Rpcs::new();
+        rpcs.register("move", Authority::Owner, Reliability::Reliable);
+        rpcs.set_owner("Hero", 1);
+        let mut replication = Replication::new();
+        replication.component(TRANSFORM);
+        let mut replica = Replica::new(&replication);
+        let world = || {
+            let mut world = World::new();
+            world.insert_resource(SceneComponentRegistry::default());
+            world
+        };
+        let (mut host_world, mut client_world) = (world(), world());
+        let hero = host_world
+            .spawn((Replicated, SceneId::new(), Transform::default()))
+            .id();
+
+        // The client predicts its hero's x from its own moves; the host
+        // applies the same moves and answers with the tick and x.
+        let step = |x: &mut f32, dx: &f32| *x += dx;
+        let mut prediction = Prediction::new();
+        let (mut predicted, mut host_x, mut moves) = (0.0_f32, 0.0_f32, 0);
+        let mut reconciled = 0.0_f32;
+        for tick in 1..=60_u64 {
+            if tick <= 40 {
+                let dx = (tick % 3) as f32 - 0.5;
+                prediction.push(tick, dx);
+                step(&mut predicted, &dx);
+                let args =
+                    [tick.to_le_bytes(), u64::from(dx.to_bits()).to_le_bytes()]
+                        .concat();
+                rpcs.call(client, "Hero", "move", &args).unwrap();
+            }
+            host_world.get_mut::<Transform>(hero).unwrap().position[0] += 0.25;
+            replication.snapshot(&mut host_world).unwrap();
+            host.send_unreliable(1, &replication.snapshot_for(1).unwrap())
+                .unwrap();
+            for event in host.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                if let Some(ack) = replication.accept(from, &bytes) {
+                    ack.unwrap();
+                    continue;
+                }
+                let call = rpcs.accept(from, &bytes).unwrap().unwrap();
+                let (move_tick, dx) = call.args.split_at(8);
+                let move_tick =
+                    u64::from_le_bytes(move_tick.try_into().unwrap());
+                let dx = f32::from_bits(u64::from_le_bytes(
+                    dx.try_into().unwrap(),
+                ) as u32);
+                moves += 1;
+                assert_eq!(move_tick, moves, "moves arrive once and in order");
+                step(&mut host_x, &dx);
+                let state = [
+                    move_tick.to_le_bytes(),
+                    u64::from(host_x.to_bits()).to_le_bytes(),
+                ]
+                .concat();
+                host.send(1, &state).unwrap();
+            }
+            for event in client.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                if let Some(applied) =
+                    replica.apply(&mut client_world, from, &bytes)
+                {
+                    applied.unwrap();
+                    client.send(HOST, &replica.ack().unwrap()).unwrap();
+                    continue;
+                }
+                let acked = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                let x = f32::from_bits(u64::from_le_bytes(
+                    bytes[8..].try_into().unwrap(),
+                ) as u32);
+                reconciled = prediction.reconcile(acked, x, step);
+                assert_eq!(reconciled, predicted, "tick {tick}");
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Let the held messages arrive, then compare.
+        let start = Instant::now();
+        while (moves < 40 || prediction.pending().next().is_some())
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            for event in host.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                if replication.accept(from, &bytes).is_some() {
+                    continue;
+                }
+                let call = rpcs.accept(from, &bytes).unwrap().unwrap();
+                let dx = f32::from_bits(u64::from_le_bytes(
+                    call.args[8..].try_into().unwrap(),
+                ) as u32);
+                moves += 1;
+                step(&mut host_x, &dx);
+                let state = [
+                    moves.to_le_bytes(),
+                    u64::from(host_x.to_bits()).to_le_bytes(),
+                ]
+                .concat();
+                host.send(1, &state).unwrap();
+            }
+            for event in client.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                if replica.apply(&mut client_world, from, &bytes).is_some() {
+                    continue;
+                }
+                let acked = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                let x = f32::from_bits(u64::from_le_bytes(
+                    bytes[8..].try_into().unwrap(),
+                ) as u32);
+                reconciled = prediction.reconcile(acked, x, step);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(moves, 40);
+        assert_eq!((reconciled, host_x), (predicted, predicted));
+        let stats = host.stats();
+        assert_eq!(stats.held, 0);
+
+        // The last snapshot gets through once the host sends it again.
+        let checksum = replication.checksum();
+        host.send(1, &replication.snapshot_for(1).unwrap()).unwrap();
+        host.send(1, &checksum).unwrap();
+        let events = wait(client, 2);
+        let mut verified = None;
+        for event in events {
+            let NetEvent::Message { from, bytes } = event else {
+                continue;
+            };
+            if let Some(applied) =
+                replica.apply(&mut client_world, from, &bytes)
+            {
+                applied.unwrap();
+            } else {
+                verified = replica.verify(&mut client_world, from, &bytes);
+            }
+        }
+        assert_eq!(verified, Some(Ok(Check::Match)));
+    }
+
+    #[test]
+    fn a_client_that_drops_mid_match_resynchronizes_on_rejoin() {
+        use crate::runtime::{Name, SceneComponentRegistry, SceneId};
+        use crate::Transform;
+        use bevy_ecs::prelude::{Entity, With, World};
+        use replicate::{
+            Check, Replica, Replicated, Replication, NAME, TRANSFORM,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = NetSession::host_on(listener, "").unwrap();
+        host.simulate(NetConditions {
+            loss: 0.2,
+            seed: 3,
+            ..NetConditions::default()
+        });
+        let mut replication = Replication::new();
+        replication.component(TRANSFORM).component(NAME);
+        let world = || {
+            let mut world = World::new();
+            world.insert_resource(SceneComponentRegistry::default());
+            world
+        };
+        let (mut host_world, mut client_world) = (world(), world());
+        let spawn = |world: &mut World, name: &str| {
+            world
+                .spawn((
+                    Replicated,
+                    SceneId::new(),
+                    Name(name.into()),
+                    Transform::default(),
+                ))
+                .id()
+        };
+        let a = spawn(&mut host_world, "A");
+        let b = spawn(&mut host_world, "B");
+        spawn(&mut host_world, "C");
+
+        // One host tick: move everything, send each client its snapshot,
+        // and take acknowledgements and departures.
+        let tick = |replication: &mut Replication, world: &mut World| {
+            let mut query =
+                world.query_filtered::<&mut Transform, With<Replicated>>();
+            for mut transform in query.iter_mut(world) {
+                transform.position[0] += 1.0;
+            }
+            replication.snapshot(world).unwrap();
+            for peer in host.peers() {
+                let bytes = replication.snapshot_for(peer).unwrap();
+                host.send_unreliable(peer, &bytes).unwrap();
+            }
+            let mut left = Vec::new();
+            for event in host.poll() {
+                match event {
+                    NetEvent::Message { from, bytes } => {
+                        replication.accept(from, &bytes).unwrap().unwrap();
+                    }
+                    NetEvent::Disconnected(peer) => {
+                        replication.forget(peer);
+                        left.push(peer);
+                    }
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+            left
+        };
+        let pump =
+            |client: &NetSession, replica: &mut Replica, world: &mut World| {
+                for event in client.poll() {
+                    if let NetEvent::Message { from, bytes } = event {
+                        replica.apply(world, from, &bytes).unwrap().unwrap();
+                        client
+                            .send_unreliable(HOST, &replica.ack().unwrap())
+                            .unwrap();
+                    }
+                }
+            };
+        // Sends the latest snapshot and a checksum reliably, then checks.
+        let settle = |replication: &mut Replication,
+                      client: &NetSession,
+                      replica: &mut Replica,
+                      world: &mut World| {
+            let peer = client.id();
+            host.send(peer, &replication.snapshot_for(peer).unwrap())
+                .unwrap();
+            host.send(peer, &replication.checksum()).unwrap();
+            let start = Instant::now();
+            loop {
+                assert!(
+                    start.elapsed() < Duration::from_secs(2),
+                    "no checksum"
+                );
+                for event in client.poll() {
+                    let NetEvent::Message { from, bytes } = event else {
+                        continue;
+                    };
+                    if let Some(check) = replica.verify(world, from, &bytes) {
+                        return check.unwrap();
+                    }
+                    replica.apply(world, from, &bytes).unwrap().unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let names = |world: &mut World| {
+            let mut query =
+                world.query_filtered::<(&Name, &Transform), With<Replicated>>();
+            let mut names: Vec<_> = query
+                .iter(world)
+                .map(|(name, transform)| {
+                    (name.0.clone(), transform.position[0])
+                })
+                .collect();
+            names.sort_by(|x, y| x.0.cmp(&y.0));
+            names
+        };
+
+        let client = NetSession::join(address, "").unwrap();
+        assert_eq!(wait(&host, 1), [NetEvent::Connected(1)]);
+        let mut replica = Replica::new(&replication);
+        for _ in 0..20 {
+            tick(&mut replication, &mut host_world);
+            pump(&client, &mut replica, &mut client_world);
+        }
+        assert_eq!(
+            settle(&mut replication, &client, &mut replica, &mut client_world),
+            Check::Match
+        );
+
+        // The client drops; the match goes on without it.
+        drop(client);
+        let start = Instant::now();
+        while tick(&mut replication, &mut host_world) != [1] {
+            assert!(start.elapsed() < Duration::from_secs(2), "no departure");
+        }
+        host_world.despawn(b);
+        spawn(&mut host_world, "D");
+        for _ in 0..10 {
+            tick(&mut replication, &mut host_world);
+        }
+        // Meanwhile the client's own copy drifts.
+        let stale: Vec<Entity> = client_world
+            .query_filtered::<Entity, With<Replicated>>()
+            .iter(&client_world)
+            .collect();
+        client_world
+            .get_mut::<Transform>(stale[0])
+            .unwrap()
+            .position[1] = 9.0;
+
+        // It rejoins as a new peer with the world and replica it kept; the
+        // first snapshot it gets is whole and replaces what it had.
+        let client = NetSession::join(address, "").unwrap();
+        assert_eq!(client.id(), 2);
+        for _ in 0..20 {
+            tick(&mut replication, &mut host_world);
+            pump(&client, &mut replica, &mut client_world);
+        }
+        assert_eq!(
+            settle(&mut replication, &client, &mut replica, &mut client_world),
+            Check::Match
+        );
+        let synced = names(&mut client_world);
+        let kept: Vec<_> =
+            synced.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(kept, ["A", "C", "D"]);
+        assert_eq!(
+            synced[0].1,
+            host_world.get::<Transform>(a).unwrap().position[0]
+        );
+        assert_eq!(names(&mut client_world), names(&mut host_world));
+    }
+
+    #[test]
+    fn a_lockstep_match_finishes_at_200_ms_and_2_percent_loss_in_sync() {
+        use input::InputBuffer;
+        use lobby::{Lobby, LobbyEvent, Rejoin};
+        use lockstep::CommandStream;
+        use std::collections::BTreeMap;
+
+        type State = BTreeMap<lobby::PlayerId, i64>;
+        type Commands = Vec<(lobby::PlayerId, i64)>;
+        const TICKS: u64 = 200;
+        const INPUT: &[u8] = b"\0inp";
+        let hash = |state: &State| {
+            state
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, (id, x)| {
+                    (hash ^ u64::from(*id) ^ (*x as u64).rotate_left(32))
+                        .wrapping_mul(0x100_0000_01b3)
+                })
+        };
+        let run = |state: &mut State, commands: &Commands| {
+            for (player, dx) in commands {
+                *state.entry(*player).or_default() += dx;
+            }
+        };
+        // 200 ms each way, and 2% of messages lost and resent.
+        let (host, clients) = NetSession::loopback(2);
+        for (seed, end) in
+            [&host, &clients[0], &clients[1]].into_iter().enumerate()
+        {
+            end.simulate(NetConditions {
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(10),
+                loss: 0.02,
+                seed: seed as u64,
+            });
+        }
+        host.poll();
+
+        // Lobby: both say hello, wait for their welcome, and get ready.
+        let mut lobby = Lobby::new(Duration::from_secs(5));
+        let mut welcomed: Vec<Option<Rejoin>> = vec![None; 2];
+        let mut ready = 0;
+        for client in &clients {
+            lobby::hello(client, None).unwrap();
+        }
+        let start = Instant::now();
+        while ready < 2 {
+            assert!(start.elapsed() < Duration::from_secs(5), "lobby stuck");
+            for event in host.poll() {
+                if let Some(Ok(LobbyEvent::Ready(_))) =
+                    lobby.handle(&host, &event)
+                {
+                    ready += 1;
+                }
+            }
+            for (client, welcome) in clients.iter().zip(&mut welcomed) {
+                for event in client.poll() {
+                    if let NetEvent::Message { from, bytes } = event {
+                        *welcome = lobby::welcome_from(from, &bytes);
+                        lobby::ready(client).unwrap();
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(lobby.start_match(), [1, 2]);
+
+        // The match: clients stamp inputs 60 ticks past the last tick they
+        // ran; the host runs a tick every 10 ms on whatever arrived and
+        // sends its commands, which every client runs, checking the
+        // host's hash first.
+        let mut inputs = InputBuffer::new(1);
+        let mut host_state = State::new();
+        let mut streams =
+            vec![CommandStream::<(lobby::PlayerId, i64)>::new(1); 2];
+        let mut states = vec![State::new(); 2];
+        let mut sent = [0_u64; 2];
+        let (mut fresh, mut late) = (0, 0);
+        let client_step =
+            |streams: &mut [CommandStream<(lobby::PlayerId, i64)>],
+             states: &mut [State],
+             sent: &mut [u64; 2]| {
+                for (index, client) in clients.iter().enumerate() {
+                    for event in client.poll() {
+                        if let NetEvent::Message { from, bytes } = event {
+                            streams[index]
+                                .accept(from, &bytes)
+                                .unwrap()
+                                .unwrap();
+                        }
+                    }
+                    while let Some(tick) = streams[index].ready() {
+                        assert_eq!(
+                            tick.hash,
+                            hash(&states[index]),
+                            "desync at {}",
+                            tick.tick
+                        );
+                        run(&mut states[index], &tick.commands);
+                    }
+                    // One input per tick, also for ticks a burst of
+                    // commands skipped past.
+                    let last = (streams[index].tick() + 60).min(TICKS);
+                    for stamp in sent[index] + 1..=last {
+                        let dx = (stamp + index as u64) % 3;
+                        let bytes =
+                            [INPUT, &stamp.to_le_bytes(), &dx.to_le_bytes()]
+                                .concat();
+                        client.send(HOST, &bytes).unwrap();
+                    }
+                    sent[index] = sent[index].max(last);
+                }
+            };
+        for _ in 1..=TICKS {
+            for event in host.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                assert!(lobby.accepts_input(from));
+                let body = bytes.strip_prefix(INPUT).unwrap();
+                let stamp = u64::from_le_bytes(body[..8].try_into().unwrap());
+                let dx = u64::from_le_bytes(body[8..].try_into().unwrap())
+                    as i64
+                    - 1;
+                if inputs.push(from, stamp, dx).is_err() {
+                    late += 1;
+                }
+            }
+            let before = hash(&host_state);
+            let (tick, taken) = inputs.take();
+            fresh += taken.iter().filter(|input| input.fresh).count();
+            let commands: Commands = taken
+                .iter()
+                .map(|input| (lobby.player(input.peer).unwrap(), input.input))
+                .collect();
+            lockstep::send(&host, tick, before, &commands).unwrap();
+            run(&mut host_state, &commands);
+            client_step(&mut streams, &mut states, &mut sent);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let start = Instant::now();
+        while streams.iter().any(|stream| stream.tick() <= TICKS) {
+            assert!(start.elapsed() < Duration::from_secs(5), "match stuck");
+            client_step(&mut streams, &mut states, &mut sent);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(states, [host_state.clone(), host_state.clone()]);
+        assert_eq!(host_state.len(), 2, "both players moved");
+        assert!(welcomed.iter().all(Option::is_some));
+        // TCP holds every message behind a lost one for a round trip, so
+        // some inputs miss their tick; the host repeats that player's last
+        // input, and every peer runs the same repeat.
+        assert!(fresh > 0 && late > 0, "{fresh} fresh inputs, {late} late");
+    }
+
+    #[test]
+    fn the_host_rejects_positions_and_terrain_a_client_claims() {
+        use crate::runtime::{Name, SceneComponentRegistry, SceneId};
+        use crate::Transform;
+        use bevy_ecs::prelude::World;
+        use input::InputBuffer;
+        use replicate::{Replicated, Replication, TRANSFORM};
+        use rpc::{Authority, Reliability, Rpcs};
+
+        let (host, clients) = NetSession::loopback(1);
+        let cheat = &clients[0];
+        host.poll();
+        let world = || {
+            let mut world = World::new();
+            world.insert_resource(SceneComponentRegistry::default());
+            world
+        };
+        let id = SceneId::new();
+        let hero = |world: &mut World| {
+            world
+                .spawn((
+                    Replicated,
+                    id,
+                    Name("Hero".into()),
+                    Transform::default(),
+                ))
+                .id()
+        };
+        let mut host_world = world();
+        let host_hero = hero(&mut host_world);
+        let mut replication = Replication::new();
+        replication.component(TRANSFORM);
+        replication.delta(&mut host_world).unwrap();
+        // Terrain changes and teleports are the host's own calls.
+        let mut rpcs = Rpcs::new();
+        rpcs.register("break_chunk", Authority::Host, Reliability::Reliable)
+            .register("teleport", Authority::Host, Reliability::Reliable);
+        let mut inputs = InputBuffer::new(1);
+
+        // A modified client builds real replication messages of its own
+        // world, with its hero far away, registers the host's methods as
+        // open to anyone, and sends inputs out of range and far ahead.
+        let mut forged = world();
+        let fake = hero(&mut forged);
+        forged.get_mut::<Transform>(fake).unwrap().position = [1e9, 0.0, 0.0];
+        let mut theirs = Replication::new();
+        theirs.component(TRANSFORM);
+        let delta = theirs.delta(&mut forged).unwrap().unwrap();
+        theirs.snapshot(&mut forged).unwrap();
+        for bytes in [
+            delta,
+            theirs.full(),
+            theirs.snapshot_for(HOST).unwrap(),
+            theirs.checksum(),
+        ] {
+            cheat.send(HOST, &bytes).unwrap();
+        }
+        let mut open = Rpcs::new();
+        open.register("break_chunk", Authority::Anyone, Reliability::Reliable)
+            .register("teleport", Authority::Anyone, Reliability::Reliable);
+        open.call(cheat, "Terrain", "break_chunk", b"0,0,0")
+            .unwrap();
+        open.call(cheat, "Hero", "teleport", b"1e9,0,0").unwrap();
+        for (tick, stick) in
+            [(1_u64, f32::NAN), (2, 50.0), (500, 1.0), (3, 0.5)]
+        {
+            let bytes =
+                [tick.to_le_bytes().as_slice(), &stick.to_le_bytes()].concat();
+            cheat.send(HOST, &bytes).unwrap();
+        }
+
+        // The host's loop, as docs/networking.md has it: replication and
+        // RPCs check the sender, the game checks each input's range, and
+        // the input buffer checks its tick.
+        let mut refused = Vec::new();
+        for event in wait(&host, 10) {
+            let NetEvent::Message { from, bytes } = event else {
+                continue;
+            };
+            if let Some(result) = replication.accept(from, &bytes) {
+                refused.push(result.unwrap_err());
+            } else if let Some(result) = rpcs.accept(from, &bytes) {
+                refused.push(result.unwrap_err());
+            } else {
+                let tick = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                let stick = f32::from_le_bytes(bytes[8..].try_into().unwrap());
+                if !(stick.is_finite() && stick.abs() <= 1.0) {
+                    refused.push(format!("peer {from}: stick {stick}"));
+                } else if let Err(reason) = inputs.push(from, tick, stick) {
+                    refused.push(reason);
+                }
+            }
+        }
+        assert_eq!(
+            refused,
+            [
+                "peer 1 sent state; only the host may",
+                "peer 1 sent state; only the host may",
+                "peer 1 sent state; only the host may",
+                "peer 1 sent state; only the host may",
+                "peer 1 may not call \"break_chunk\" on \"Terrain\"",
+                "peer 1 may not call \"teleport\" on \"Hero\"",
+                "peer 1: stick NaN",
+                "peer 1: stick 50",
+                "peer 1: input for tick 500 is too far ahead",
+            ]
+        );
+        // Only the one valid input gets through, and the host's state is
+        // its own.
+        inputs.take();
+        inputs.take();
+        let (_, third) = inputs.take();
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].input, 0.5);
+        assert_eq!(
+            host_world.get::<Transform>(host_hero).unwrap().position,
+            [0.0; 3]
+        );
+        assert_eq!(replication.delta(&mut host_world).unwrap(), None);
     }
 }

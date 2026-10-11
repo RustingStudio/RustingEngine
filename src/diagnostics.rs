@@ -205,6 +205,18 @@ pub const CODES: &[CodeInfo] = &[
         "rusting export . ../dist --target x86_64-pc-windows-gnu",
     ),
     code(
+        "EXPORT_PRESET_UNKNOWN",
+        "project.json has no export preset with the name given to --preset.",
+        "Use one of the names the message lists, or add the preset under export_presets in project.json.",
+        "rusting export . ../dist --preset demo --json",
+    ),
+    code(
+        "EXPORT_SIGN_FAILED",
+        "The export preset's sign command could not run or exited with an error.",
+        "Run the sign command by hand on the exported executable, fix it, then export again.",
+        "rusting export . ../dist --preset windows --json",
+    ),
+    code(
         "EXPORT_VERIFY_FAILED",
         "The exported game did not start cleanly from its own folder, so a file it needs was not packaged.",
         "Make sure every file the game loads is under assets/ or scenes/, then export again.",
@@ -714,5 +726,22 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("{}: {error}", info.code));
         }
+    }
+
+    #[test]
+    fn command_examples_name_a_real_command_and_its_flags() {
+        let mut commands = 0;
+        for info in CODES {
+            for command in info.example.split("&&").map(str::trim) {
+                if let Some(args) = command.strip_prefix("rusting ") {
+                    commands += 1;
+                    if let Some(problem) = crate::schema::command_problem(args)
+                    {
+                        panic!("{}: {problem}", info.code);
+                    }
+                }
+            }
+        }
+        assert!(commands > 80, "only {commands} command examples");
     }
 }

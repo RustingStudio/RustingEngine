@@ -31,6 +31,11 @@ const MAGIC: &[u8; 4] = b"\0rep";
 /// Marks a numbered snapshot, and a client's acknowledgement of one.
 const SNAPSHOT: &[u8; 4] = b"\0rsn";
 const ACK: &[u8; 4] = b"\0rak";
+/// Marks the whole replicated state, a state hash, and a client's request
+/// for a resynchronization.
+const FULL: &[u8; 4] = b"\0rfl";
+const CHECKSUM: &[u8; 4] = b"\0rhs";
+const RESYNC: &[u8; 4] = b"\0rrs";
 /// Snapshots each side keeps to encode against, about a second at 60 Hz.
 /// A client whose last acknowledgement is older gets a whole snapshot.
 pub const SNAPSHOT_HISTORY: usize = 64;
@@ -46,6 +51,40 @@ pub const MAX_OBJECTS: usize = 16_384;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Replicated;
 
+/// Marks an object every peer simulates itself from the same commands
+/// ([`super::lockstep`]), such as a deterministic physics body. Its
+/// transform is never replicated or hashed; its other listed components
+/// are. Mark it on every peer, and spawn it on every peer (from the
+/// shared scene or a command), since a replicated spawn carries no
+/// transform for it.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct Simulated;
+
+/// What a client sent the host about replication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FromClient {
+    /// It acknowledged a snapshot.
+    Ack,
+    /// It found a desync and needs the whole state.
+    Resync,
+}
+
+/// The result of [`Replica::verify`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Check {
+    Match,
+    /// This world differs from the host's state.
+    Desync,
+    /// The hash is for a snapshot this client has not applied (yet).
+    Stale,
+}
+
+/// The host's latest transform for an object, when the [`Replica`] is
+/// [`interpolated`](Replica::interpolated); `Transform` is then what the
+/// client shows.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct NetTransform(pub Transform);
+
 /// Replicated state of one object: component name to scene form.
 type Object = Map<String, Value>;
 type State = BTreeMap<Uuid, Object>;
@@ -59,6 +98,11 @@ pub struct Replication {
     /// Numbered snapshots, oldest first, and what each client acknowledged.
     history: VecDeque<(u64, State)>,
     acked: BTreeMap<PeerId, u64>,
+    /// Checksums sent, and the count when each client last resynced: a
+    /// client may resync once per checksum, so a few bytes of requests
+    /// cannot make the host send the whole state over and over.
+    checksums: u64,
+    resynced: BTreeMap<PeerId, u64>,
 }
 
 impl Replication {
@@ -110,14 +154,37 @@ impl Replication {
     }
 
     /// Everything sent so far as one message, for a client that just
-    /// joined. Send it to that client before the next delta.
+    /// joined or asked to resynchronize. Send it to that client before the
+    /// next delta. The client replaces its replicated objects with it,
+    /// despawning any the host does not have.
     pub fn full(&self) -> Vec<u8> {
-        let all = self
+        let all: Map<String, Value> = self
             .sent
             .iter()
             .map(|(id, object)| (id.to_string(), Value::Object(object.clone())))
             .collect();
-        encode(&all)
+        let mut bytes = FULL.to_vec();
+        bytes.extend(serde_json::to_vec(&all).expect("JSON serializes"));
+        bytes
+    }
+
+    /// A hash of the latest state, for [`Replica::verify`]: of the latest
+    /// snapshot, or of what [`delta`](Self::delta) last sent when no
+    /// snapshot was taken. Send it every second or so, the same way as
+    /// the state (reliably after a delta). Each one lets every client
+    /// resynchronize once.
+    pub fn checksum(&mut self) -> Vec<u8> {
+        self.checksums += 1;
+        let (seq, state) = self
+            .history
+            .back()
+            .map_or((0, &self.sent), |(seq, state)| (*seq, state));
+        [
+            CHECKSUM.as_slice(),
+            &seq.to_le_bytes(),
+            &hash(state).to_le_bytes(),
+        ]
+        .concat()
     }
 
     /// Captures the replicated state as the next numbered snapshot and
@@ -154,20 +221,42 @@ impl Replication {
         Some(bytes)
     }
 
-    /// Reads a client's acknowledgement made by [`Replica::ack`]. Returns
-    /// `None` for any other message.
+    /// Reads a client's acknowledgement ([`Replica::ack`]) or request for
+    /// a resynchronization ([`Replica::resync`]). Returns `None` for any
+    /// other message, and an error for state a client sent (a delta,
+    /// snapshot, whole state or checksum): only the host has state. On a
+    /// request, the next [`snapshot_for`](Self::snapshot_for) that client
+    /// is whole; with deltas, send it [`full`](Self::full).
     pub fn accept(
         &mut self,
         from: PeerId,
         bytes: &[u8],
-    ) -> Option<Result<(), String>> {
+    ) -> Option<Result<FromClient, String>> {
+        if [MAGIC, SNAPSHOT, FULL, CHECKSUM]
+            .iter()
+            .any(|kind| bytes.starts_with(kind.as_slice()))
+        {
+            return Some(Err(format!(
+                "peer {from} sent state; only the host may"
+            )));
+        }
+        if bytes == RESYNC {
+            if self.resynced.get(&from) == Some(&self.checksums) {
+                return Some(Err(format!(
+                    "peer {from} asked to resync again before a new checksum"
+                )));
+            }
+            self.resynced.insert(from, self.checksums);
+            self.acked.remove(&from);
+            return Some(Ok(FromClient::Resync));
+        }
         let body = bytes.strip_prefix(ACK)?;
         let latest = self.history.back().map_or(0, |(seq, _)| *seq);
         Some(match <[u8; 8]>::try_from(body).map(u64::from_le_bytes) {
             Ok(seq) if seq <= latest => {
                 let acked = self.acked.entry(from).or_default();
                 *acked = (*acked).max(seq);
-                Ok(())
+                Ok(FromClient::Ack)
             }
             Ok(seq) => Err(format!("peer {from} acked unsent snapshot {seq}")),
             Err(_) => Err(format!("peer {from} sent a bad ack")),
@@ -177,6 +266,7 @@ impl Replication {
     /// Forgets a client that left.
     pub fn forget(&mut self, peer: PeerId) {
         self.acked.remove(&peer);
+        self.resynced.remove(&peer);
     }
 
     fn capture(&self, world: &mut World) -> io::Result<State> {
@@ -184,15 +274,20 @@ impl Replication {
             Entity,
             &SceneId,
             Option<&Transform>,
+            Option<&NetTransform>,
             Option<&Name>,
+            Has<Simulated>,
         ), With<Replicated>>();
         let found: Vec<_> = query
             .iter(world)
-            .map(|(entity, id, transform, name)| {
+            .map(|(entity, id, transform, net, name, simulated)| {
                 (
                     entity,
                     id.0,
-                    transform.copied(),
+                    // On an interpolated client, the host's transform.
+                    net.map(|net| net.0)
+                        .or(transform.copied())
+                        .filter(|_| !simulated),
                     name.map(|name| name.0.clone()),
                 )
             })
@@ -237,10 +332,12 @@ impl Replication {
 /// A client's side: applies the host's messages to its world.
 #[derive(Clone, Debug, Default)]
 pub struct Replica {
-    components: Vec<String>,
+    /// What to accept and how to capture it, as the host does.
+    config: Replication,
     entities: BTreeMap<Uuid, Entity>,
     /// Snapshots received, oldest first; the last one is in the world.
     states: VecDeque<(u64, State)>,
+    interpolate: bool,
 }
 
 impl Replica {
@@ -248,10 +345,23 @@ impl Replica {
     /// Build the same [`Replication`] on every peer and pass it here.
     pub fn new(replication: &Replication) -> Self {
         Self {
-            components: replication.components.clone(),
+            config: Replication {
+                components: replication.components.clone(),
+                steps: replication.steps.clone(),
+                ..Replication::default()
+            },
             entities: BTreeMap::new(),
             states: VecDeque::new(),
+            interpolate: false,
         }
+    }
+
+    /// Writes received transforms into [`NetTransform`] instead of
+    /// `Transform`, for [`Interpolation`](super::interpolate::Interpolation)
+    /// to present smoothly. An object's first transform goes to both.
+    pub fn interpolated(mut self) -> Self {
+        self.interpolate = true;
+        self
     }
 
     /// Applies a message `from` a peer, made by [`Replication::delta`] or
@@ -267,20 +377,86 @@ impl Replica {
         from: PeerId,
         bytes: &[u8],
     ) -> Option<Result<(), String>> {
-        let (snapshot, body) = match bytes.strip_prefix(SNAPSHOT) {
-            Some(body) => (true, body),
-            None => (false, bytes.strip_prefix(MAGIC)?),
-        };
+        let kinds = [MAGIC, SNAPSHOT, FULL];
+        let (kind, body) = kinds.iter().find_map(|kind| {
+            Some((*kind, bytes.strip_prefix(kind.as_slice())?))
+        })?;
         if from != HOST {
             return Some(Err(format!(
                 "peer {from} sent replication; only the host may"
             )));
         }
-        Some(if snapshot {
+        Some(if kind == SNAPSHOT {
             self.apply_snapshot(world, body)
+        } else if kind == FULL {
+            parse(body)
+                .and_then(|patch| merge(&State::new(), patch))
+                .and_then(|now| self.replace(world, &now))
         } else {
             parse(body).and_then(|patch| self.apply_patch(world, patch))
         })
+    }
+
+    /// Compares this world with a [`Replication::checksum`] `from` the
+    /// host. Returns `None` for any other message. On
+    /// [`Check::Desync`], report it and send the host
+    /// [`resync`](Self::resync).
+    pub fn verify(
+        &self,
+        world: &mut World,
+        from: PeerId,
+        bytes: &[u8],
+    ) -> Option<Result<Check, String>> {
+        let body = bytes.strip_prefix(CHECKSUM)?;
+        if from != HOST {
+            return Some(Err(format!("peer {from} sent a checksum")));
+        }
+        let Some((seq, expected)) = body
+            .split_at_checked(8)
+            .filter(|(_, hash)| hash.len() == 8)
+            .map(|(seq, hash)| {
+                let read = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap());
+                (read(seq), read(hash))
+            })
+        else {
+            return Some(Err("bad checksum".into()));
+        };
+        let latest = self.states.back().map_or(0, |(seq, _)| *seq);
+        if seq != latest {
+            return Some(Ok(Check::Stale));
+        }
+        Some(
+            self.config
+                .capture(world)
+                .map(|state| {
+                    if hash(&state) == expected {
+                        Check::Match
+                    } else {
+                        Check::Desync
+                    }
+                })
+                .map_err(|error| error.to_string()),
+        )
+    }
+
+    /// A request for the host to resynchronize this client, after
+    /// [`verify`](Self::verify) found a desync.
+    pub fn resync(&self) -> Vec<u8> {
+        RESYNC.to_vec()
+    }
+
+    /// Makes the world's replicated objects match `now` exactly, whatever
+    /// happened to them locally.
+    fn replace(
+        &mut self,
+        world: &mut World,
+        now: &State,
+    ) -> Result<(), String> {
+        let current = self
+            .config
+            .capture(world)
+            .map_err(|error| error.to_string())?;
+        self.apply_patch(world, diff(&current, now))
     }
 
     /// The acknowledgement of the latest snapshot applied, for the client
@@ -315,32 +491,14 @@ impl Replica {
                     format!("snapshot {seq} needs unknown {base}")
                 })?,
         };
-        let mut now = before.clone();
-        let mut seen = BTreeSet::new();
-        for (key, change) in parse(patch)? {
-            let id =
-                Uuid::parse_str(&key).map_err(|error| error.to_string())?;
-            if !seen.insert(id) {
-                return Err(format!("{id} appears twice"));
-            }
-            match change {
-                Value::Null => {
-                    now.remove(&id);
-                }
-                Value::Object(fields) => {
-                    let object = now.entry(id).or_default();
-                    for (name, value) in fields {
-                        match value {
-                            Value::Null => object.remove(&name),
-                            value => object.insert(name, value),
-                        };
-                    }
-                }
-                _ => return Err(format!("{id}: expected an object or null")),
-            }
+        let now = merge(before, parse(patch)?)?;
+        if base == 0 {
+            // Whole: after a join or a resync, match it exactly.
+            self.replace(world, &now)?;
+        } else {
+            let current = self.states.back().map_or(&empty, |(_, state)| state);
+            self.apply_patch(world, diff(current, &now))?;
         }
-        let current = self.states.back().map_or(&empty, |(_, state)| state);
-        self.apply_patch(world, diff(current, &now))?;
         // The host encodes later snapshots against `base` or newer.
         self.states.retain(|(kept, _)| *kept >= base);
         if self.states.len() == SNAPSHOT_HISTORY {
@@ -372,7 +530,7 @@ impl Replica {
                 Value::Object(fields) => {
                     if let Some(name) = fields
                         .keys()
-                        .find(|name| !self.components.contains(name))
+                        .find(|name| !self.config.components.contains(name))
                     {
                         return Err(format!("{name} is not replicated"));
                     }
@@ -396,14 +554,11 @@ impl Replica {
                 self.entities.remove(&id);
                 continue;
             };
-            let entity = entity.unwrap_or_else(|| {
-                world
-                    .spawn((Replicated, SceneId(id), Transform::default()))
-                    .id()
-            });
+            let entity = entity
+                .unwrap_or_else(|| world.spawn((Replicated, SceneId(id))).id());
             self.entities.insert(id, entity);
             for (name, value) in fields {
-                apply_component(world, entity, &name, value)
+                apply_component(world, entity, &name, value, self.interpolate)
                     .map_err(|error| format!("{name} on {id}: {error}"))?;
             }
         }
@@ -442,6 +597,7 @@ fn apply_component(
     entity: Entity,
     name: &str,
     value: Value,
+    interpolate: bool,
 ) -> Result<(), String> {
     match (name, value) {
         (TRANSFORM, Value::Null) => {}
@@ -457,7 +613,13 @@ fn apply_component(
             read("position", &mut transform.position);
             read("rotation", &mut transform.rotation);
             read("scale", &mut transform.scale);
-            world.entity_mut(entity).insert(transform);
+            let mut entity = world.entity_mut(entity);
+            if !interpolate || !entity.contains::<NetTransform>() {
+                entity.insert(transform);
+            }
+            if interpolate {
+                entity.insert(NetTransform(transform));
+            }
         }
         (NAME, Value::String(name)) => {
             world.entity_mut(entity).insert(Name(name));
@@ -500,6 +662,44 @@ fn round(value: &mut Value, step: f64) {
         }
         _ => {}
     }
+}
+
+/// `before` with `patch` applied, refusing an id given twice.
+fn merge(before: &State, patch: Map<String, Value>) -> Result<State, String> {
+    let mut now = before.clone();
+    let mut seen = BTreeSet::new();
+    for (key, change) in patch {
+        let id = Uuid::parse_str(&key).map_err(|error| error.to_string())?;
+        if !seen.insert(id) {
+            return Err(format!("{id} appears twice"));
+        }
+        match change {
+            Value::Null => {
+                now.remove(&id);
+            }
+            Value::Object(fields) => {
+                let object = now.entry(id).or_default();
+                for (name, value) in fields {
+                    match value {
+                        Value::Null => object.remove(&name),
+                        value => object.insert(name, value),
+                    };
+                }
+            }
+            _ => return Err(format!("{id}: expected an object or null")),
+        }
+    }
+    Ok(now)
+}
+
+/// FNV-1a of the state's JSON: the same on every machine and build.
+fn hash(state: &State) -> u64 {
+    serde_json::to_vec(state)
+        .expect("JSON serializes")
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        })
 }
 
 /// The patch that turns `before` into `now`: new objects whole, changed
@@ -589,6 +789,96 @@ mod tests {
     }
 
     #[test]
+    fn a_desync_is_detected_and_repaired_by_a_resync() {
+        let (mut host, mut client) = (world(), world());
+        let mut replication = Replication::new();
+        replication
+            .component(TRANSFORM)
+            .component("rusting.health")
+            .quantize("/transform/position", 0.01);
+        let health_of = |value| Health {
+            value,
+            max: 10,
+            team: String::new(),
+        };
+        host.spawn((
+            Replicated,
+            SceneId::new(),
+            Transform::new([1.234, 0.0, 0.0]),
+            health_of(5),
+        ));
+        let mut replica = Replica::new(&replication);
+
+        // Deltas: same state, same hash, quantized values included.
+        let delta = replication.delta(&mut host).unwrap().unwrap();
+        replica.apply(&mut client, HOST, &delta).unwrap().unwrap();
+        let check = |replica: &Replica, client: &mut World, bytes: &[u8]| {
+            replica.verify(client, HOST, bytes).unwrap().unwrap()
+        };
+        assert_eq!(
+            check(&replica, &mut client, &replication.checksum()),
+            Check::Match
+        );
+
+        // Something on the client breaks its copy and adds a stray object.
+        let copy = client
+            .query_filtered::<Entity, With<Health>>()
+            .single(&client)
+            .unwrap();
+        client.entity_mut(copy).insert(health_of(1));
+        client.spawn((Replicated, SceneId::new(), health_of(9)));
+        assert_eq!(
+            check(&replica, &mut client, &replication.checksum()),
+            Check::Desync
+        );
+
+        // The host answers a resync with the whole state, which replaces.
+        assert_eq!(
+            replication.accept(1, &replica.resync()),
+            Some(Ok(FromClient::Resync))
+        );
+        assert!(
+            replication.accept(1, &replica.resync()).unwrap().is_err(),
+            "once per checksum"
+        );
+        replica
+            .apply(&mut client, HOST, &replication.full())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            check(&replica, &mut client, &replication.checksum()),
+            Check::Match
+        );
+        assert_eq!(client.query::<&Health>().iter(&client).count(), 1);
+
+        // Snapshots: a resync makes the next one whole, which also replaces.
+        replication.snapshot(&mut host).unwrap();
+        let first = replication.snapshot_for(1).unwrap();
+        replica.apply(&mut client, HOST, &first).unwrap().unwrap();
+        replication
+            .accept(1, &replica.ack().unwrap())
+            .unwrap()
+            .unwrap();
+        client.entity_mut(copy).insert(health_of(2));
+        replication.snapshot(&mut host).unwrap();
+        let stale = replication.checksum();
+        assert_eq!(check(&replica, &mut client, &stale), Check::Stale);
+        let second = replication.snapshot_for(1).unwrap();
+        replica.apply(&mut client, HOST, &second).unwrap().unwrap();
+        assert_eq!(check(&replica, &mut client, &stale), Check::Desync);
+        replication.accept(1, &replica.resync()).unwrap().unwrap();
+        host.spawn((Replicated, SceneId::new(), health_of(3)));
+        replication.snapshot(&mut host).unwrap();
+        let whole = replication.snapshot_for(1).unwrap();
+        replica.apply(&mut client, HOST, &whole).unwrap().unwrap();
+        assert_eq!(
+            check(&replica, &mut client, &replication.checksum()),
+            Check::Match
+        );
+        assert!(replica.verify(&mut client, 2, &stale).unwrap().is_err());
+    }
+
+    #[test]
     fn snapshots_encode_against_the_last_acknowledged_one() {
         let (mut host, mut client) = (world(), world());
         let mut replication = Replication::new();
@@ -624,7 +914,7 @@ mod tests {
         let entity = copy(&mut client).unwrap();
         assert_eq!(health(&client, entity), Some(5));
         let ack = replica.ack().unwrap();
-        assert_eq!(replication.accept(1, &ack), Some(Ok(())));
+        assert_eq!(replication.accept(1, &ack), Some(Ok(FromClient::Ack)));
 
         // Snapshot 2 is lost. Snapshot 3 is encoded against 1, so it still
         // carries the name 2 added, but not the unchanged transform.
@@ -747,6 +1037,123 @@ mod tests {
             .apply(&mut client, HOST, b"\0repnot json")
             .unwrap()
             .is_err());
+    }
+
+    #[test]
+    fn random_edits_round_trip_through_lossy_snapshots_and_deltas() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut roll = move |n: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % n
+        };
+        let configure = || {
+            let mut replication = Replication::new();
+            replication
+                .component(TRANSFORM)
+                .component(NAME)
+                .component("rusting.health");
+            replication
+        };
+        let mut host = world();
+        let (mut snapshots, mut deltas) = (configure(), configure());
+        let (mut lossy, mut reliable) = (world(), world());
+        let mut lossy_replica = Replica::new(&snapshots);
+        let mut reliable_replica = Replica::new(&deltas);
+        let mut late: Option<Vec<u8>> = None;
+        let mut objects = Vec::new();
+        let (mut matched, mut lost) = (0, 0);
+        for tick in 0..300 {
+            for _ in 0..roll(4) {
+                match roll(6) {
+                    0 | 1 => objects.push(
+                        host.spawn((
+                            Replicated,
+                            SceneId::new(),
+                            Name(format!("n{tick}")),
+                            Transform::new([roll(100) as f32 * 0.37, 0.0, 1.5]),
+                        ))
+                        .id(),
+                    ),
+                    2 if !objects.is_empty() => {
+                        let at = roll(objects.len() as u64) as usize;
+                        host.despawn(objects.swap_remove(at));
+                    }
+                    3 if !objects.is_empty() => {
+                        let entity =
+                            objects[roll(objects.len() as u64) as usize];
+                        host.entity_mut(entity).insert(Health {
+                            value: roll(50) as i32 - 10,
+                            max: 40,
+                            team: format!("t{}", roll(3)),
+                        });
+                    }
+                    4 if !objects.is_empty() => {
+                        let entity =
+                            objects[roll(objects.len() as u64) as usize];
+                        host.entity_mut(entity).remove::<Health>();
+                    }
+                    _ if !objects.is_empty() => {
+                        let entity =
+                            objects[roll(objects.len() as u64) as usize];
+                        let mut transform =
+                            host.get_mut::<Transform>(entity).unwrap();
+                        transform.position[1] += 0.125;
+                        transform.rotation[2] -= 0.3;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Reliable deltas: every one arrives, in order.
+            if let Some(delta) = deltas.delta(&mut host).unwrap() {
+                reliable_replica
+                    .apply(&mut reliable, HOST, &delta)
+                    .unwrap()
+                    .unwrap();
+            }
+            let checksum = deltas.checksum();
+            assert_eq!(
+                reliable_replica.verify(&mut reliable, HOST, &checksum),
+                Some(Ok(Check::Match)),
+                "tick {tick}"
+            );
+
+            // Unreliable snapshots: a third are lost, some arrive a tick
+            // late, and acknowledgements go missing too.
+            snapshots.snapshot(&mut host).unwrap();
+            let message = snapshots.snapshot_for(1).unwrap();
+            if let Some(old) = late.take() {
+                lossy_replica
+                    .apply(&mut lossy, HOST, &old)
+                    .unwrap()
+                    .unwrap();
+            }
+            match roll(6) {
+                0 | 1 => lost += 1,
+                2 => late = Some(message),
+                _ => {
+                    lossy_replica
+                        .apply(&mut lossy, HOST, &message)
+                        .unwrap()
+                        .unwrap();
+                    if roll(2) == 0 {
+                        let ack = lossy_replica.ack().unwrap();
+                        snapshots.accept(1, &ack).unwrap().unwrap();
+                    }
+                    let checksum = snapshots.checksum();
+                    assert_eq!(
+                        lossy_replica.verify(&mut lossy, HOST, &checksum),
+                        Some(Ok(Check::Match)),
+                        "tick {tick}"
+                    );
+                    matched += 1;
+                }
+            }
+        }
+        assert!(matched > 100 && lost > 50, "{matched} {lost}");
+        assert!(!objects.is_empty());
     }
 
     #[test]

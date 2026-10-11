@@ -4488,6 +4488,7 @@ fn cargo(
     command: &str,
     release: bool,
     target: Option<&str>,
+    features: &[String],
 ) -> Result<ProcessRun, CliResult> {
     let mut cargo = Command::new("cargo");
     cargo.arg(command);
@@ -4499,6 +4500,9 @@ fn cargo(
     }
     if let Some(target) = target {
         cargo.args(["--target", target]);
+    }
+    if !features.is_empty() {
+        cargo.args(["--features", &features.join(",")]);
     }
     cargo
         .args(["--message-format", "short", "--manifest-path"])
@@ -4953,7 +4957,7 @@ pub fn check_project(root: &Path) -> CliResult {
     };
     // `cargo build`, not `cargo check`: the debug build is the one `run` and
     // `test` reuse, so checking first costs no second engine compile.
-    match cargo(&project, "build", false, None) {
+    match cargo(&project, "build", false, None, &[]) {
         Ok(run) => {
             let mut result = CliResult::success(
                 json!({"root": project.root, "cargo": run.data()}),
@@ -5196,7 +5200,7 @@ pub fn debug_game_project(root: &Path) -> CliResult {
         Ok(project) => project,
         Err(error) => return project_error(error, root),
     };
-    if let Err(result) = cargo(&project, "build", false, None) {
+    if let Err(result) = cargo(&project, "build", false, None, &[]) {
         return result;
     }
     let executable = match crate::project::built_executable(
@@ -5295,7 +5299,11 @@ pub fn fuzz_game_project(
     let mut tried = 0;
     for seed in seeds {
         let mut run = base.clone();
-        run["fuzz"] = json!({"seed": seed, "actions": actions});
+        // The scenario's own `fuzz` actions and rate stay unless named.
+        run["fuzz"]["seed"] = json!(seed);
+        if !actions.is_empty() {
+            run["fuzz"]["actions"] = json!(actions);
+        }
         if let Err(error) = std::fs::write(&run_file, run.to_string()) {
             return CliResult::failure(
                 "IO_ERROR",
@@ -5420,10 +5428,11 @@ fn run_game_project_once(root: &Path, options: RunOptions) -> CliResult {
                 Ok(project) => project,
                 Err(error) => return project_error(error, root),
             };
-            let build = match cargo(&project, "build", options.release, None) {
-                Ok(build) => build,
-                Err(result) => return result,
-            };
+            let build =
+                match cargo(&project, "build", options.release, None, &[]) {
+                    Ok(build) => build,
+                    Err(result) => return result,
+                };
             match crate::project::built_executable(
                 &project.root,
                 &project.root.join("Cargo.toml"),
@@ -5777,7 +5786,8 @@ pub fn check_game_determinism(root: &Path, ticks: u32) -> CliResult {
     };
     let mut reports = Vec::new();
     for config in &configs {
-        if let Err(result) = cargo(&project, "build", config.release, None) {
+        if let Err(result) = cargo(&project, "build", config.release, None, &[])
+        {
             return result;
         }
         match run(config, ticks) {
@@ -5856,7 +5866,14 @@ fn headless_state_hashes(
         config.release,
     )
     .map_err(|error| CliResult::failure("BUILD_FAILED", error, None))?;
-    let report_path = out_dir.join(format!("{}-{ticks}.json", config.name));
+    // Absolute, since the game runs in the project root: a relative root
+    // would be joined twice.
+    let report_path = std::path::absolute(
+        out_dir.join(format!("{}-{ticks}.json", config.name)),
+    )
+    .map_err(|error| {
+        CliResult::failure("IO_ERROR", error.to_string(), Some(out_dir.into()))
+    })?;
     let _ = std::fs::remove_file(&report_path);
     let mut game = if config.one_cpu {
         let mut game = Command::new("taskset");
@@ -5917,7 +5934,7 @@ pub fn bisect_game_projects(
             Ok(project) => project,
             Err(error) => return project_error(error, root),
         };
-        if let Err(result) = cargo(&project, "build", false, None) {
+        if let Err(result) = cargo(&project, "build", false, None, &[]) {
             return result;
         }
         let out_dir = project.root.join("build/bisect");
@@ -6090,6 +6107,7 @@ pub fn export_game_project(
     root: &Path,
     parent: &Path,
     target: Option<&str>,
+    preset: Option<&str>,
 ) -> CliResult {
     let cooked = cook_project(root);
     if !cooked.ok {
@@ -6099,7 +6117,39 @@ pub fn export_game_project(
         Ok(project) => project,
         Err(error) => return project_error(error, root),
     };
-    if let Err(result) = cargo(&project, "build", true, target) {
+    let preset = match preset {
+        None => crate::project::ExportPreset {
+            target: target.map(str::to_owned),
+            ..Default::default()
+        },
+        Some(name) => {
+            let Some(preset) = project.manifest.export_presets.get(name) else {
+                let known: Vec<&str> = project
+                    .manifest
+                    .export_presets
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                return CliResult::failure(
+                    "EXPORT_PRESET_UNKNOWN",
+                    format!(
+                        "project.json has no export preset `{name}`; it has: {}",
+                        if known.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            known.join(", ")
+                        }
+                    ),
+                    Some(project.root.join("project.json")),
+                );
+            };
+            preset.clone()
+        }
+    };
+    let target = preset.target.as_deref();
+    if let Err(result) =
+        cargo(&project, "build", true, target, &preset.features)
+    {
         return result;
     }
     let exported = match crate::project::export_built_game(
@@ -6120,6 +6170,46 @@ pub fn export_game_project(
             )
         }
     };
+    let excluded =
+        match crate::project::remove_excluded(&exported, &preset.exclude) {
+            Ok(excluded) => excluded,
+            Err(error) => {
+                return CliResult::failure(
+                    "EXPORT_FAILED",
+                    format!("could not leave out excluded assets: {error}"),
+                    Some(exported),
+                )
+            }
+        };
+    if let Some((program, arguments)) = preset.sign.split_first() {
+        let executable = exported.join(crate::project::executable_name(
+            &project.manifest.binary_name,
+            target,
+        ));
+        let mut sign = Command::new(program);
+        sign.current_dir(&project.root);
+        for argument in arguments {
+            sign.arg(argument.replace("{exe}", &executable.to_string_lossy()));
+        }
+        let message =
+            match run_process(&mut sign, Some(Duration::from_secs(600))) {
+                Ok(run) if run.success => None,
+                Ok(run) => Some(format!(
+                    "the sign command failed:\n{}",
+                    tail(&run.stderr, 40)
+                )),
+                Err(error) => Some(format!("could not run {program}: {error}")),
+            };
+        if let Some(message) = message {
+            // An unsigned folder must not pass for a finished export.
+            let _ = std::fs::remove_dir_all(&exported);
+            return CliResult::failure(
+                "EXPORT_SIGN_FAILED",
+                message,
+                Some(project.root.join("project.json")),
+            );
+        }
+    }
     let mut files: Vec<_> = walk_files(&exported)
         .into_iter()
         .filter_map(|file| {
@@ -6131,6 +6221,9 @@ pub fn export_game_project(
         "root": project.root,
         "export_path": exported,
         "target": target,
+        "features": preset.features,
+        "excluded": excluded,
+        "signed": !preset.sign.is_empty(),
         "files": files,
         "verified": null,
     });
@@ -6339,6 +6432,18 @@ pub fn capture_scene(scene: &Path, options: &CaptureOptions) -> CliResult {
     {
         return CliResult::failure("CAPTURE_FAILED", error.to_string(), None);
     }
+    // HUD fonts and other files under `assets/` resolve from the project.
+    #[cfg(feature = "window")]
+    if let Some(root) = std::path::absolute(scene)
+        .unwrap_or_else(|_| scene.into())
+        .ancestors()
+        .find(|dir| dir.join("project.json").is_file())
+    {
+        app.world_mut()
+            .insert_resource(crate::project_runner::ProjectFolder(
+                root.to_owned(),
+            ));
+    }
     // Game code does not run during a capture, so its components are kept
     // as data rather than rejected.
     app.world_mut()
@@ -6539,6 +6644,29 @@ mod shape_tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn an_unknown_export_preset_fails_and_names_the_known_ones() {
+        let parent = std::env::temp_dir()
+            .join(format!("rusting-preset-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&parent).unwrap();
+        assert!(new_project(&parent, "Pre", ProjectTemplate::Basic3d).ok);
+        let root = parent.join("Pre");
+        let manifest = root.join("project.json");
+        let mut project: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        project["export_presets"] = json!({"linux": {"exclude": ["**/*.psd"]}});
+        std::fs::write(&manifest, project.to_string()).unwrap();
+        let result = export_game_project(&root, &parent, None, Some("windows"));
+        assert!(!result.ok);
+        assert_eq!(result.diagnostics[0].code, "EXPORT_PRESET_UNKNOWN");
+        assert!(
+            result.diagnostics[0].message.ends_with("it has: linux"),
+            "{}",
+            result.diagnostics[0].message
+        );
+        let _ = std::fs::remove_dir_all(parent);
+    }
 
     #[test]
     #[cfg(unix)]

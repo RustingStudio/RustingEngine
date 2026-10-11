@@ -1,0 +1,14 @@
+{
+ "name": "Random turns and restarts keep the head finite and the counters in range",
+ "ticks": 600,
+ "fuzz": {"actions": ["up", "down", "left", "right", "restart"]},
+ "invariants": [
+  {"entity": "Head", "path": "/transform/position", "finite": true},
+  {"entity": "Apples Counter", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Apples Counter", "path": "/components/rusting.counter/value", "less_than": 11},
+  {"entity": "Crashed Counter", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Crashed Counter", "path": "/components/rusting.counter/value", "less_than": 2},
+  {"entity": "Length Counter", "path": "/components/rusting.counter/value", "greater_than": 1}
+ ],
+ "steps": []
+}

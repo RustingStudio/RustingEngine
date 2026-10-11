@@ -33,12 +33,25 @@ pub const TEST_RESULTS_FILE: &str = "build/test-results.json";
 /// `build/test-userdata/<scenario>/` folder for each scenario.
 pub const USER_DATA_ENV: &str = "RUSTING_USER_DATA";
 
-/// Folder for a game's settings and saves: [`USER_DATA_ENV`] when set, else
-/// a folder named after the game's executable in the user's data folder
-/// (`~/.local/share/<game>` on Linux, `~/Library/Application Support/<game>`
-/// on macOS, `%APPDATA%\<game>` on Windows).
+/// Folder for a game's settings and saves: [`USER_DATA_ENV`] when set,
+/// else the platform's own save folder
+/// ([`crate::platform::platform_save_folder`]), else
+/// [`default_user_data_folder`].
 #[must_use]
 pub fn user_data_folder() -> PathBuf {
+    if let Some(folder) = std::env::var_os(USER_DATA_ENV) {
+        return PathBuf::from(folder);
+    }
+    crate::platform::platform_save_folder()
+        .unwrap_or_else(default_user_data_folder)
+}
+
+/// [`USER_DATA_ENV`] when set, else a folder named after the game's
+/// executable in the user's data folder (`~/.local/share/<game>` on Linux,
+/// `~/Library/Application Support/<game>` on macOS, `%APPDATA%\<game>` on
+/// Windows), ignoring the platform services.
+#[must_use]
+pub fn default_user_data_folder() -> PathBuf {
     if let Some(folder) = std::env::var_os(USER_DATA_ENV) {
         return PathBuf::from(folder);
     }
@@ -298,6 +311,123 @@ pub struct ProjectManifest {
     /// ratio; `None` draws it at the desktop's DPI scale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_base_size: Option<[u32; 2]>,
+    /// Window icon image, relative to the project folder; put it under
+    /// `assets/` so exports carry it. `None` keeps the system's icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PathBuf>,
+    /// Named export settings, one per platform or build kind; `rusting
+    /// export <project> <folder> --preset <name>` uses one.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    pub export_presets: std::collections::BTreeMap<String, ExportPreset>,
+}
+
+/// One named way to export a game, kept in `project.json` under
+/// `export_presets`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportPreset {
+    /// Rust target triple to build for, such as `x86_64-pc-windows-gnu`;
+    /// `None` builds for this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Cargo features of the game crate to turn on for this export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+    /// Files under `assets/` and `scenes/` to leave out, as paths relative
+    /// to the project folder: `*` matches within one folder name, `**` any
+    /// number of folders, as in `assets/source/**` or `**/*.psd`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Code-signing command run on the exported executable before the
+    /// export is verified: the program, then its arguments, where `{exe}`
+    /// becomes the executable's path. It runs in the project folder, and a
+    /// non-zero exit fails the export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sign: Vec<String>,
+}
+
+/// Whether `path` (relative, `/`-separated) matches `pattern`, where `*`
+/// matches any part of one path segment and a `**` segment any number of
+/// segments.
+#[must_use]
+pub fn path_matches(pattern: &str, path: &str) -> bool {
+    fn segments(pattern: &[&str], path: &[&str]) -> bool {
+        match pattern.split_first() {
+            None => path.is_empty(),
+            Some((&"**", rest)) => {
+                (0..=path.len()).any(|skip| segments(rest, &path[skip..]))
+            }
+            Some((first, rest)) => {
+                path.split_first().is_some_and(|(name, others)| {
+                    segment(first.as_bytes(), name.as_bytes())
+                        && segments(rest, others)
+                })
+            }
+        }
+    }
+    fn segment(pattern: &[u8], name: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => name.is_empty(),
+            Some((b'*', rest)) => {
+                (0..=name.len()).any(|skip| segment(rest, &name[skip..]))
+            }
+            Some((first, rest)) => name
+                .split_first()
+                .is_some_and(|(c, others)| c == first && segment(rest, others)),
+        }
+    }
+    let pattern: Vec<&str> = pattern.split('/').collect();
+    let path: Vec<&str> = path.split('/').collect();
+    segments(&pattern, &path)
+}
+
+/// Deletes the files under `assets/` and `scenes/` of an export folder
+/// that match any of `patterns` (see [`ExportPreset::exclude`]), and
+/// returns their paths relative to the folder, sorted. Nothing else in the
+/// folder is touched.
+///
+/// # Errors
+/// Returns the I/O error when a matching file cannot be deleted.
+pub fn remove_excluded(
+    export: &std::path::Path,
+    patterns: &[String],
+) -> std::io::Result<Vec<String>> {
+    fn walk(folder: &std::path::Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&export.join("assets"), &mut files);
+    walk(&export.join("scenes"), &mut files);
+    let mut removed = Vec::new();
+    for file in files {
+        let Ok(relative) = file.strip_prefix(export) else {
+            continue;
+        };
+        let relative = relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if patterns
+            .iter()
+            .any(|pattern| path_matches(pattern, &relative))
+        {
+            std::fs::remove_file(&file)?;
+            removed.push(relative);
+        }
+    }
+    removed.sort();
+    Ok(removed)
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -759,6 +889,8 @@ fn write_project_template(
         window: None,
         ui_base_size: None,
         window_title: None,
+        icon: None,
+        export_presets: std::collections::BTreeMap::new(),
     };
     std::fs::write(
         root.join("project.json"),
@@ -2721,7 +2853,7 @@ pub fn package_game_files(
         std::fs::write(
             temporary.join("README.txt"),
             format!(
-                "{project_name}\n\nRun {executable_name} to start the game.\nThe system needs a Vulkan-capable graphics driver.\n\nSettings and saves live in the user data folder: ~/.local/share/{binary_name} on Linux,\n~/Library/Application Support/{binary_name} on macOS, %APPDATA%\\{binary_name} on Windows.\nSet RUSTING_USER_DATA=<folder> to use another one.\n\nRUSTING_HEADLESS_TICKS=<n> runs n ticks with no window and exits, for smoke tests;\ncommand-line arguments reach the game code through std::env::args().\n"
+                "{project_name}\n\nRun {executable_name} to start the game.\nThe system needs a Vulkan-capable graphics driver.\n\nSettings and saves live in the user data folder: ~/.local/share/{binary_name} on Linux,\n~/Library/Application Support/{binary_name} on macOS, %APPDATA%\\{binary_name} on Windows.\nCrash reports go to the crashes folder there.\nSet RUSTING_USER_DATA=<folder> to use another one.\n\nRUSTING_HEADLESS_TICKS=<n> runs n ticks with no window and exits, for smoke tests;\ncommand-line arguments reach the game code through std::env::args().\n"
             ),
         )
         .map_err(|error| error.to_string())?;
@@ -2833,6 +2965,54 @@ mod twin_stick_template;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_excludes_match_paths_and_leave_the_rest() {
+        assert!(path_matches("assets/source/**", "assets/source/a/b.psd"));
+        assert!(path_matches("**/*.psd", "assets/art/hero.psd"));
+        assert!(path_matches("**/*.psd", "hero.psd"));
+        assert!(path_matches("assets/*.png", "assets/a.png"));
+        assert!(!path_matches("assets/*.png", "assets/sub/a.png"));
+        assert!(!path_matches("**/*.psd", "assets/hero.psd.png"));
+        assert!(!path_matches("assets/source/**", "assets/sources/a"));
+
+        let export = std::env::temp_dir()
+            .join(format!("rusting-exclude-{}", uuid::Uuid::new_v4()));
+        for file in [
+            "game",
+            "build/main.rscene.bin",
+            "assets/hero.png",
+            "assets/source/hero.psd",
+            "scenes/debug.rscene",
+            "scenes/level.rscene",
+        ] {
+            let path = export.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        let removed = remove_excluded(
+            &export,
+            &["assets/source/**".into(), "scenes/debug*".into()],
+        )
+        .unwrap();
+        assert_eq!(removed, ["assets/source/hero.psd", "scenes/debug.rscene"]);
+        // `**` matches everything, but only under assets/ and scenes/.
+        let removed = remove_excluded(&export, &["**".into()]).unwrap();
+        assert_eq!(removed, ["assets/hero.png", "scenes/level.rscene"]);
+        assert!(export.join("game").is_file());
+        assert!(export.join("build/main.rscene.bin").is_file());
+        let _ = std::fs::remove_dir_all(export);
+
+        let preset: ExportPreset = serde_json::from_str(
+            r#"{"target": "x86_64-pc-windows-gnu", "features": ["steam"], "exclude": ["**/*.psd"]}"#,
+        )
+        .unwrap();
+        assert_eq!(preset.features, ["steam"]);
+        assert!(
+            serde_json::from_str::<ExportPreset>(r#"{"exclud": []}"#).is_err(),
+            "a misspelt key is an error, not a silent no-op"
+        );
+    }
 
     #[test]
     fn a_bench_line_round_trips_its_frame_times() {
