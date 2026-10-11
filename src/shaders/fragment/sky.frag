@@ -45,7 +45,7 @@ layout(set = 2, binding = 2) uniform sampler2D environment_map;
 // The sky shader hook; see sky_shader.glsl.
 #include "sky_shader.glsl"
 void main() {
-    vec4 fog = fog_sky(v_ndc);
+    vec4 veil = fog_sky(v_ndc);
     vec3 start = fog_unproject(v_ndc, 0.0);
     vec3 direction = normalize(fog_unproject(v_ndc, 0.5) - start);
     // Whether the sky replaces the background under the fog.
@@ -77,5 +77,5 @@ void main() {
     sky(SkyInput(direction, camera.ambient.w), sky_color);
     replace = true;
 #endif
-    f_color = replace ? vec4(fog.rgb + fog.a * sky_color, 0.0) : fog;
+    f_color = replace ? vec4(veil.rgb + veil.a * sky_color, 0.0) : veil;
 }

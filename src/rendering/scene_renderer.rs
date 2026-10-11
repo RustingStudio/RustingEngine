@@ -2834,8 +2834,12 @@ impl SceneRenderer {
         };
         let post_shader =
             self.post_pipeline(&active, samples, &render_world.post_shader);
-        let sky_shader =
-            self.sky_pipeline(&active, samples, &render_world.sky_shader);
+        let sky_shader = self.sky_pipeline(
+            &active,
+            samples,
+            &render_world.sky_shader,
+            &render_world.fog_shader,
+        );
         let particle_shaders = particle_pipelines(
             &mut self.particle_shaders,
             &self.queue,
@@ -4429,6 +4433,7 @@ impl SceneRenderer {
             &active,
             samples,
             &self.prepared_materials,
+            &render_world.fog_shader,
         );
         // `pipeline`, or the material's surface shader pipeline for `pass`.
         let surface_pipeline =
@@ -7153,17 +7158,24 @@ impl SceneRenderer {
             .map(String::as_str)
     }
 
-    /// Sky pipeline running `source`, a sky shader, for `passes` at
-    /// `samples`; `None` without a shader or when it fails to build.
+    /// Sky pipeline running `sky`, a sky shader, and `fog`, a fog shader,
+    /// for `passes` at `samples`; `None` without either or when it fails to
+    /// build.
     fn sky_pipeline(
         &mut self,
         passes: &MainPasses,
         samples: u32,
-        source: &str,
+        sky: &str,
+        fog: &str,
     ) -> Option<Arc<GraphicsPipeline>> {
         let queue = self.queue.clone();
-        cached_pipeline(&mut self.sky_shader, source, samples, |source| {
-            let glsl = sky_fragment_glsl(source)?;
+        let key = if sky.is_empty() && fog.is_empty() {
+            String::new()
+        } else {
+            format!("{sky}\0{fog}")
+        };
+        cached_pipeline(&mut self.sky_shader, &key, samples, |_| {
+            let glsl = sky_fragment_glsl(sky, fog)?;
             create_sky_pipeline(
                 &queue,
                 passes.render_pass.clone(),
@@ -9568,32 +9580,36 @@ fn cached_pipeline(
         .and_then(|(_, _, result)| result.as_ref().ok().cloned())
 }
 
+/// Pipelines per surface shader, fog shader and sample count.
 type SurfacePipelines =
-    HashMap<(String, u32), Result<[Arc<GraphicsPipeline>; 3], String>>;
+    HashMap<(String, String, u32), Result<[Arc<GraphicsPipeline>; 3], String>>;
 
 /// Opaque, blended and overlay pipelines per material key for materials
-/// with a working surface shader, built for `passes` at `samples`. Shaders
-/// no prepared material uses any more leave the cache.
+/// with a working surface shader, built for `passes` at `samples`. With
+/// `fog`, the scene's fog shader, every material gets them, running that
+/// fog. Shaders no prepared material uses any more leave the cache.
 fn surface_pipelines(
     cache: &mut SurfacePipelines,
     queue: &Arc<Queue>,
     passes: &MainPasses,
     samples: u32,
     materials: &HashMap<u64, PreparedMaterial>,
+    fog: &str,
 ) -> HashMap<u64, [Arc<GraphicsPipeline>; 3]> {
-    cache.retain(|(source, _), _| {
-        materials
-            .values()
-            .any(|material| material.shader == *source)
+    cache.retain(|(source, cached_fog, _), _| {
+        cached_fog == fog
+            && materials
+                .values()
+                .any(|material| material.shader == *source)
     });
     materials
         .iter()
-        .filter(|(_, material)| !material.shader.is_empty())
+        .filter(|(_, material)| !material.shader.is_empty() || !fog.is_empty())
         .filter_map(|(&key, material)| {
             cache
-                .entry((material.shader.clone(), samples))
+                .entry((material.shader.clone(), fog.to_owned(), samples))
                 .or_insert_with(|| {
-                    let result = surface_fragment_glsl(&material.shader)
+                    let result = surface_fragment_glsl(&material.shader, fog)
                         .and_then(|glsl| {
                             compile_glsl(queue.device(), "fragment", &glsl)
                         })
@@ -10218,14 +10234,32 @@ fn compile_glsl(
 /// and `src/shaders/post.glsl`.
 pub const SHADER_VERSION: u32 = 1;
 
-/// The scene fragment shader with `source`, a material's
-/// `#rusting surface 1` shader, as its `surface` hook.
-fn surface_fragment_glsl(source: &str) -> Result<String, String> {
-    hooked_glsl(
-        "surface",
+/// The fog hook: `source`, a `#rusting fog 1` shader, or empty for none.
+fn fog_hook(source: &str) -> Hook<'_> {
+    (
+        "fog",
         source,
+        (
+            "fog_shader.glsl",
+            include_str!("../shaders/fog_shader.glsl"),
+        ),
+    )
+}
+
+/// The scene fragment shader with `source`, a material's
+/// `#rusting surface 1` shader, as its `surface` hook and `fog`, the
+/// scene's fog shader, as its `fog` hook; either may be empty.
+fn surface_fragment_glsl(source: &str, fog: &str) -> Result<String, String> {
+    hooked_glsl(
         include_str!("../shaders/fragment/scene.frag"),
-        ("surface.glsl", include_str!("../shaders/surface.glsl")),
+        &[
+            (
+                "surface",
+                source,
+                ("surface.glsl", include_str!("../shaders/surface.glsl")),
+            ),
+            fog_hook(fog),
+        ],
     )
 }
 
@@ -10233,24 +10267,32 @@ fn surface_fragment_glsl(source: &str) -> Result<String, String> {
 /// shader, as its `post` hook.
 fn post_fragment_glsl(source: &str) -> Result<String, String> {
     hooked_glsl(
-        "post",
-        source,
         include_str!("../shaders/fragment/tonemap.frag"),
-        ("post.glsl", include_str!("../shaders/post.glsl")),
+        &[(
+            "post",
+            source,
+            ("post.glsl", include_str!("../shaders/post.glsl")),
+        )],
     )
 }
 
 /// The sky fragment shader with `source`, a `#rusting sky 1` shader, as
-/// its `sky` hook.
-fn sky_fragment_glsl(source: &str) -> Result<String, String> {
+/// its `sky` hook and `fog`, the scene's fog shader, as its `fog` hook;
+/// either may be empty.
+fn sky_fragment_glsl(source: &str, fog: &str) -> Result<String, String> {
     hooked_glsl(
-        "sky",
-        source,
         include_str!("../shaders/fragment/sky.frag"),
-        (
-            "sky_shader.glsl",
-            include_str!("../shaders/sky_shader.glsl"),
-        ),
+        &[
+            (
+                "sky",
+                source,
+                (
+                    "sky_shader.glsl",
+                    include_str!("../shaders/sky_shader.glsl"),
+                ),
+            ),
+            fog_hook(fog),
+        ],
     )
 }
 
@@ -10258,25 +10300,55 @@ fn sky_fragment_glsl(source: &str) -> Result<String, String> {
 /// shader, as its `particle` hook.
 fn particle_fragment_glsl(source: &str) -> Result<String, String> {
     hooked_glsl(
-        "particle",
-        source,
         include_str!("../shaders/fragment/particle.frag"),
-        (
-            "particle_shader.glsl",
-            include_str!("../shaders/particle_shader.glsl"),
-        ),
+        &[(
+            "particle",
+            source,
+            (
+                "particle_shader.glsl",
+                include_str!("../shaders/particle_shader.glsl"),
+            ),
+        )],
     )
 }
 
-/// `frag` with the include of `hook`, a file name and its text, replaced
-/// by that text and the body of `source`, a `#rusting {kind} 1` shader,
-/// and its other includes inlined.
-fn hooked_glsl(
-    kind: &str,
-    source: &str,
-    frag: &str,
-    (hook_file, hook): (&str, &str),
-) -> Result<String, String> {
+/// A hook of an engine shader: its kind, the user's `#rusting {kind} 1`
+/// source (empty keeps the built-in default), and the hook's file name and
+/// text.
+type Hook<'a> = (&'a str, &'a str, (&'a str, &'a str));
+
+/// `frag` with its includes inlined and the include of each hook's file
+/// replaced by that file's text and the body of the hook's source.
+fn hooked_glsl(frag: &str, hooks: &[Hook<'_>]) -> Result<String, String> {
+    let mut glsl = frag.to_owned();
+    for (file, text) in [
+        ("fog.glsl", include_str!("../shaders/fog.glsl")),
+        ("sky.glsl", include_str!("../shaders/sky.glsl")),
+    ] {
+        glsl = glsl.replacen(&format!("#include \"{file}\""), text, 1);
+    }
+    for &(kind, source, (hook_file, hook)) in hooks {
+        let hook_line = format!("#include \"{hook_file}\"");
+        if !glsl.contains(&hook_line) {
+            return Err(format!("the engine shader lost its {hook_line}"));
+        }
+        let text = if source.is_empty() {
+            hook.to_owned()
+        } else {
+            format!(
+                "#define RUSTING_CUSTOM_{}\n{hook}\n{}\n",
+                kind.to_uppercase(),
+                hook_body(kind, source)?
+            )
+        };
+        glsl = glsl.replacen(&hook_line, &text, 1);
+    }
+    Ok(glsl)
+}
+
+/// The body of `source`, a `#rusting {kind} 1` shader, after its header,
+/// with a `#line` so compiler messages count lines of `source`.
+fn hook_body(kind: &str, source: &str) -> Result<String, String> {
     let mut lines = source.lines();
     let header = lines
         .by_ref()
@@ -10302,28 +10374,11 @@ fn hooked_glsl(
         .lines()
         .position(|line| line == header)
         .unwrap_or_default();
-    // `#line` makes compiler messages count lines of `source`.
-    let user = format!(
+    Ok(format!(
         "#line {}\n{}",
         header_line + 2,
         lines.collect::<Vec<_>>().join("\n")
-    );
-    let hook = format!(
-        "#define RUSTING_CUSTOM_{}\n{hook}\n{user}\n",
-        kind.to_uppercase()
-    );
-    let hook_line = format!("#include \"{hook_file}\"");
-    if !frag.contains(&hook_line) {
-        return Err(format!("the engine shader lost its {hook_line}"));
-    }
-    let mut glsl = frag.replacen(&hook_line, &hook, 1);
-    for (file, text) in [
-        ("fog.glsl", include_str!("../shaders/fog.glsl")),
-        ("sky.glsl", include_str!("../shaders/sky.glsl")),
-    ] {
-        glsl = glsl.replacen(&format!("#include \"{file}\""), text, 1);
-    }
-    Ok(glsl)
+    ))
 }
 
 /// Element `index` of the Halton sequence in `base`, in [0, 1).
@@ -20320,17 +20375,18 @@ mod tests {
     #[test]
     fn surface_shaders_need_the_versioned_header() {
         let hook = "void surface(SurfaceInput i, inout Surface s) {}";
-        let glsl = super::surface_fragment_glsl(&format!(
-            "\n#rusting surface 1\n{hook}"
-        ))
+        let glsl = super::surface_fragment_glsl(
+            &format!("\n#rusting surface 1\n{hook}"),
+            "",
+        )
         .unwrap();
         assert!(glsl.contains("#define RUSTING_CUSTOM_SURFACE"));
         assert!(glsl.contains(hook));
         assert!(!glsl.contains("#include"), "includes are inlined");
         // The hook counts lines from the user's file.
         assert!(glsl.contains("#line 3\n"), "{glsl}");
-        for bad in [hook, "#rusting surface 2", "#rusting sky 1", ""] {
-            let error = super::surface_fragment_glsl(bad).unwrap_err();
+        for bad in [hook, "#rusting surface 2", "#rusting sky 1"] {
+            let error = super::surface_fragment_glsl(bad, "").unwrap_err();
             assert!(error.contains("surface"), "{bad:?}: {error}");
         }
         let post = "void post(PostInput i, inout vec3 color) {}";
@@ -20344,8 +20400,9 @@ mod tests {
         let error = super::post_fragment_glsl(hook).unwrap_err();
         assert!(error.contains("post"), "{error}");
         let sky = "void sky(SkyInput i, inout vec3 color) {}";
-        let glsl = super::sky_fragment_glsl(&format!("#rusting sky 1\n{sky}"))
-            .unwrap();
+        let glsl =
+            super::sky_fragment_glsl(&format!("#rusting sky 1\n{sky}"), "")
+                .unwrap();
         assert!(
             glsl.contains("#define RUSTING_CUSTOM_SKY") && glsl.contains(sky)
         );
@@ -20359,6 +20416,20 @@ mod tests {
             glsl.contains("#define RUSTING_CUSTOM_PARTICLE")
                 && glsl.contains(particle)
         );
+        // The fog hook goes into both the scene and the sky shader, next to
+        // their own hooks, and its errors name it.
+        let fog = "void fog(FogInput i, inout vec4 haze) {}";
+        let fog_source = format!("#rusting fog 1\n{fog}");
+        for glsl in [
+            super::surface_fragment_glsl("", &fog_source).unwrap(),
+            super::sky_fragment_glsl("", &fog_source).unwrap(),
+        ] {
+            assert!(glsl.contains("#define RUSTING_CUSTOM_FOG"));
+            assert!(!glsl.contains("#define RUSTING_CUSTOM_SURFACE"));
+            assert!(glsl.contains(fog) && !glsl.contains("#include"));
+        }
+        let error = super::sky_fragment_glsl("", "#rusting sky 1").unwrap_err();
+        assert!(error.contains("fog"), "{error}");
     }
 
     #[test]
@@ -20635,6 +20706,99 @@ mod tests {
         scene.render_world.particle_shaders.clear();
         assert_eq!(render_pixel(&mut scene, [8, 16]), plain);
         assert_eq!(scene.renderer.particle_shader_errors(), Vec::<&str>::new());
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn fog_shaders_cover_surfaces_and_the_background() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{ExtractedRenderable, GlobalTransform};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A grey quad on pixels 4 to 11; the rest is background.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mesh = scene.assets.meshes.insert(MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[x, y]| MeshVertex {
+                position: [x, y, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        let grey = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            ..MaterialAsset::default()
+        });
+        scene.render_world.renderables = vec![ExtractedRenderable {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            transform: GlobalTransform {
+                matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                    .into(),
+            },
+            mesh,
+            material: grey,
+            cast_shadows: false,
+            receive_shadows: false,
+            bounds: None,
+        }];
+        scene.render_world.renderables_revision += 1;
+        let plain = [8, 24].map(|x| render_pixel(&mut scene, [x, 16]));
+        let fog = |scene: &mut SlabScene, body: &str| {
+            scene.render_world.fog_shader = format!(
+                "#rusting fog 1\n\
+                 void fog(FogInput i, inout vec4 haze) {{\n{body}\n}}"
+            );
+        };
+        // Without a Fog component, haze starts clear; the shader paints
+        // the quad red and the background green.
+        fog(
+            &mut scene,
+            "haze = i.background ? vec4(0.0, 1.0, 0.0, 0.0) \
+             : vec4(1.0, 0.0, 0.0, 0.0);",
+        );
+        let quad = render_pixel(&mut scene, [8, 16]);
+        let back = render_pixel(&mut scene, [24, 16]);
+        assert_eq!(scene.renderer.sky_shader_error(), None);
+        assert_eq!(scene.renderer.surface_shader_errors(), Vec::<&str>::new());
+        assert!(quad[0] > 200 && quad[1] < 20, "{quad:?} {plain:?}");
+        assert!(back[1] > 200 && back[0] < 20, "{back:?} {plain:?}");
+        // Half the surface shows through.
+        fog(&mut scene, "haze = vec4(0.0, 0.0, 0.0, 0.5);");
+        let dim = render_pixel(&mut scene, [8, 16]);
+        assert!(
+            dim[0] + 20 < plain[0][0] && dim[0] > 10,
+            "{dim:?} {plain:?}"
+        );
+        // `i.time` is the render world's clock.
+        fog(&mut scene, "haze = vec4(vec3(i.time), 0.0);");
+        scene.render_world.elapsed_seconds = 0.1;
+        let early = render_pixel(&mut scene, [8, 16]);
+        scene.render_world.elapsed_seconds = 0.9;
+        let late = render_pixel(&mut scene, [8, 16]);
+        assert!(late[0] > early[0] + 60, "{early:?} {late:?}");
+        // Broken shaders leave the built-in fog and say why.
+        fog(&mut scene, "haze = oops;");
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain[0]);
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain[1]);
+        let error = scene.renderer.sky_shader_error().unwrap_or_default();
+        assert!(error.contains(":3:") && error.contains("oops"), "{error}");
+        scene.render_world.fog_shader.clear();
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain[0]);
+        assert_eq!(scene.renderer.sky_shader_error(), None);
+        assert_eq!(scene.renderer.surface_shader_errors(), Vec::<&str>::new());
     }
 
     #[test]

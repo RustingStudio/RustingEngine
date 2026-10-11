@@ -844,6 +844,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"source": "#rusting sky 1\nvoid sky(SkyInput i, inout vec3 color) { color = mix(vec3(0.1, 0.0, 0.2), vec3(1.0, 0.4, 0.2), max(i.direction.y, 0.0)); }"}),
     },
     ComponentSection {
+        key: "rusting.fog_shader",
+        summary: "GLSL that changes the fog over every surface and the background. source starts with `#rusting fog 1` and defines `void fog(FogInput i, inout vec4 haze)`; i has start (where the view ray leaves the camera), direction (unit, world space), distance (metres to the surface, 10000 for the background), background and time, and haze arrives as the rusting.fog and rusting.fog_volume result, in-scattered light in rgb and the share of what lies behind that still shows in a (0, 0, 0, 1 without fog). Every material then draws with a pipeline built for the shader. A shader that fails to compile leaves the built-in fog. See guide/surface-shaders. The first one found is used.",
+        gpu: "the shader's own cost per drawn pixel, and the fog math runs even without rusting.fog",
+        example: || json!({"source": "#rusting fog 1\nvoid fog(FogInput i, inout vec4 haze) { float t = exp(-0.05 * min(i.distance, 200.0)); haze = vec4(vec3(0.6, 0.7, 0.9) * (1.0 - t), t); }"}),
+    },
+    ComponentSection {
         key: "rusting.light_cookie",
         summary: "On an object with a spot_light: projects an image under assets/ through the light's outer cone, like a slide in a projector (window frames, leaves, a logo). The light's color is multiplied by the image; its top points along the light's up (+Y). At most four cookie spot lights per frame, the first in entity order; others light without their image.",
         gpu: "one texture sample per lit pixel for each cookie light that reaches it",

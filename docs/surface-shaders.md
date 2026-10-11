@@ -203,6 +203,58 @@ The definitions live in `src/shaders/particle_shader.glsl`. A particle
 shader that fails leaves the built-in look, prints the error once, and
 `SceneRenderer::particle_shader_errors` keeps it.
 
+## Fog shaders
+
+A `FogShader` component changes the fog over every surface and the
+background. The one on the entity with the lowest ID is used, and scene
+files save it.
+
+```rust
+use rusting_engine::runtime::{App, FogShader};
+
+const GROUND_MIST: &str = r#"#rusting fog 1
+void fog(FogInput i, inout vec4 haze) {
+    if (i.background) {
+        return;
+    }
+    vec3 end = i.start + i.direction * i.distance;
+    float mist = exp(-0.1 * min(i.distance, 200.0)) + smoothstep(1.0, 0.0, end.y);
+    float shows = clamp(1.0 - 0.5 * mist, 0.0, 1.0);
+    haze = vec4(haze.rgb * shows + vec3(0.7, 0.75, 0.8) * (1.0 - shows), haze.a * shows);
+}
+"#;
+
+fn build(app: &mut App) {
+    app.spawn(FogShader { source: GROUND_MIST.into() });
+}
+```
+
+The header is `#rusting fog 1` and the hook is
+
+```glsl
+void fog(FogInput i, inout vec4 haze);
+```
+
+`haze.rgb` is the linear HDR light the fog adds, and `haze.a` is the
+share of the surface or background behind it that still shows. It
+arrives as the `Fog` and `FogVolume` result, or `(0, 0, 0, 1)` without
+them. The shader also runs where the scene has no fog.
+
+| `FogInput i` | |
+| --- | --- |
+| `vec3 start` | world position where the view ray leaves the camera |
+| `vec3 direction` | unit world-space direction of the ray |
+| `float distance` | metres from `start` to the surface; 10000 for the background |
+| `bool background` | true for the background, which lies infinitely far away |
+| `float time` | seconds since the game started |
+
+The definitions live in `src/shaders/fog_shader.glsl`, and the shader can
+call the helpers of `src/shaders/fog.glsl`. While a fog shader is set,
+every material draws with a pipeline built for it, so a material's surface
+shader and the fog shader compile together. A fog shader that fails leaves
+the built-in fog, prints the error once, and `SceneRenderer::sky_shader_error`
+and `SceneRenderer::surface_shader_errors` keep it.
+
 ## Not yet
 
 - Scene files do not save a material's `shader`, so surface shaders come
@@ -212,4 +264,3 @@ shader that fails leaves the built-in look, prints the error once, and
 - Post shaders cannot read depth.
 - Reflections, the environment lighting and reflection probes do not see
   the sky shader.
-- A fog shader kind.

@@ -42,8 +42,9 @@ use crate::runtime::{
 use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
     COLOR_LUT_COMPONENT, DEPTH_OF_FIELD_COMPONENT, FLASH_COMPONENT,
-    MATERIAL_OVERRIDE_COMPONENT, MOTION_BLUR_COMPONENT, POST_SHADER_COMPONENT,
-    SKY_SHADER_COMPONENT, SPAWN_GRID_COMPONENT, SQUASH_COMPONENT,
+    FOG_SHADER_COMPONENT, MATERIAL_OVERRIDE_COMPONENT, MOTION_BLUR_COMPONENT,
+    POST_SHADER_COMPONENT, SKY_SHADER_COMPONENT, SPAWN_GRID_COMPONENT,
+    SQUASH_COMPONENT,
 };
 
 /// Components that together make a World Environment object.
@@ -75,6 +76,7 @@ fn kind(name: &str) -> Kind {
         | COLOR_LUT_COMPONENT
         | POST_SHADER_COMPONENT
         | SKY_SHADER_COMPONENT
+        | FOG_SHADER_COMPONENT
         | DEPTH_OF_FIELD_COMPONENT
         | MOTION_BLUR_COMPONENT
         | POST_VOLUME_COMPONENT
@@ -151,6 +153,7 @@ pub(in crate::editor) fn placement(
             first_with::<crate::runtime::PostShader>(world)
         }
         SKY_SHADER_COMPONENT => first_with::<crate::runtime::SkyShader>(world),
+        FOG_SHADER_COMPONENT => first_with::<crate::runtime::FogShader>(world),
         DEPTH_OF_FIELD_COMPONENT => {
             first_with::<crate::runtime::DepthOfField>(world)
         }
@@ -416,6 +419,10 @@ pub(in crate::editor) fn component_help(
         SKY_SHADER_COMPONENT => (
             "Paints the background with your own GLSL.",
             "Alien skies, starfields, a stylized gradient or aurora.",
+        ),
+        FOG_SHADER_COMPONENT => (
+            "Changes the fog over everything with your own GLSL.",
+            "Ground mist, colored haze by height, drifting or pulsing fog.",
         ),
         LIGHT_COOKIE_COMPONENT => (
             "Projects an image through this object's spot light.",

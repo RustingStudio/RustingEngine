@@ -1196,6 +1196,8 @@ pub const COLOR_GRADING_COMPONENT: &str = "rusting.color_grading";
 pub const COLOR_LUT_COMPONENT: &str = "rusting.color_lut";
 pub const POST_SHADER_COMPONENT: &str = "rusting.post_shader";
 pub const SKY_SHADER_COMPONENT: &str = "rusting.sky_shader";
+/// Registry name of the built-in fog shader.
+pub const FOG_SHADER_COMPONENT: &str = "rusting.fog_shader";
 /// Registry name of the built-in lens blur.
 pub const DEPTH_OF_FIELD_COMPONENT: &str = "rusting.depth_of_field";
 /// Registry name of the built-in camera motion blur.
@@ -1402,6 +1404,9 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::SkyShader>(SKY_SHADER_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::FogShader>(FOG_SHADER_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::DepthOfField>(DEPTH_OF_FIELD_COMPONENT)

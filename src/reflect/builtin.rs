@@ -15,7 +15,7 @@ use crate::runtime::{
     CameraShake, ColorGrading, ColorLut, CombineMode, Connection, Connections,
     Counter, CullingMode, Decal, DepthOfField, DeterminismMode, Dialogue,
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
-    FluidBlock, Fog, FogVolume, Foliage, ForceField, GravityVolume,
+    FluidBlock, Fog, FogShader, FogVolume, Foliage, ForceField, GravityVolume,
     GroundSurface, Health, Heightfield, HudAnchor, HudElement, InputAction,
     Joint, JointAxis, JointKind, JointMotor, JointSpring, LightCookie,
     LightProbeGrid, Lightmap, LootEntry, LootTable, MaterialOverride,
@@ -1085,6 +1085,14 @@ crate::reflect! {
     struct ParticleShader {
         source: String {
             doc: "GLSL starting with `#rusting particle 1`; see docs/surface-shaders.md",
+        },
+    }
+}
+
+crate::reflect! {
+    struct FogShader {
+        source: String {
+            doc: "GLSL starting with `#rusting fog 1`; see docs/surface-shaders.md",
         },
     }
 }

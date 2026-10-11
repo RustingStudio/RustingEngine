@@ -121,25 +121,37 @@ vec3 fog_inscatter(vec3 direction, float sunlit) {
     return color;
 }
 
+// The fog shader hook; see fog_shader.glsl.
+#include "fog_shader.glsl"
+
 // Fog between the camera and `position`: in-scattered light in rgb, the
 // share of the surface that still shows through in a.
 vec4 fog_at(vec3 position) {
-    if (shadow.fog.w <= 0.0 && shadow.fog_shafts.y < 0.5) {
-        return vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 haze = vec4(0.0, 0.0, 0.0, 1.0);
+    bool off = shadow.fog.w <= 0.0 && shadow.fog_shafts.y < 0.5;
+#ifndef RUSTING_CUSTOM_FOG
+    if (off) {
+        return haze;
     }
+#endif
     vec4 clip = camera.view_projection * vec4(position, 1.0);
     vec3 start = fog_unproject(clip.xy / clip.w, 0.0);
-    vec4 volumes = fog_volumes(start, position);
-    if (shadow.fog.w <= 0.0) {
-        return volumes;
-    }
     vec3 ray = position - start;
-    float transmittance = exp(-fog_optical_depth(start, position));
-    return fog_over(volumes, vec4(
-        fog_inscatter(ray / max(length(ray), 1e-6),
-            fog_sun_visibility(start, position)) * (1.0 - transmittance),
-        transmittance
-    ));
+    float distance = length(ray);
+    vec3 direction = ray / max(distance, 1e-6);
+    if (!off) {
+        haze = fog_volumes(start, position);
+    }
+    if (shadow.fog.w > 0.0) {
+        float transmittance = exp(-fog_optical_depth(start, position));
+        haze = fog_over(haze, vec4(
+            fog_inscatter(direction, fog_sun_visibility(start, position))
+                * (1.0 - transmittance),
+            transmittance
+        ));
+    }
+    fog(FogInput(start, direction, distance, false, camera.ambient.w), haze);
+    return haze;
 }
 
 // Fog in front of the background at `ndc`, which lies infinitely far away,
@@ -148,21 +160,22 @@ vec4 fog_sky(vec2 ndc) {
     vec3 start = fog_unproject(ndc, 0.0);
     vec3 direction = normalize(fog_unproject(ndc, 0.5) - start);
     // ponytail: volumes farther than 10 km along the ray are ignored.
-    vec4 volumes = fog_volumes(start, start + direction * 1e4);
-    if (shadow.fog.w <= 0.0) {
-        return volumes;
+    vec4 haze = fog_volumes(start, start + direction * 1e4);
+    if (shadow.fog.w > 0.0) {
+        // Only rays that climb out of thinning fog see finite fog.
+        float climb = shadow.fog_shape.y * direction.y;
+        float transmittance = climb > 1e-4
+            ? exp(-fog_density_at(start.y) / climb)
+            : 0.0;
+        transmittance = mix(1.0, transmittance, shadow.fog_shape.w);
+        haze = fog_over(haze, vec4(
+            fog_inscatter(direction, fog_sun_visibility(start,
+                start + direction * shadow.cascade_far[
+                    max(int(shadow.cascade_info.x) - 1, 0)]))
+                * (1.0 - transmittance),
+            transmittance
+        ));
     }
-    // Only rays that climb out of thinning fog see finite fog.
-    float climb = shadow.fog_shape.y * direction.y;
-    float transmittance = climb > 1e-4
-        ? exp(-fog_density_at(start.y) / climb)
-        : 0.0;
-    transmittance = mix(1.0, transmittance, shadow.fog_shape.w);
-    return fog_over(volumes, vec4(
-        fog_inscatter(direction, fog_sun_visibility(start,
-            start + direction * shadow.cascade_far[
-                max(int(shadow.cascade_info.x) - 1, 0)]))
-            * (1.0 - transmittance),
-        transmittance
-    ));
+    fog(FogInput(start, direction, 1e4, true, camera.ambient.w), haze);
+    return haze;
 }

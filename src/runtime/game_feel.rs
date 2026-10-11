@@ -1929,6 +1929,21 @@ pub struct SkyShader {
     pub source: String,
 }
 
+/// A `#rusting fog 1` shader that changes the fog over every surface and
+/// the background, starting from the [`Fog`] and [`FogVolume`]s if there
+/// are any. See `docs/surface-shaders.md`. A shader that fails to compile
+/// leaves the built-in fog; the error is in `SceneRenderer::sky_shader_error`
+/// and `SceneRenderer::surface_shader_errors`. The one on the entity with
+/// the lowest ID is used.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct FogShader {
+    /// GLSL source starting with `#rusting fog 1`.
+    pub source: String,
+}
+
 impl Default for ColorLut {
     fn default() -> Self {
         Self {

@@ -499,6 +499,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::ColorLut>();
     types.register::<super::PostShader>();
     types.register::<super::SkyShader>();
+    types.register::<super::FogShader>();
     types.register::<super::PostVolume>();
     types.register::<super::FogVolume>();
     types.register::<super::Decal>();

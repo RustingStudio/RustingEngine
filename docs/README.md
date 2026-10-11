@@ -55,9 +55,9 @@ were run against this version of the engine.
 - [GPU condition shaders](gpu-condition-shaders.md): custom checks and
   solvers for GPU physics.
 - [Surface shaders](surface-shaders.md): per-pixel GLSL on a material or
-  the sky, particles or the finished image, in the versioned
-  `#rusting surface 1`, `#rusting sky 1`, `#rusting particle 1` and
-  `#rusting post 1` language.
+  the sky, particles, fog or the finished image, in the versioned
+  `#rusting surface 1`, `#rusting sky 1`, `#rusting particle 1`,
+  `#rusting fog 1` and `#rusting post 1` language.
 - [WebAssembly scripts](scripting.md): the optional sandboxed scripting
   host for modding and designer logic, its host functions, and its limits.
 - [Writing a plugin](plugin-authoring.md): reusable plugin crates, naming,

@@ -3012,7 +3012,7 @@ Depends on: Milestones 3 and 4.
 
 ### Programmable shading
 
-- [ ] A versioned engine shader language (GLSL-based with engine includes) for surface, unlit, sky, particle, fog, and post-process shaders, with stable uniforms/built-ins.
+- [x] A versioned engine shader language (GLSL-based with engine includes) for surface, unlit, sky, particle, fog, and post-process shaders, with stable uniforms/built-ins.
   Partial: surface and unlit. `MaterialAsset::shader` takes GLSL headed
   `#rusting surface 1` that defines `void surface(SurfaceInput i, inout
   Surface s)`; the built-ins (uv, world_position, view_direction,
@@ -3075,7 +3075,22 @@ Depends on: Milestones 3 and 4.
   draw path is wired the same way but not covered by its own test. Full
   check: fmt, clippy x3, `cargo test --workspace` (lib 889) and the
   gpu-tests run (lib 1029) pass.
-  Not done: the fog kind; reflections and environment lighting
+  Fog: a `FogShader` component (`rusting.fog_shader`) holds GLSL headed
+  `#rusting fog 1` defining `void fog(FogInput i, inout vec4 haze)`
+  (start, direction, distance, background, time) over the `Fog` and
+  `FogVolume` result; `fog.glsl` calls the hook at the end of `fog_at` and
+  `fog_sky`, `hooked_glsl` now takes several hooks so the scene shader gets
+  the surface and fog hooks and the sky shader gets the sky and fog hooks,
+  and while a fog shader is set every material draws through the surface
+  pipeline cache (keyed by surface shader, fog shader and samples) and the
+  background pass runs. GPU test `fog_shaders_cover_surfaces_and_the_background`
+  (the quad turns red and the background green, alpha 0.5 dims the quad,
+  time follows the clock, a typo keeps the built-in look with an error
+  naming `:3:`); dropping the hook call in `fog_at` fails it. Unit test
+  `surface_shaders_need_the_versioned_header` covers both hook pairs.
+  Full check: fmt, clippy x3, `cargo test --workspace` (lib 889) and the
+  gpu-tests run (lib 1030) pass.
+  Not done: reflections and environment lighting
   ignore the sky shader; scene files saving a material's
   `shader` (needs a cooked format version); the depth prepass and shadows
   ignore the surface shader; post shaders cannot read depth.

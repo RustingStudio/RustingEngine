@@ -178,6 +178,9 @@ pub struct RenderWorld {
     /// Source of the first [`SkyShader`](super::SkyShader) in entity
     /// order; empty when there is none.
     pub sky_shader: String,
+    /// Source of the first [`FogShader`](super::FogShader) in entity
+    /// order; empty when there is none.
+    pub fog_shader: String,
     /// Meshes that show a camera's image, in entity order.
     pub screens: Vec<ExtractedScreen>,
     pub ambient_occlusion: Option<super::AmbientOcclusion>,
@@ -443,6 +446,8 @@ pub fn extract_render_world(world: &mut World) {
         first_source::<super::PostShader>(world, |shader| &shader.source);
     let sky_shader =
         first_source::<super::SkyShader>(world, |shader| &shader.source);
+    let fog_shader =
+        first_source::<super::FogShader>(world, |shader| &shader.source);
     let screens = collect_screens(world);
     let ambient_occlusion = collect_first::<super::AmbientOcclusion>(world);
     let particles = collect_particles(world);
@@ -634,6 +639,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.color_lut = color_lut;
     render_world.post_shader = post_shader;
     render_world.sky_shader = sky_shader;
+    render_world.fog_shader = fog_shader;
     render_world.screens = screens;
     render_world.ambient_occlusion = ambient_occlusion;
     render_world.particles = particles;
