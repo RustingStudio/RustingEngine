@@ -744,6 +744,8 @@ crate::reflect! {
         pin_top: bool { doc: "hold the top edge on the holder, or in place without one" },
         holder: Entity { doc: "body the top edge hangs on; null pins it in place" },
         visible: bool { doc: "draw both sides of the sheet" },
+        color: [f32; 4] { unit: "linear RGBA", doc: "sheet color, multiplied into texture" },
+        texture: PathBuf { unit: "asset path", doc: "image stretched once over the sheet, top row at the top edge; empty for plain color" },
     }
 }
 

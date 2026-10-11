@@ -1067,11 +1067,11 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.cloth",
-        summary: "XPBD cloth: a sheet of count_x by count_y squares of spacing metres in the entity's XY plane, centered on it, each cut into two triangles. stretch (edge compliance) 0 does not stretch; bend sets how easily it folds. wind blows on it with drag; self_collision keeps folds thickness apart. pin_top holds the top edge on holder (a body that carries it and feels its pull) or in place when holder is null. tear_strain above 0 tears edges stretched past rest times 1 + tear_strain. It drapes over sphere, box and capsule colliders and pushes dynamic bodies back. visible draws both sides. CPU only, deterministic; at most 4096 particles.",
+        summary: "XPBD cloth: a sheet of count_x by count_y squares of spacing metres in the entity's XY plane, centered on it, each cut into two triangles. stretch (edge compliance) 0 does not stretch; bend sets how easily it folds. wind blows on it with drag; self_collision keeps folds thickness apart. pin_top holds the top edge on holder (a body that carries it and feels its pull) or in place when holder is null. tear_strain above 0 tears edges stretched past rest times 1 + tear_strain. It drapes over sphere, box and capsule colliders and pushes dynamic bodies back. visible draws both sides in color (linear RGBA) times texture, an image stretched once over the sheet with its top row along the top edge, so it folds and tears with the cloth (flags, banners). CPU only, deterministic; at most 4096 particles.",
         gpu: NO_GPU,
         // Numbers exact in f32: components with entity fields save through
         // JSON values, which widen 0.1 to 0.10000000149011612.
-        example: || json!({"spacing": 0.125, "count_x": 8, "count_y": 8, "density": 0.25, "stretch": 0.0, "bend": 0.0, "damping": 0.5, "wind": [0.0, 0.0, 2.0], "drag": 1.0, "thickness": 0.03125, "self_collision": true, "tear_strain": 0.0, "substeps": 10, "pin_top": true, "holder": null, "visible": true}),
+        example: || json!({"spacing": 0.125, "count_x": 8, "count_y": 8, "density": 0.25, "stretch": 0.0, "bend": 0.0, "damping": 0.5, "wind": [0.0, 0.0, 2.0], "drag": 1.0, "thickness": 0.03125, "self_collision": true, "tear_strain": 0.0, "substeps": 10, "pin_top": true, "holder": null, "visible": true, "color": [0.75, 0.25, 0.25, 1.0], "texture": ""}),
     },
     ComponentSection {
         key: "rusting.gravity_volume",

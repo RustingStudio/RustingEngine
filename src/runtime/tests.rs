@@ -6304,10 +6304,12 @@ fn cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes() {
         count_y: 6,
         holder: pole,
         wind: [0.0, 0.0, 2.0],
+        color: [0.25, 0.5, 0.75, 1.0],
+        texture: "flags/missing.png".into(),
         ..ClothSheet::default()
     };
     // The flag's top edge sits on the pole's bottom face.
-    app.spawn((Transform::new([0.0, 1.7, 3.0]), flag));
+    app.spawn((Transform::new([0.0, 1.7, 3.0]), flag.clone()));
     app.spawn(fixed_box([0.0, -0.5, 0.0], [2.0, 0.5, 2.0]));
     let tarp = ClothSheet {
         count_x: 6,
@@ -6327,13 +6329,16 @@ fn cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes() {
         .query::<(bevy_ecs::entity::Entity, &ClothSheet)>();
     let sheets: Vec<_> = sheets
         .iter(loaded.world())
-        .map(|(entity, sheet)| (entity, *sheet))
+        .map(|(entity, sheet)| (entity, sheet.clone()))
         .collect();
     assert_eq!(sheets.len(), 2);
-    let (flag_entity, loaded_flag) =
-        *sheets.iter().find(|(_, sheet)| sheet.pin_top).unwrap();
-    let (tarp_entity, _) =
-        *sheets.iter().find(|(_, sheet)| !sheet.pin_top).unwrap();
+    let (flag_entity, loaded_flag) = sheets
+        .iter()
+        .find(|(_, sheet)| sheet.pin_top)
+        .cloned()
+        .unwrap();
+    let tarp_entity =
+        sheets.iter().find(|(_, sheet)| !sheet.pin_top).unwrap().0;
     let pole_position = loaded
         .world()
         .get::<Transform>(loaded_flag.holder)
@@ -6369,7 +6374,7 @@ fn cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes() {
         .query::<(&crate::runtime::FluidParticle, &MeshRenderer)>();
     let drawn: Vec<_> = drawn
         .iter(loaded.world())
-        .map(|(owner, renderer)| (owner.0, renderer.mesh))
+        .map(|(owner, renderer)| (owner.0, renderer.mesh, renderer.material))
         .collect();
     assert_eq!(drawn.len(), 1);
     assert_eq!(drawn[0].0, flag_entity);
@@ -6377,6 +6382,10 @@ fn cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes() {
     let mesh = assets.meshes.get(drawn[0].1).unwrap();
     assert_eq!(mesh.vertices.len(), 2 * 49);
     assert_eq!(mesh.indices.len(), 2 * 3 * 72);
+    // Its own color; the missing image leaves it untextured.
+    let material = assets.materials.get(drawn[0].2).unwrap();
+    assert_eq!(material.base_color, [0.25, 0.5, 0.75, 1.0]);
+    assert!(material.base_color_texture.is_none());
 }
 
 #[test]

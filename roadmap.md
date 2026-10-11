@@ -2968,6 +2968,27 @@ Depends on: Milestones 3 and 4.
   clippy x3, `cargo test --workspace` (lib 885) and the gpu-tests run
   (lib 1017) pass.
 - [ ] Rendering of deformables, fluid surfaces, and debris produced by Milestone 11.
+  Partial (lane/render): cloth sheets take a material. `rusting.cloth`
+  gains `color` (linear RGBA) and `texture` (asset path); `spawn_cloths`
+  gives a sheet with either set its own material (a texture that fails to
+  load leaves the color), and `cloth_mesh` writes UVs from the rest shape
+  (`rest_uvs`: projected on the first triangle's plane, filling 0..1, top
+  row at v = 0), so the image folds and tears with the cloth. Evidence:
+  unit test `cloth_uvs_follow_the_rest_grid_on_both_sides` (UVs stay on the
+  rest grid on both sides after the particles move);
+  `cloth_round_trips_through_scenes_hangs_on_its_holder_and_drapes` now
+  round-trips color and texture and checks the drawn material's color;
+  GPU tests `cloth_textures_land_upright_and_unmirrored` (a 2x2 image's
+  quadrants land on the matching screen quadrants) and
+  `meshes_rebuilt_in_place_redraw_where_their_vertices_went` (a mesh asset
+  edited in place under the same handle redraws at its new place with
+  frustum and occlusion culling, as cloth, soft-body skins and fluid
+  surfaces do each tick). Mutation (v flipped) fails the UV and GPU tests.
+  Full check: fmt, clippy x3, `cargo test --workspace` (lib 887) and the
+  gpu-tests run (lib 1021) pass.
+  Not done: debris (the engine has no fracture yet), soft-body skin
+  textures, fluid surface shading beyond its material, UVs for cloth
+  curved at rest.
 - [ ] Effect budget and quality-profile scaling for particles and decals.
 
 ### Programmable shading

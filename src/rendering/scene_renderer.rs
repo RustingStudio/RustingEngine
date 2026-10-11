@@ -20463,6 +20463,139 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn meshes_rebuilt_in_place_redraw_where_their_vertices_went() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{ExtractedRenderable, GlobalTransform};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Cloth, soft-body skins and fluid surfaces rewrite their mesh
+        // asset each tick and keep the same handle and renderable. A 0.5 m
+        // quad facing the camera, first left of center, then moved right
+        // by editing its vertices only.
+        let quad = |x: f32| MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[dx, dy]| MeshVertex {
+                position: [x + dx, dy, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+        for culling in [CullingMode::Frustum, CullingMode::FrustumAndOcclusion]
+        {
+            let mut scene = SlabScene::with_extent(&[], [32, 32]);
+            scene.render_world.culling = culling;
+            let mesh = scene.assets.meshes.insert(quad(-0.6));
+            scene.render_world.renderables = vec![ExtractedRenderable {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+                transform: GlobalTransform::default(),
+                mesh,
+                material: scene.assets.fallback_material,
+                cast_shadows: false,
+                receive_shadows: false,
+                bounds: None,
+            }];
+            scene.render_world.renderables_revision += 1;
+            // Pixels are 1/16 m: x = -0.6 m is pixel 6, x = 0.6 m pixel 25.
+            let lit =
+                |pixel: [u8; 3]| pixel.iter().any(|&channel| channel > 40);
+            let (left, right) = ([6, 16], [25, 16]);
+            assert!(
+                lit(render_pixel(&mut scene, left)),
+                "{culling:?}: drawn on the left"
+            );
+            assert!(!lit(render_pixel(&mut scene, right)));
+            *scene.assets.meshes.get_mut(mesh).unwrap() = quad(0.6);
+            // Outside the first mesh box: stale bounds would cull it.
+            assert!(
+                lit(render_pixel(&mut scene, right)),
+                "{culling:?}: follows its vertices"
+            );
+            assert!(
+                !lit(render_pixel(&mut scene, left)),
+                "{culling:?}: old shape gone"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn cloth_textures_land_upright_and_unmirrored() {
+        use crate::runtime::cloth::{cloth_mesh, Cloth};
+        use crate::runtime::ExtractedRenderable;
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A 1 m sheet facing the camera with a 2 x 2 image: red, green on
+        // the top row, blue, white below.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let image = scene.assets.textures.insert(TextureAsset {
+            size: [2, 2],
+            rgba8: [
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [255, 255, 255, 255],
+            ]
+            .concat(),
+            color_space: TextureColorSpace::Srgb,
+            sampler: TextureSampler::default(),
+        });
+        let material = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color_texture: Some(image),
+            ..Default::default()
+        });
+        let cloth = Cloth::grid(
+            [-0.5, -0.5, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [4, 4],
+            0.25,
+            0.3,
+        )
+        .unwrap();
+        let mesh = scene.assets.meshes.insert(cloth_mesh(&cloth));
+        scene.render_world.renderables = vec![ExtractedRenderable {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            transform: crate::runtime::GlobalTransform::default(),
+            mesh,
+            material,
+            cast_shadows: false,
+            receive_shadows: false,
+            bounds: None,
+        }];
+        scene.render_world.renderables_revision += 1;
+        // Pixels are 1/16 m; the quadrant centers sit 0.25 m off center.
+        let quadrants = [
+            ([12, 12], [true, false, false]),
+            ([20, 12], [false, true, false]),
+            ([12, 20], [false, false, true]),
+            ([20, 20], [true; 3]),
+        ];
+        for (pixel, want) in quadrants {
+            let got = render_pixel(&mut scene, pixel);
+            assert_eq!(got.map(|c| c > 150), want, "pixel {pixel:?}: {got:?}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn terrain_paints_splat_layers_and_drops_detail_with_distance() {
         use crate::runtime::{
             Heightfield, RenderExtractPlugin, Terrain, TerrainLayer,
