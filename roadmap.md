@@ -4527,7 +4527,7 @@ Depends on: Milestones 3, 4, and 21.
 
 ### Physics scenario and benchmark suite
 
-- [ ] Joint, articulation, character-controller, vehicle, and ragdoll regression scenes with recorded expected results.
+- [x] Joint, articulation, character-controller, vehicle, and ragdoll regression scenes with recorded expected results. Evidence: `SuiteScene` (`src/runtime/physics_suite.rs`) gains `ArticulatedChain` (the joint chain hung from a fixed anchor carrying `Articulation`) and `CharacterStairs` (a default `PlayerController` walks up `size` 0.2 m steps; the error is how far its feet end below the top surface); the `physics_suite` example runs both. New test `runtime::physics_suite::tests::regression_scenes_repeat_their_recorded_results` runs the 8-link joint chain (240 steps), the 8-link articulated chain (240), a 4-step stair (180), one vehicle at full lock (240) and one limp ragdoll (120) twice each: both runs are bit-identical, and each error is within 1e-4 of the value recorded on 2026-10-11 (0.2071 m, 1.9e-6 m, -4.1e-4 m, 0.0686 rad, 0.0153 m). Limits: CPU solvers only; each scene records one error number, not a full trajectory, and the 1e-4 tolerance is there for another libm, so a change past it means re-recording after checking the scene. Full check 2026-10-11: fmt and clippy x3 clean; lib 906 tests, 1034 with gpu-tests.
 - [ ] Soft-body, cloth, rope, fluid, granular, and fracture scenarios under lavapipe.
 - [ ] Two-way coupling scenarios between rigid, deformable, and fluid simulation.
 - [ ] 2D physics scenarios mirroring the 3D suite.
