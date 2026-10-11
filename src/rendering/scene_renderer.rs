@@ -19173,4 +19173,95 @@ mod tests {
             assert_eq!(state.linear_velocity, [0.0; 3], "cube {level} sleeps");
         }
     }
+
+    /// Fast GPU bodies meet a 10 cm wall collider on their way, not only
+    /// where their step ends.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn fast_gpu_bodies_do_not_tunnel_through_thin_colliders() {
+        use crate::runtime::{
+            Collider, ColliderShape, CollisionLayers, ExtractedGpuPhysicsBody,
+            GpuCollider, PhysicsId, PhysicsSolver,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A 0.1 m ball at 270 m/s moves 4.5 m a tick, a 0.1 m cube at
+        // 100 m/s 1.7 m; the wall's front face is at z = -4.95.
+        let bullet = |slot: u32, x: f32, shape: ColliderShape, speed: f32| {
+            ExtractedGpuPhysicsBody {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(4100 + slot)
+                    .unwrap(),
+                physics_id: PhysicsId {
+                    slot,
+                    generation: 0,
+                },
+                transform: crate::Transform::new([x, 0.0, 0.0]),
+                rigid_body: crate::runtime::RigidBody {
+                    linear_velocity: [0.0, 0.0, -speed],
+                    ..Default::default()
+                },
+                solver: PhysicsSolver::Full,
+                collider: Some((
+                    Collider {
+                        shape,
+                        ..Collider::default()
+                    },
+                    CollisionLayers::default(),
+                )),
+                custom_shader: None,
+                rules: Vec::new(),
+                sync: Default::default(),
+            }
+        };
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        world.gpu_physics = vec![
+            bullet(0, -1.0, ColliderShape::Sphere { radius: 0.1 }, 270.0),
+            bullet(
+                1,
+                1.0,
+                ColliderShape::Box {
+                    half_extents: [0.1; 3],
+                },
+                100.0,
+            ),
+        ];
+        world.gpu_colliders = vec![GpuCollider {
+            model: crate::Transform::new([0.0, 0.0, -5.0]).to_matrix(),
+            shape: [0.0, 4.0, 4.0, 0.05],
+            velocity: [0.0; 3],
+            friction: 0.5,
+            restitution: 0.0,
+            layers: CollisionLayers::default(),
+        }];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0; 3];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        const TICKS: u64 = 10;
+        for tick in 1..=TICKS {
+            let world = &mut scene.render_world;
+            world.physics_tick = tick;
+            world.gpu_physics_read_all = tick == TICKS;
+            world.gpu_physics_commands_serial += u64::from(tick == TICKS);
+            let before = scene.now();
+            let _in_flight =
+                scene.render(before).then_signal_fence_and_flush().unwrap();
+            scene.renderer.block_until_physics_readbacks_complete();
+        }
+        let mut states = scene.renderer.take_completed_physics_states();
+        states.sort_by_key(|state| state.physics_id.slot);
+        assert_eq!(states.len(), 2);
+        for state in &states {
+            let z = state.transform.position[2];
+            // Each stops against the wall's front face.
+            assert!((-4.86..=-4.84).contains(&z), "{state:?}");
+            assert!(state.linear_velocity[2] > -0.1, "{state:?}");
+        }
+    }
 }

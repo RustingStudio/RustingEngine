@@ -50,6 +50,13 @@ float bounding_radius(vec4 shape) {
     return radius;
 }
 
+// Least distance from the center to the surface of `shape`.
+float inner_radius(vec4 shape) {
+    if (shape.x < 0.5) return min(shape.y, min(shape.z, shape.w));
+    if (shape.x < 1.5) return shape.y;
+    return shape.z;
+}
+
 // Rotation of a model matrix with its scale removed.
 mat3 rotation_of(mat4 model) {
     return mat3(sim_normalize(model[0].xyz), sim_normalize(model[1].xyz), sim_normalize(model[2].xyz));
