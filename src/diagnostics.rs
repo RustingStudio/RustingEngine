@@ -211,6 +211,12 @@ pub const CODES: &[CodeInfo] = &[
         "rusting export . ../dist --preset demo --json",
     ),
     code(
+        "EXPORT_SIGN_FAILED",
+        "The export preset's sign command could not run or exited with an error.",
+        "Run the sign command by hand on the exported executable, fix it, then export again.",
+        "rusting export . ../dist --preset windows --json",
+    ),
+    code(
         "EXPORT_VERIFY_FAILED",
         "The exported game did not start cleanly from its own folder, so a file it needs was not packaged.",
         "Make sure every file the game loads is under assets/ or scenes/, then export again.",

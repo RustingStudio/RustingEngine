@@ -1557,6 +1557,8 @@ pub fn json_schemas() -> Value {
                     "description": "[width, height] in pixels the HUD is laid out for; it scales uniformly to fit the window, keeping its aspect ratio. Unset: drawn at the desktop's DPI scale."},
                 "window_title": {"type": "string",
                     "description": "Window title when the game opens from the project folder."},
+                "icon": {"type": "string",
+                    "description": "Window icon image (PNG), relative to the project folder; keep it under assets/ so exports carry it."},
                 "export_presets": {"type": "object",
                     "description": "Named export settings for `rusting export --preset <name>`.",
                     "additionalProperties": {"type": "object",
@@ -1567,7 +1569,9 @@ pub fn json_schemas() -> Value {
                             "features": {"type": "array", "items": {"type": "string"},
                                 "description": "Cargo features of the game crate to turn on."},
                             "exclude": {"type": "array", "items": {"type": "string"},
-                                "description": "Files under assets/ and scenes/ to leave out, relative to the project: * within one name, ** any folders."}}}},
+                                "description": "Files under assets/ and scenes/ to leave out, relative to the project: * within one name, ** any folders."},
+                            "sign": {"type": "array", "items": {"type": "string"},
+                                "description": "Code-signing command run on the exported executable before verification: program then arguments, {exe} becomes its path."}}}},
             },
             "required": ["name", "main_scene", "cooked_scene"],
         },
@@ -1834,6 +1838,7 @@ mod tests {
             window: None,
             ui_base_size: None,
             window_title: None,
+            icon: None,
             export_presets: Default::default(),
         };
         let mut keys = written_keys(&project);
@@ -1844,6 +1849,7 @@ mod tests {
                 "window",
                 "ui_base_size",
                 "window_title",
+                "icon",
                 "export_presets",
             ]
             .map(String::from),

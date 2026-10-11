@@ -6170,6 +6170,35 @@ pub fn export_game_project(
                 )
             }
         };
+    if let Some((program, arguments)) = preset.sign.split_first() {
+        let executable = exported.join(crate::project::executable_name(
+            &project.manifest.binary_name,
+            target,
+        ));
+        let mut sign = Command::new(program);
+        sign.current_dir(&project.root);
+        for argument in arguments {
+            sign.arg(argument.replace("{exe}", &executable.to_string_lossy()));
+        }
+        let message =
+            match run_process(&mut sign, Some(Duration::from_secs(600))) {
+                Ok(run) if run.success => None,
+                Ok(run) => Some(format!(
+                    "the sign command failed:\n{}",
+                    tail(&run.stderr, 40)
+                )),
+                Err(error) => Some(format!("could not run {program}: {error}")),
+            };
+        if let Some(message) = message {
+            // An unsigned folder must not pass for a finished export.
+            let _ = std::fs::remove_dir_all(&exported);
+            return CliResult::failure(
+                "EXPORT_SIGN_FAILED",
+                message,
+                Some(project.root.join("project.json")),
+            );
+        }
+    }
     let mut files: Vec<_> = walk_files(&exported)
         .into_iter()
         .filter_map(|file| {
@@ -6183,6 +6212,7 @@ pub fn export_game_project(
         "target": target,
         "features": preset.features,
         "excluded": excluded,
+        "signed": !preset.sign.is_empty(),
         "files": files,
         "verified": null,
     });

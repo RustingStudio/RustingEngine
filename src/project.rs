@@ -298,6 +298,10 @@ pub struct ProjectManifest {
     /// ratio; `None` draws it at the desktop's DPI scale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_base_size: Option<[u32; 2]>,
+    /// Window icon image, relative to the project folder; put it under
+    /// `assets/` so exports carry it. `None` keeps the system's icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PathBuf>,
     /// Named export settings, one per platform or build kind; `rusting
     /// export <project> <folder> --preset <name>` uses one.
     #[serde(
@@ -324,6 +328,12 @@ pub struct ExportPreset {
     /// number of folders, as in `assets/source/**` or `**/*.psd`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
+    /// Code-signing command run on the exported executable before the
+    /// export is verified: the program, then its arguments, where `{exe}`
+    /// becomes the executable's path. It runs in the project folder, and a
+    /// non-zero exit fails the export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sign: Vec<String>,
 }
 
 /// Whether `path` (relative, `/`-separated) matches `pattern`, where `*`
@@ -866,6 +876,7 @@ fn write_project_template(
         window: None,
         ui_base_size: None,
         window_title: None,
+        icon: None,
         export_presets: std::collections::BTreeMap::new(),
     };
     std::fs::write(

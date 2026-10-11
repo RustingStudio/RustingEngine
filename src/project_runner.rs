@@ -224,6 +224,7 @@ struct WindowRequest {
     fullscreen: bool,
     size: Option<[u32; 2]>,
     title: Option<String>,
+    icon: Option<winit::window::Icon>,
 }
 
 /// Convenient access to objects in the loaded scene.
@@ -4455,6 +4456,25 @@ fn request_project_window(world: &mut World, folder: &Path) {
     if let Some(title) = project["window_title"].as_str() {
         GameScene { world }.set_window_title(title);
     }
+    if let Some(icon) = project["icon"].as_str() {
+        match load_window_icon(&folder.join(icon)) {
+            Ok(icon) => {
+                world
+                    .get_resource_or_insert_with(WindowRequest::default)
+                    .icon = Some(icon);
+            }
+            Err(error) => eprintln!("project.json icon {icon}: {error}"),
+        }
+    }
+}
+
+/// Reads an image file as a window icon.
+fn load_window_icon(path: &Path) -> Result<winit::window::Icon, String> {
+    let image = image::open(path).map_err(|error| error.to_string())?;
+    let image = image.into_rgba8();
+    let (width, height) = image.dimensions();
+    winit::window::Icon::from_rgba(image.into_raw(), width, height)
+        .map_err(|error| error.to_string())
 }
 
 /// Styles HUD buttons and menus from `assets/ui/theme.json`, if the
@@ -4797,11 +4817,15 @@ impl WindowRunner {
         };
         let size = request.size.take();
         let title = request.title.take();
+        let icon = request.icon.take();
         let fullscreen = request.fullscreen;
         let Some(renderer) = self.windows.get_primary_renderer() else {
             return;
         };
         let window = renderer.window();
+        if icon.is_some() {
+            window.set_window_icon(icon);
+        }
         if let Some(title) = title {
             window.set_title(&title);
             self.title = title;
@@ -6024,6 +6048,25 @@ mod tests {
         assert_eq!(
             world.resource::<WindowRequest>().title.as_deref(),
             Some("Rusting Raft")
+        );
+        assert!(world.resource::<WindowRequest>().icon.is_none());
+        std::fs::create_dir_all(folder.join("assets")).unwrap();
+        image::RgbaImage::new(32, 32)
+            .save(folder.join("assets/icon.png"))
+            .unwrap();
+        std::fs::write(
+            folder.join("project.json"),
+            r#"{"name": "n", "icon": "assets/icon.png"}"#,
+        )
+        .unwrap();
+        request_project_window(&mut world, &folder);
+        assert!(world.resource::<WindowRequest>().icon.is_some());
+        world.resource_mut::<WindowRequest>().icon = None;
+        std::fs::write(folder.join("assets/icon.png"), "not a png").unwrap();
+        request_project_window(&mut world, &folder);
+        assert!(
+            world.resource::<WindowRequest>().icon.is_none(),
+            "a bad icon warns and keeps the default"
         );
         #[cfg(feature = "ui")]
         {

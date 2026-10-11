@@ -227,6 +227,20 @@ Rust target installed. The folder is named after the system, such as
 `my_game_windows_export`. A cross-target export cannot run here, so it is
 not checked and export warns `EXPORT_NOT_VERIFIED`.
 
+### Icon
+
+Set `icon` in `project.json` to a PNG under `assets/`, so exports carry
+it:
+
+```json
+"icon": "assets/icon.png"
+```
+
+The game window shows it on Windows and X11; Wayland shows the icon of the
+desktop entry instead. A file that cannot be read prints a warning and
+keeps the system's icon. The icon of the `.exe` file itself is not set
+yet.
+
 ### Export presets
 
 To keep the settings of each kind of build, name them in `project.json`
@@ -254,6 +268,13 @@ rusting export my_game ~/exports --preset demo
   relative to the project folder: `*` matches within one name, `**` any
   number of folders. The executable, the cooked main scene and
   `project.json` are always copied.
+- `sign` is a code-signing command, run on the exported executable before
+  the export is checked. Give the program, then its arguments; `{exe}`
+  becomes the executable's path, as in `["signtool", "sign", "/a",
+  "{exe}"]`. The command must sign the file in place. It runs in the
+  project folder.
+  When it fails, the export folder is deleted and export fails with
+  `EXPORT_SIGN_FAILED`.
 
 The export's JSON lists the `features` and the `excluded` files. A native
 export is still run headless, so leaving out a file the game loads fails
