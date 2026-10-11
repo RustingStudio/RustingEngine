@@ -1758,6 +1758,36 @@ pub fn catalog() -> Value {
     })
 }
 
+/// What is wrong with a written command line (the words after `rusting`,
+/// `[...]` brackets allowed): no command its words name, or a flag that
+/// command does not take.
+#[cfg(test)]
+pub(crate) fn command_problem(args: &str) -> Option<String> {
+    let words: Vec<_> = args
+        .split_whitespace()
+        .map(|word| word.trim_matches(['[', ']']))
+        .collect();
+    let named: Vec<_> = words
+        .iter()
+        .filter(|w| !w.starts_with('-'))
+        .copied()
+        .collect();
+    let operation = OPERATIONS
+        .iter()
+        .filter(|op| named.starts_with(&op.name.split(' ').collect::<Vec<_>>()))
+        .max_by_key(|op| op.name.len());
+    let global = ["--json", "--read-only", "--confine", "--help", "--version"];
+    for flag in words.iter().filter(|word| word.starts_with("--")) {
+        if !global.contains(flag)
+            && !operation.is_some_and(|op| op.usage.contains(flag))
+        {
+            return Some(format!("`rusting {args}` takes no {flag}"));
+        }
+    }
+    (operation.is_none() && !named.is_empty())
+        .then(|| format!("`rusting {args}` names no command"))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

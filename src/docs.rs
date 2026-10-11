@@ -1697,6 +1697,41 @@ mod tests {
     }
 
     #[test]
+    fn agent_guides_name_only_real_commands_codes_pages_and_schemas() {
+        let skill = include_str!("../skills/rusting-game/SKILL.md");
+        let agents = include_str!("project_agents.md");
+        let mut commands = 0;
+        for text in [skill, agents] {
+            for code in text.split('`').skip(1).step_by(2) {
+                let Some(args) = code.strip_prefix("rusting ") else {
+                    continue;
+                };
+                commands += 1;
+                if let Some(problem) = crate::schema::command_problem(args) {
+                    panic!("{problem}");
+                }
+                // `<...>` and `CODE` are placeholders.
+                match args.split_whitespace().collect::<Vec<_>>()[..] {
+                    ["explain", name, ..] if name.contains('_') => assert!(
+                        crate::diagnostics::lookup(name).is_some(),
+                        "`{code}`: no such code"
+                    ),
+                    ["docs", "show", id, ..] if !id.contains('<') => assert!(
+                        super::find(id).is_some(),
+                        "`{code}`: no such page"
+                    ),
+                    ["schema", name, ..] if !name.starts_with('-') => {
+                        crate::schema::catalog_entry(name)
+                            .unwrap_or_else(|e| panic!("`{code}`: {e}"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(commands > 60, "only {commands} commands");
+    }
+
+    #[test]
     fn agent_guides_hold_their_generated_parts() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let (skill, agents) =
