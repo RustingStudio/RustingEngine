@@ -19264,4 +19264,94 @@ mod tests {
             assert!(state.linear_velocity[2] > -0.1, "{state:?}");
         }
     }
+
+    /// Each event mode fires on its own ticks for a body crossing a range.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn built_in_conditions_fire_by_mode_and_cooldown() {
+        use crate::runtime::{
+            ExtractedGpuPhysicsBody, ExtractedGpuPhysicsRule, GpuCondition,
+            GpuEventId, GpuEventMode, GpuEventPayload, GpuStateField,
+            PhysicsId,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let x = || GpuCondition::field(GpuStateField::PositionX);
+        // The bodies move 0.5 m a tick from x = 0, so x is in 0.9..=2.1 on
+        // ticks 2, 3 and 4. The range and the boolean form agree.
+        let range = || x().inside(0.9, 2.1);
+        let both = || x().greater_than(0.9).and(x().less_than(2.1));
+        let rules = [
+            (range(), GpuEventMode::OnEnter, 0.0),
+            (both(), GpuEventMode::OnExit, 0.0),
+            (range(), GpuEventMode::WhileTrue, 0.0),
+            (both(), GpuEventMode::Once, 0.0),
+            // 1.5 ticks: every other tick while true.
+            (range(), GpuEventMode::WhileTrue, 1.5 / 60.0),
+        ];
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        world.gpu_physics = rules
+            .into_iter()
+            .zip(0..)
+            .map(|((condition, mode, cooldown_seconds), slot)| {
+                ExtractedGpuPhysicsBody {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(3000 + slot)
+                        .unwrap(),
+                    physics_id: PhysicsId {
+                        slot,
+                        generation: 0,
+                    },
+                    transform: crate::Transform::new([
+                        0.0,
+                        0.0,
+                        slot as f32 * 2.0,
+                    ]),
+                    rigid_body: crate::runtime::RigidBody {
+                        linear_velocity: [30.0, 0.0, 0.0],
+                        ..Default::default()
+                    },
+                    solver: Default::default(),
+                    collider: None,
+                    custom_shader: None,
+                    rules: vec![ExtractedGpuPhysicsRule {
+                        event_id: GpuEventId(10 + slot),
+                        instructions: condition.compile().unwrap(),
+                        mode,
+                        payload: GpuEventPayload::None,
+                        cooldown_seconds,
+                    }],
+                    sync: Default::default(),
+                }
+            })
+            .collect();
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0; 3];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        let mut fired = vec![Vec::new(); 5];
+        for tick in 1..=8 {
+            scene.render_world.physics_tick = tick;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            for event in scene.renderer.take_completed_physics_events() {
+                assert_eq!(event.event_id, 10 + event.body_slot);
+                fired[event.body_slot as usize].push(event.tick_low);
+            }
+        }
+        assert_eq!(
+            fired,
+            [vec![2], vec![5], vec![2, 3, 4], vec![2], vec![2, 4]]
+        );
+    }
 }
