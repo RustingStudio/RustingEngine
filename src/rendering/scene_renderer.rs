@@ -587,6 +587,8 @@ struct ShadowUpload {
     decal_axes: [[f32; 4]; MAX_DECALS],
     /// Linear RGBA tint of each decal.
     decal_colors: [[f32; 4]; MAX_DECALS],
+    /// Each decal's roughness in x and 1 in y when it paints one.
+    decal_surfaces: [[f32; 4]; MAX_DECALS],
 }
 
 /// Side length in texels of the directional shadow map and the view
@@ -3481,6 +3483,14 @@ impl SceneRenderer {
                     decals.get(index).map_or([0.0; 4], |(_, decal, _)| {
                         decal.color.map(|channel| channel.max(0.0))
                     })
+                }),
+                decal_surfaces: std::array::from_fn(|index| {
+                    decals
+                        .get(index)
+                        .and_then(|(_, decal, _)| decal.roughness)
+                        .map_or([0.0; 4], |roughness| {
+                            [roughness.clamp(0.0, 1.0), 1.0, 0.0, 0.0]
+                        })
                 }),
             };
         let cluster_list = build_light_clusters(
@@ -13840,6 +13850,84 @@ mod tests {
         assert_eq!(pixel(4, 8), grey, "left half untouched");
         let right = pixel(11, 8);
         assert!(right[0] > grey[0] + 40 && right[1] < grey[1], "{right:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn decal_roughness_makes_a_matte_floor_shine_under_it() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A black floor lit only by a point light just above it shows its
+        // specular highlight. A black decal over the whole view keeps the
+        // color; its roughness alone sharpens or dulls the highlight.
+        let mut scene = SlabScene::with_extent(
+            &[(
+                0.0,
+                MaterialAsset {
+                    base_color: [0.0, 0.0, 0.0, 1.0],
+                    roughness: 1.0,
+                    ..MaterialAsset::default()
+                },
+            )],
+            [32, 32],
+        );
+        scene.render_world.ambient_light = Some(crate::runtime::AmbientLight {
+            color: [0.0; 3],
+            intensity: 0.0,
+        });
+        scene.render_world.point_lights.push(
+            crate::runtime::ExtractedPointLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2004).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: Matrix4::new_translation(&Vector3::new(
+                        0.0, 0.0, 0.5,
+                    ))
+                    .into(),
+                },
+                light: crate::runtime::PointLight {
+                    color: [1.0; 3],
+                    intensity: 20_000.0,
+                    range: 10.0,
+                    shadows: false,
+                    radius: 0.0,
+                },
+            },
+        );
+        let peak = |scene: &mut SlabScene, roughness: Option<f32>| {
+            scene.render_world.decals = vec![(
+                Matrix4::new_nonuniform_scaling(&Vector3::new(2.0, 2.0, 0.5))
+                    .into(),
+                crate::runtime::Decal {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    roughness,
+                    ..crate::runtime::Decal::default()
+                },
+            )];
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            scene
+                .pixels()
+                .chunks(4)
+                .map(|pixel| pixel[..3].iter().copied().max().unwrap())
+                .max()
+                .unwrap()
+        };
+        let matte = peak(&mut scene, None);
+        let wet = peak(&mut scene, Some(0.15));
+        let dulled = peak(&mut scene, Some(1.0));
+        eprintln!("peaks: matte {matte}, wet {wet}, dulled {dulled}");
+        assert!(wet > matte.saturating_add(60), "{wet} vs {matte}");
+        assert!(dulled.abs_diff(matte) <= 2, "{dulled} vs {matte}");
     }
 
     #[test]

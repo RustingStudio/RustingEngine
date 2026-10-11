@@ -2944,9 +2944,15 @@ Depends on: Milestones 3 and 4.
   `decals_wait_for_their_image`. Mutations (flipped uv, no facing fade, no
   box test) each fail the GPU test. Full check: workspace lib 872 passed,
   gpu-tests run 994 passed.
+  Decal `roughness` (0..1, `None` keeps the surface's) is painted by the
+  same coverage, for wet stains and puddles. Evidence: GPU test
+  `decal_roughness_makes_a_matte_floor_shine_under_it` (black rough floor
+  under a point light: highlight peak 118 bare, 255 under a roughness 0.15
+  decal, 118 under a roughness 1 decal); removing the shader's roughness
+  mix fails it (wet 118). Full check: workspace lib 891 passed, gpu-tests
+  run 1034 passed.
   Not done: fracture survival or invalidation (the engine has no fracture
-  yet), decal normals and roughness, decals on skinned or moving objects
-  following them.
+  yet), decal normals, decals on skinned or moving objects following them.
 - [x] Instanced multi-mesh rendering and foliage scattering with wind driven by physics force fields.
   Evidence: `rusting.foliage` (`Foliage`) on an object with a mesh_renderer
   draws `count` copies of its mesh (at most 65536) in place of the object,

@@ -1871,6 +1871,9 @@ pub struct Decal {
     pub color: [f32; 4],
     /// Half size of the box in the object's local axes, in metres.
     pub extents: [f32; 3],
+    /// Roughness painted with the image, by its coverage: low for a wet
+    /// stain or a puddle. `None` keeps the surface's.
+    pub roughness: Option<f32>,
     /// The loaded `texture`, set by the engine.
     #[serde(skip)]
     pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
@@ -1882,6 +1885,7 @@ impl Default for Decal {
             texture: std::path::PathBuf::new(),
             color: [1.0; 4],
             extents: [0.5, 0.5, 0.25],
+            roughness: None,
             handle: None,
         }
     }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Rendering: decals take a `roughness` painted with their coverage, so a dark decal can be a wet stain or a puddle that catches highlights
+
 ## [2.4.1] - 2026-10-10
 
 Fixes 2.4.0 builds: without the Vulkan SDK the cloth shader failed to compile, and the crates.io package needed a newer `rusting-core` than the one published.

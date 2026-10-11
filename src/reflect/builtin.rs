@@ -1370,6 +1370,10 @@ crate::reflect! {
             unit: "m", min: 0.0,
             doc: "half size of the box; it projects along local -Z",
         },
+        roughness: Option<f32> {
+            min: 0.0, max: 1.0,
+            doc: "roughness painted by coverage, low for wet stains; null keeps the surface's",
+        },
         #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
     }
 }

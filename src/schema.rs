@@ -905,9 +905,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.decal",
-        summary: "Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain. color (linear rgba) multiplies the image and its alpha scales the coverage; an empty texture paints plain color. Surfaces facing away from the projection are left alone. Later decals in entity order paint over earlier ones; the renderer uses the first sixteen (eight at Balanced, four at Eco), with at most four distinct images.",
+        summary: "Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain. color (linear rgba) multiplies the image and its alpha scales the coverage; an empty texture paints plain color. roughness (0..1, null keeps the surface's) is painted by the same coverage: a low value makes a wet stain or a puddle shine. Surfaces facing away from the projection are left alone. Later decals in entity order paint over earlier ones; the renderer uses the first sixteen (eight at Balanced, four at Eco), with at most four distinct images.",
         gpu: "a box test per decal per lit pixel, plus one texture sample inside a box",
-        example: || json!({"texture": "decals/crack.png", "color": [1.0, 1.0, 1.0, 1.0], "extents": [0.5, 0.5, 0.25]}),
+        example: || json!({"texture": "decals/crack.png", "color": [1.0, 1.0, 1.0, 1.0], "extents": [0.5, 0.5, 0.25], "roughness": null}),
     },
     ComponentSection {
         key: "rusting.post_volume",

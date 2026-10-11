@@ -240,7 +240,10 @@ most four distinct images:
    "color": [1, 1, 1, 1], "extents": [0.5, 0.5, 0.2]}}}
 ```
 
-Decals change the surface color only, not its normals or roughness.
+Set `roughness` (0 to 1) to paint roughness with the same coverage: a
+dark decal with roughness 0.1 is a wet stain or a puddle that catches
+highlights. Leave it `null` to keep the surface's. Decals do not change
+normals.
 
 ## Mesh kit
 
