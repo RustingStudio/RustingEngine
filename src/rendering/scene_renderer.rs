@@ -694,6 +694,11 @@ struct PhysicsPushConstants {
     command_first: u32,
     field_count: u32,
     lock_mask: u32,
+    /// [`crate::runtime::GpuSimulationLod`]; 0 observers means no LOD.
+    observer_count: u32,
+    lod_full_squared: f32,
+    lod_reduced_squared: f32,
+    lod_stride: u32,
 }
 
 /// A GPU body's own collider (binding 6), in [`crate::runtime::GpuCollider`]
@@ -3464,6 +3469,15 @@ impl SceneRenderer {
         } else {
             Vec::new()
         };
+        let observers = match render_world.gpu_lod {
+            Some(_) if physics_ran => render_world
+                .gpu_observers
+                .iter()
+                .map(|&[x, y, z]| [x, y, z, 0.0])
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let lod = render_world.gpu_lod.unwrap_or_default();
         let physics_resources = if let Some(event_capacity) = event_capacity {
             let transient = &self.frame_contexts[self.frame_index].transient;
             let event_header = transient
@@ -3554,6 +3568,16 @@ impl SceneRenderer {
                     .copy_from_slice(&force_fields);
                 self.counters.upload_bytes += force_field_buffer.size();
             }
+            let observer_buffer = transient
+                .allocate_slice::<[f32; 4]>(observers.len().max(1) as u64)
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            if !observers.is_empty() {
+                observer_buffer
+                    .write()
+                    .map_err(|error| SceneRenderError(error.to_string()))?
+                    .copy_from_slice(&observers);
+                self.counters.upload_bytes += observer_buffer.size();
+            }
             let physics_set = DescriptorSet::new(
                 self.descriptor_allocator.clone(),
                 self.physics_pipeline.layout().set_layouts()[0].clone(),
@@ -3568,6 +3592,7 @@ impl SceneRenderer {
                     WriteDescriptorSet::buffer(7, colliders_buffer),
                     WriteDescriptorSet::buffer(12, collider_tree_buffer),
                     WriteDescriptorSet::buffer(14, force_field_buffer),
+                    WriteDescriptorSet::buffer(15, observer_buffer.clone()),
                 ],
                 [],
             )
@@ -3604,6 +3629,7 @@ impl SceneRenderer {
                         grid.oversized_dispatch.clone(),
                     ),
                     WriteDescriptorSet::buffer(14, grid.oversized.clone()),
+                    WriteDescriptorSet::buffer(15, observer_buffer.clone()),
                 ]
                 .into_iter()
                 .filter(|write| {
@@ -3775,6 +3801,11 @@ impl SceneRenderer {
                     collider_count: colliders.len() as u32,
                     field_count: force_fields.len() as u32,
                     lock_mask: render_world.physics_lock_mask,
+                    observer_count: observers.len() as u32,
+                    lod_full_squared: lod.full_radius * lod.full_radius,
+                    lod_reduced_squared: lod.reduced_radius
+                        * lod.reduced_radius,
+                    lod_stride: lod.reduced_stride.max(1),
                     grid_cell_size: physics.grid_cell_size,
                 };
                 let grid = self.physics_contact_grid.as_ref().unwrap();
@@ -15256,6 +15287,83 @@ mod tests {
         // Gusts average near 3 m/s² but never sit exactly on it.
         let blown = states[2].linear_velocity[0];
         assert!(blown > 1.0 && (blown - 3.0).abs() > 0.01, "{:?}", states[2]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn simulation_lod_slows_distant_gpu_bodies_and_freezes_far_ones() {
+        use crate::runtime::{
+            ExtractedGpuPhysicsBody, GpuSimulationLod, PhysicsId,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let ball = |slot: u32, x: f32| ExtractedGpuPhysicsBody {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(7000 + slot)
+                .unwrap(),
+            physics_id: PhysicsId {
+                slot,
+                generation: 0,
+            },
+            transform: crate::Transform::new([x, 0.0, 0.0]),
+            rigid_body: Default::default(),
+            solver: Default::default(),
+            collider: None,
+            custom_shader: None,
+            rules: Vec::new(),
+            sync: Default::default(),
+        };
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        // Full rate, every fourth tick, and frozen.
+        world.gpu_physics = vec![ball(0, 0.0), ball(1, 20.0), ball(2, 50.0)];
+        world.gpu_lod = Some(GpuSimulationLod {
+            full_radius: 10.0,
+            reduced_radius: 30.0,
+            reduced_stride: 4,
+        });
+        world.gpu_observers = vec![[0.0; 3]];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0, -9.81, 0.0];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        let mut states = Vec::new();
+        for tick in 1..=61 {
+            let world = &mut scene.render_world;
+            world.physics_tick = tick;
+            world.gpu_physics_read_all = tick >= 60;
+            world.gpu_physics_commands_serial += u64::from(tick >= 60);
+            let before = scene.now();
+            let _in_flight =
+                scene.render(before).then_signal_fence_and_flush().unwrap();
+            scene.renderer.block_until_physics_readbacks_complete();
+            if tick >= 60 {
+                states.push(scene.renderer.take_completed_physics_states());
+            }
+        }
+        for states in &mut states {
+            states.sort_by_key(|state| state.physics_id.slot);
+            assert_eq!(states.len(), 3);
+        }
+        let fall =
+            |tick: usize, slot: usize| states[tick][slot].linear_velocity[1];
+        // 60 ticks: the near ball took 60 steps, the mid one 15 of four
+        // ticks each (slot 1 steps when tick + 1 is a multiple of 4), so
+        // both fell for one second.
+        assert!((fall(0, 0) + 9.81).abs() < 1e-3, "{:?}", states[0]);
+        assert!((fall(0, 1) + 9.81).abs() < 1e-3, "{:?}", states[0]);
+        // Tick 61: the near ball steps, the mid one waits.
+        assert!(fall(1, 0) < fall(0, 0));
+        assert_eq!(fall(1, 1), fall(0, 1));
+        // The far ball never moved.
+        for states in &states {
+            assert_eq!(states[2].linear_velocity, [0.0; 3]);
+            assert_eq!(states[2].transform.position, [50.0, 0.0, 0.0]);
+        }
     }
 
     #[test]

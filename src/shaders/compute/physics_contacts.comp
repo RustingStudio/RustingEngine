@@ -42,9 +42,12 @@ bool takes_part(PhysicsState body, BodyShape shape) {
     return shape.shape.x < 2.5 && from_no_collision > 0.5 && from_custom > 0.5;
 }
 
+// A body that does not step this tick under `GpuSimulationLod` holds still
+// like a fixed one: contacts neither move it nor let it give way.
 float inverse_mass(PhysicsState body) {
     bool dynamic = body.properties.z > 0.5 && body.properties.z < 1.5 && body.properties.x > 0.0;
-    return dynamic ? sim_recip(body.properties.x) : 0.0;
+    bool steps = lod_steps(body.model[3].xyz, body.metadata.x) > 0u;
+    return dynamic && steps ? sim_recip(body.properties.x) : 0.0;
 }
 
 ivec3 cell_of(vec3 position) {

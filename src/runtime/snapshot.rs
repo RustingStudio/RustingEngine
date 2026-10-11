@@ -542,6 +542,8 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<GpuEventRegistry>();
     types.register::<GpuPhysicsClassWatches>();
     types.register::<GpuPhysicsCommands>();
+    types.register::<super::GpuSimulationLod>();
+    types.register::<super::SimulationObserver>();
     types.register::<HierarchyDiagnostics>();
     types.register::<PhysicsBackendStatus>();
     types.register::<PhysicsIdRegistry>();

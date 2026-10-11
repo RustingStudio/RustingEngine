@@ -202,6 +202,10 @@ pub struct RenderWorld {
     pub physics_gravity: [f32; 3],
     /// `AxisLock::mask` of `PhysicsSettings::gpu_locks`.
     pub physics_lock_mask: u32,
+    /// The [`super::GpuSimulationLod`] policy, when set.
+    pub gpu_lod: Option<super::GpuSimulationLod>,
+    /// [`super::SimulationObserver`] positions; LOD needs at least one.
+    pub gpu_observers: Vec<[f32; 3]>,
     pub physics_enabled: bool,
     pub background_color: [f32; 4],
     /// Requested profile; the renderer resolves `Auto` from device capabilities.
@@ -394,6 +398,24 @@ pub fn extract_render_world(world: &mut World) {
         }
         _ => Default::default(),
     };
+    let gpu_lod = world.get_resource::<super::GpuSimulationLod>().copied();
+    let gpu_observers = if gpu_lod.is_some() {
+        world
+            .query_filtered::<
+                (&crate::Transform, Option<&GlobalTransform>),
+                With<super::SimulationObserver>,
+            >()
+            .iter(world)
+            .map(|(transform, global)| {
+                global.map_or(transform.position, |global| {
+                    let [x, y, z, _] = global.matrix[3];
+                    [x, y, z]
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let time = *world.resource::<super::FrameTime>();
     let physics_settings = world.resource::<super::PhysicsSettings>().clone();
     let render_settings = world.resource::<super::RenderSettings>();
@@ -539,6 +561,8 @@ pub fn extract_render_world(world: &mut World) {
     render_world.elapsed_seconds = time.elapsed.as_secs_f32();
     render_world.physics_gravity = physics_settings.gravity;
     render_world.physics_lock_mask = physics_settings.gpu_locks.mask();
+    render_world.gpu_lod = gpu_lod;
+    render_world.gpu_observers = gpu_observers;
     render_world.physics_enabled = physics_settings.enabled;
     render_world.background_color = background_color;
     render_world.quality = quality;
@@ -1326,6 +1350,40 @@ mod tests {
         let render_world = app.world().resource::<RenderWorld>();
         assert_eq!(render_world.report.total, 0);
         assert_eq!(render_world.report.removed, 1);
+    }
+
+    #[test]
+    fn simulation_lod_extracts_observers_and_picks_each_body_rate() {
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        app.spawn((
+            Transform::new([1.0, 2.0, 3.0]),
+            super::super::SimulationObserver,
+        ));
+        app.update(Duration::ZERO).unwrap();
+        // No policy, no LOD.
+        assert!(app
+            .world()
+            .resource::<RenderWorld>()
+            .gpu_observers
+            .is_empty());
+        let lod = super::super::GpuSimulationLod {
+            full_radius: 10.0,
+            reduced_radius: 30.0,
+            reduced_stride: 4,
+        };
+        app.insert_resource(lod);
+        app.update(Duration::ZERO).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        assert_eq!(render_world.gpu_lod, Some(lod));
+        assert_eq!(render_world.gpu_observers, vec![[1.0, 2.0, 3.0]]);
+        // Near: every tick. Mid: one 4-tick step on ticks where
+        // tick + slot is a multiple of 4. Far: frozen.
+        assert_eq!(lod.steps(100.0, 7, 0), 1);
+        let mid: Vec<_> =
+            (0..8).map(|tick| lod.steps(400.0, tick, 1)).collect();
+        assert_eq!(mid, [0, 0, 0, 4, 0, 0, 0, 4]);
+        assert_eq!(lod.steps(901.0, 3, 1), 0);
     }
 
     #[test]

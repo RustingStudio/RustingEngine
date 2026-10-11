@@ -68,6 +68,12 @@ layout(push_constant) uniform PhysicsPush {
     // Bits 0-2: no movement along world x, y, z; bits 3-5: no turning
     // about them (`PhysicsSettings::gpu_locks`).
     uint lock_mask;
+    // `GpuSimulationLod`; appended, so shaders written before it still
+    // read the fields above unchanged. No observers means no LOD.
+    uint observer_count;
+    float lod_full_squared;
+    float lod_reduced_squared;
+    uint lod_stride;
 } pc;
 
 // 1.0 for each free axis and 0.0 for each locked one, from bit `first` of

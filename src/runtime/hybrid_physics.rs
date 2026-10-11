@@ -1036,6 +1036,62 @@ impl GpuStateMirror {
 /// rather than pushed from a pose that may be far from where it is.
 pub const MAX_COUPLED_STATE_AGE: u64 = 8;
 
+/// A point that keeps GPU bodies near it simulated at full rate under
+/// [`GpuSimulationLod`], at its world position. Put it on
+/// players or other gameplay points, not on the render camera, so every
+/// peer steps the same bodies at the same rate.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct SimulationObserver;
+
+/// Level of detail for GPU simulation. With this resource and at least one
+/// [`SimulationObserver`], a dynamic GPU body steps every tick within
+/// `full_radius` of its nearest observer, takes one step of
+/// `reduced_stride` ticks once every `reduced_stride` ticks out to
+/// `reduced_radius`, and freezes beyond that, keeping its state until an
+/// observer comes back in range. A body that does not step on a tick holds
+/// still in contacts like a fixed one. Without the resource or without
+/// observers every body steps every tick.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct GpuSimulationLod {
+    /// Meters.
+    pub full_radius: f32,
+    /// Meters; `f32::INFINITY` never freezes.
+    pub reduced_radius: f32,
+    /// Ticks per reduced step; below 1 counts as 1.
+    pub reduced_stride: u32,
+}
+
+impl Default for GpuSimulationLod {
+    fn default() -> Self {
+        Self {
+            full_radius: 64.0,
+            reduced_radius: 256.0,
+            reduced_stride: 4,
+        }
+    }
+}
+
+impl GpuSimulationLod {
+    /// Ticks of time a body `distance_squared` from its nearest observer
+    /// steps over on `tick`: 1 at full rate, `reduced_stride` on its reduced
+    /// ticks, 0 while it waits or is frozen. `slot` is its
+    /// [`PhysicsId::slot`], which spreads reduced bodies over the stride.
+    /// The reference for `lod_steps` in `physics_shapes.glsl`.
+    #[must_use]
+    pub fn steps(&self, distance_squared: f32, tick: u64, slot: u32) -> u32 {
+        let stride = self.reduced_stride.max(1);
+        if distance_squared <= self.full_radius * self.full_radius {
+            1
+        } else if distance_squared > self.reduced_radius * self.reduced_radius {
+            0
+        } else if (tick as u32).wrapping_add(slot).is_multiple_of(stride) {
+            stride
+        } else {
+            0
+        }
+    }
+}
+
 /// Pose and linear velocity CPU coupling uses for a GPU body during the
 /// tick after `fixed_tick`: the read-back pose carried forward by its
 /// velocity over the state's age. `None` past [`MAX_COUPLED_STATE_AGE`].
