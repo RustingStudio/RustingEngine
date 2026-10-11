@@ -1243,6 +1243,56 @@ pub struct AllocationDecision {
     pub reason: AllocationReason,
 }
 
+impl AllocationDecision {
+    /// One sentence saying why the body got its class, with the
+    /// thresholds from `policy` filled in.
+    pub fn explain(&self, policy: &AutoAllocationPolicy) -> String {
+        let class = match self.class {
+            super::SimulationClass::None => "no simulation",
+            super::SimulationClass::Static => "static",
+            super::SimulationClass::Cpu => "the CPU",
+            super::SimulationClass::Gpu => "the GPU",
+        };
+        let why = match self.reason {
+            AllocationReason::NotDynamic => {
+                return format!("Kept as {class}: the body is not dynamic.");
+            }
+            AllocationReason::NoGpuBackend => {
+                "no GPU physics backend is connected".to_owned()
+            }
+            AllocationReason::CustomSolver => {
+                "custom solvers run only on the GPU".to_owned()
+            }
+            AllocationReason::Kinematic => {
+                "gameplay moves kinematic bodies on the CPU".to_owned()
+            }
+            AllocationReason::CpuOnlyCollider => {
+                "sensors and mesh, polygon and chain colliders exist only \
+                 in the CPU solver"
+                    .to_owned()
+            }
+            AllocationReason::ReadsStateEveryTick => {
+                "reading its full state back every tick costs more than \
+                 simulating it on the CPU"
+                    .to_owned()
+            }
+            AllocationReason::FewBodies => format!(
+                "fewer than {} flexible auto bodies",
+                policy.gpu_min_bodies
+            ),
+            AllocationReason::ManyBodies => format!(
+                "at least {} flexible auto bodies",
+                policy.gpu_min_bodies
+            ),
+            AllocationReason::CpuOverBudget => format!(
+                "CPU physics took over {:?} last frame",
+                policy.cpu_physics_budget
+            ),
+        };
+        format!("On {class}: {why}.")
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocationReason {
     /// The body was `None` or `Static`; nothing to allocate.

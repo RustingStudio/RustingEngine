@@ -22,13 +22,14 @@ use crate::assets::{
     AlphaMode, AssetServer, Handle, MaterialAsset, MaterialModel, TextureAsset,
 };
 use crate::runtime::{
-    registered_component_info, AutoSimulation, Camera, Collider, ColliderShape,
-    DirectionalLight, FrameTime, GpuStateMirror, MeshRenderer, Name,
-    ObjectClasses, ParticleEmitter, ParticleSystem, PhysicsBackendStatus,
-    PhysicsBody, PhysicsSolver, PhysicsSyncMode, PointLight, Projection,
-    RenderBounds, RigidBody, RigidBodyKind, SimulationClass, SpotLight,
-    UnregisteredComponents, AUTO_SIMULATION_COMPONENT,
-    PARTICLE_EMITTER_COMPONENT, PHYSICS_SYNC_COMPONENT,
+    registered_component_info, AutoAllocationPolicy, AutoSimulation, Camera,
+    Collider, ColliderShape, DirectionalLight, FrameTime, GpuStateMirror,
+    MeshRenderer, Name, ObjectClasses, ParticleEmitter, ParticleSystem,
+    PhysicsBackendStatus, PhysicsBody, PhysicsSolver, PhysicsSyncMode,
+    PointLight, Projection, RenderBounds, RigidBody, RigidBodyKind,
+    SimulationClass, SpotLight, UnregisteredComponents,
+    AUTO_SIMULATION_COMPONENT, PARTICLE_EMITTER_COMPONENT,
+    PHYSICS_SYNC_COMPONENT,
 };
 use crate::Transform;
 
@@ -748,17 +749,21 @@ fn draw_physics(
             ComponentEdit::Remove { entity, name }
         });
     }
+    let mut auto_why = None;
     if auto {
         // The engine owns the class; show what it chose and why.
-        let chosen = world
+        let decision = world
             .get::<AutoSimulation>(entity)
-            .and_then(|auto| auto.decision)
-            .map_or_else(
-                || "Decided when the scene runs".to_owned(),
-                |decision| {
-                    format!("{:?} ({:?})", decision.class, decision.reason)
-                },
-            );
+            .and_then(|auto| auto.decision);
+        let policy = world
+            .get_resource::<AutoAllocationPolicy>()
+            .copied()
+            .unwrap_or_default();
+        auto_why = decision.map(|decision| decision.explain(&policy));
+        let chosen = decision.map_or_else(
+            || "Decided when the scene runs".to_owned(),
+            |decision| format!("{:?} ({:?})", decision.class, decision.reason),
+        );
         widgets::value(ui, "Simulation", &chosen);
     } else {
         widgets::choice(
@@ -778,6 +783,9 @@ fn draw_physics(
             );
         });
     };
+    if let Some(why) = &auto_why {
+        note(ui, EditorTheme::TEXT_MUTED, why);
+    }
     match physics.simulation {
         SimulationClass::None => {
             note(ui, EditorTheme::TEXT_MUTED, "No physics simulation.");

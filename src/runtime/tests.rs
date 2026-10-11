@@ -1884,6 +1884,21 @@ fn auto_simulation_picks_cpu_or_gpu_and_stays_overridable() {
         decision(&app, late),
         (SimulationClass::Gpu, AllocationReason::CpuOverBudget)
     );
+    // Diagnostics explain the decision with the policy's thresholds.
+    let world = app.world_mut();
+    let policy = *world.resource::<AutoAllocationPolicy>();
+    let explain = |entity| {
+        world
+            .get::<AutoSimulation>(entity)
+            .unwrap()
+            .decision
+            .unwrap()
+            .explain(&policy)
+    };
+    assert_eq!(
+        explain(late),
+        "On the GPU: CPU physics took over 4ms last frame."
+    );
 }
 
 #[test]

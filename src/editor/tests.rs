@@ -1172,6 +1172,10 @@ fn inspector_shows_the_auto_simulation_decision() {
     }
     assert!(texts.contains("Auto CPU/GPU"), "{texts}");
     assert!(texts.contains("Gpu (ManyBodies)"), "{texts}");
+    assert!(
+        texts.contains("On the GPU: at least 256 flexible auto bodies."),
+        "{texts}"
+    );
     assert!(!texts.contains("rusting.auto_simulation"), "{texts}");
 }
 

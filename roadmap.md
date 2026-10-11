@@ -2354,7 +2354,8 @@ Depends on: Milestones 5, 6, and 10. Deformable and fluid tooling follows Milest
 ### Profiling
 
 - [ ] Physics profiler panel: CPU/GPU solver time per stage, body/contact/constraint counts, command/event/readback bytes, overflow, and synchronization latency.
-- [ ] Automatic-allocation diagnostics explaining why each body was placed on CPU or GPU.
+- [x] Automatic-allocation diagnostics explaining why each body was placed on CPU or GPU.
+  Evidence: `AllocationDecision::explain` turns each decision into a sentence with the `AutoAllocationPolicy` thresholds filled in. The inspector shows it under the Auto CPU/GPU row. `auto_simulation_picks_cpu_or_gpu_and_stays_overridable` checks the over-budget sentence. `inspector_shows_the_auto_simulation_decision` checks the many-bodies sentence. fmt, all three clippy configurations, `cargo test --workspace` (lib 899) and the gpu-tests run (lib 1018) all pass.
 
 ### Benchmarks and evidence
 
