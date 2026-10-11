@@ -33,12 +33,25 @@ pub const TEST_RESULTS_FILE: &str = "build/test-results.json";
 /// `build/test-userdata/<scenario>/` folder for each scenario.
 pub const USER_DATA_ENV: &str = "RUSTING_USER_DATA";
 
-/// Folder for a game's settings and saves: [`USER_DATA_ENV`] when set, else
-/// a folder named after the game's executable in the user's data folder
-/// (`~/.local/share/<game>` on Linux, `~/Library/Application Support/<game>`
-/// on macOS, `%APPDATA%\<game>` on Windows).
+/// Folder for a game's settings and saves: [`USER_DATA_ENV`] when set,
+/// else the platform's own save folder
+/// ([`crate::platform::platform_save_folder`]), else
+/// [`default_user_data_folder`].
 #[must_use]
 pub fn user_data_folder() -> PathBuf {
+    if let Some(folder) = std::env::var_os(USER_DATA_ENV) {
+        return PathBuf::from(folder);
+    }
+    crate::platform::platform_save_folder()
+        .unwrap_or_else(default_user_data_folder)
+}
+
+/// [`USER_DATA_ENV`] when set, else a folder named after the game's
+/// executable in the user's data folder (`~/.local/share/<game>` on Linux,
+/// `~/Library/Application Support/<game>` on macOS, `%APPDATA%\<game>` on
+/// Windows), ignoring the platform services.
+#[must_use]
+pub fn default_user_data_folder() -> PathBuf {
     if let Some(folder) = std::env::var_os(USER_DATA_ENV) {
         return PathBuf::from(folder);
     }

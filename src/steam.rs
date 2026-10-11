@@ -6,6 +6,11 @@
 //! these calls today keeps working when it lands. Until then a game runs the
 //! same with or without Steam installed, and these calls never fail.
 //!
+//! Game code should call [`crate::platform`] instead: the Steamworks
+//! backend will land as a [`crate::platform::PlatformServices`]
+//! implementation, so the same calls reach Steam, another store, or the
+//! local file.
+//!
 //! Never let these calls change simulation state: achievements are
 //! presentation, like audio, and must not affect replay hashes.
 

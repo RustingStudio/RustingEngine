@@ -25,6 +25,7 @@ pub mod geometry;
 pub mod input;
 pub mod meshgen;
 pub mod net;
+pub mod platform;
 pub mod project;
 #[cfg(feature = "window")]
 pub mod project_runner;
