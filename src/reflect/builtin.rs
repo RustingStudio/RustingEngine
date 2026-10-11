@@ -24,8 +24,9 @@ use crate::runtime::{
     ProceduralSky, QualityProfile, RandomSeed, ReflectionProbe, RenderBounds,
     RenderSettings, ReverbZone, SceneBackground, SceneInstance, ShadowQuality,
     SkyLight, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, TileKind, TileMap, ToneMapper, ToneMapping,
-    Tween, TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
+    StateAction, StateTransition, Terrain, TerrainLayer, TileKind, TileMap,
+    ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle,
+    WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -1116,6 +1117,30 @@ crate::reflect! {
 }
 
 crate::reflect! {
+    struct Terrain {
+        layers: Vec<TerrainLayer> { doc: "up to four paint layers; list them low to high for height bands" },
+        splat: Vec<Vec<[f32; 4]>> {
+            doc: "splat[row][column]: weight of each layer at that height sample; missing samples use height bands",
+        },
+        tiling: f32 { unit: "m", min: 0.001, doc: "distance the layer textures span before they repeat" },
+        chunk_cells: u32 { unit: "cells", min: 1.0, doc: "height cells along each side of a chunk" },
+        lod_distance: f32 {
+            unit: "m", min: 0.0,
+            doc: "chunks past it draw at half detail, past twice it at quarter detail; 0 keeps full detail",
+        },
+        cast_shadows: bool,
+    }
+}
+
+crate::reflect! {
+    struct TerrainLayer {
+        texture: PathBuf { unit: "asset path", doc: "image painted by this layer; empty paints the plain color" },
+        color: [f32; 3] { unit: "linear RGB", min: 0.0, color: true, doc: "tint multiplied into the texture" },
+        min_height: f32 { unit: "m", doc: "height band start used where there are no splat weights" },
+    }
+}
+
+crate::reflect! {
     struct Foliage {
         count: u32 {
             unit: "copies", min: 0.0, max: 65536.0,
@@ -1526,6 +1551,9 @@ crate::reflect! {
         uv_offset: [f32; 2],
         flat_shading: bool {
             doc: "Light each triangle with its own face normal for a faceted, low-poly look.",
+        },
+        splat: bool {
+            doc: "Terrain paint: blend the base-color atlas's four quadrants by the vertex color.",
         },
         base_color_texture: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
         normal_texture: Option<crate::assets::Handle<crate::assets::TextureAsset>>,

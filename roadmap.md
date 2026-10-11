@@ -2916,7 +2916,23 @@ Depends on: Milestones 3 and 4.
   Not done: lean in the vertex shader (CPU per copy and frame now), rule
   scattering by slope, height or mask (Milestone 20 item), lean from GPU
   physics fields alone.
-- [ ] Heightmap terrain rendering with texture splatting and LOD.
+- [x] Heightmap terrain rendering with texture splatting and LOD.
+  `rusting.terrain` (`src/runtime/terrain.rs`) draws the object's
+  `Heightfield` as chunks of `chunk_cells` cells, each a `LodGroupAsset`
+  of full, half and quarter detail meshes switching at `lod_distance` and
+  twice it, with skirts hiding cracks. Up to four layers (texture tinted by
+  color) pack into a 2x2 atlas; the new `MaterialAsset::splat` makes the
+  main fragment shader blend its quadrants by the vertex-color weights,
+  from `splat[row][column]` or height bands. Built at extraction, so the
+  editor shows it; rebuilt on change. Evidence: unit tests
+  `terrain_splits_into_chunks_with_coarser_lod_meshes`,
+  `terrain_layers_blend_by_height_bands_or_splat_weights`,
+  `terrain_assets_rebuild_on_change_and_free_on_removal`; GPU test
+  `terrain_paints_splat_layers_and_drops_detail_with_distance` (an orange
+  sample column paints at full detail and vanishes at the quarter level).
+  Mutations (splat branch off, LOD ranges infinite) fail them. Full check:
+  fmt, clippy x3 clean; workspace lib 882 passed, gpu-tests run 1014
+  passed (one transient doctest failure passed on rerun).
 - [ ] Automatic mesh LOD generation at import.
 - [ ] Rendering of deformables, fluid surfaces, and debris produced by Milestone 11.
 - [ ] Effect budget and quality-profile scaling for particles and decals.

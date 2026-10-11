@@ -862,6 +862,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"count": 100, "radius": 5.0, "seed": 0, "scale_min": 0.8, "scale_max": 1.2, "sway": 0.03}),
     },
     ComponentSection {
+        key: "rusting.terrain",
+        summary: "On an object with a rusting.heightfield: draws the heights as terrain in square chunks of chunk_cells cells. Each chunk switches to a half-detail mesh past lod_distance metres from the camera and a quarter-detail one past twice it (0 keeps full detail); skirts below chunk borders hide cracks between levels. Up to four layers paint the ground, each an image (texture, empty for plain color) tinted by color and repeating every tiling metres. splat[row][column] gives each height sample's layer weights; without them each layer covers heights from its min_height up, fading in over one metre, so list layers low to high (sand, grass, rock, snow). Add a Heightfield collider for the ground to be solid. Rebuilt when the terrain or heightfield changes.",
+        gpu: "one instanced draw per chunk at its LOD level; four atlas samples per pixel",
+        example: || json!({"layers": [{"texture": "", "color": [0.76, 0.7, 0.5], "min_height": 0.0}, {"texture": "", "color": [0.2, 0.5, 0.15], "min_height": 1.0}], "splat": [], "tiling": 4.0, "chunk_cells": 32, "lod_distance": 50.0, "cast_shadows": true}),
+    },
+    ComponentSection {
         key: "rusting.fog",
         summary: "Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre. Brighter toward the sun by sun_scatter; sky_affect fades the background too. light_shafts lets the sun's shadow map darken that glow, showing shafts behind shadow casters. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
         gpu: "a few instructions per pixel, plus one full-screen sky pass when sky_affect > 0; light_shafts > 0 adds 16 shadow-map taps per fogged pixel",
@@ -1087,7 +1093,7 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.heightfield",
-        summary: "A grid of ground heights for a collider with shape \"Heightfield\" on the same object (static only, like TriangleMesh). heights[row][column] in metres; rows run along +Z and columns along +X, spacing metres apart, centred on the object and scaled by its transform. Game code can draw the same surface with Heightfield::mesh(). cells[row][column] (one row and column fewer than heights) picks an entry of surfaces for that cell, a patch such as ice or mud with its own friction, restitution and material name (sound_cue with_material matches it); missing cells and indices past the end use the collider's own values and physics_material.",
+        summary: "A grid of ground heights for a collider with shape \"Heightfield\" on the same object (static only, like TriangleMesh). heights[row][column] in metres; rows run along +Z and columns along +X, spacing metres apart, centred on the object and scaled by its transform. Add rusting.terrain to draw it, or draw it from game code with Heightfield::mesh(). cells[row][column] (one row and column fewer than heights) picks an entry of surfaces for that cell, a patch such as ice or mud with its own friction, restitution and material name (sound_cue with_material matches it); missing cells and indices past the end use the collider's own values and physics_material.",
         gpu: NO_GPU,
         example: || json!({"heights": [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.5, 0.0]], "spacing": 2.0, "cells": [[0, 255], [255, 255]], "surfaces": [{"name": "ice", "friction": 0.02, "restitution": 0.0}]}),
     },

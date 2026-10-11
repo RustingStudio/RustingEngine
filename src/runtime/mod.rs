@@ -43,6 +43,7 @@ mod skinning;
 mod snapshot;
 pub mod soft_body;
 mod state_hash;
+mod terrain;
 #[cfg(test)]
 mod tests;
 mod time;
@@ -123,6 +124,7 @@ pub use soft_body::{
     SoftBody, SoftBodySettings, SoftBodyVolume,
 };
 pub use state_hash::*;
+pub use terrain::{Terrain, TerrainChunks, TerrainLayer, MAX_TERRAIN_LAYERS};
 pub use time::{FrameTime, RandomSeed, TimeControl};
 pub use two_d::*;
 #[cfg(feature = "ui")]

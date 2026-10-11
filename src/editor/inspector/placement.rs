@@ -36,7 +36,7 @@ use crate::runtime::{
     REFLECTION_PROBE_COMPONENT, RENDER_BOUNDS_COMPONENT, REVERB_ZONE_COMPONENT,
     ROPE_COMPONENT, SCENE_INSTANCE_COMPONENT, SKIN_COMPONENT,
     SLIDE_SOUND_COMPONENT, SOFT_BLOCK_COMPONENT, SOUND_CUE_COMPONENT,
-    TWEEN_COMPONENT, VEHICLE_COMPONENT, WATER_COMPONENT,
+    TERRAIN_COMPONENT, TWEEN_COMPONENT, VEHICLE_COMPONENT, WATER_COMPONENT,
 };
 use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
@@ -412,6 +412,10 @@ pub(in crate::editor) fn component_help(
         FOLIAGE_COMPONENT => (
             "Scatters copies of the mesh, leaning in wind fields.",
             "Grass, flowers, rocks, debris fields.",
+        ),
+        TERRAIN_COMPONENT => (
+            "Draws the heightfield as painted terrain with LOD.",
+            "Hills, valleys, open-world ground.",
         ),
         FOG_COMPONENT => (
             "Fades distant objects into a color.",

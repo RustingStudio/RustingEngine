@@ -1180,6 +1180,8 @@ pub const LIGHT_PROBE_GRID_COMPONENT: &str = "rusting.light_probe_grid";
 pub const LIGHTMAP_COMPONENT: &str = "rusting.lightmap";
 /// Registry name of the built-in foliage scatter.
 pub const FOLIAGE_COMPONENT: &str = "rusting.foliage";
+/// Registry name of the built-in heightmap terrain.
+pub const TERRAIN_COMPONENT: &str = "rusting.terrain";
 /// Registry name of the built-in height fog.
 pub const FOG_COMPONENT: &str = "rusting.fog";
 /// Registry name of the built-in bloom.
@@ -1365,6 +1367,9 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::Foliage>(FOLIAGE_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Terrain>(TERRAIN_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::Fog>(FOG_COMPONENT)
@@ -3134,6 +3139,7 @@ fn runtime_material(
         uv_scale: material.uv_scale,
         uv_offset: material.uv_offset,
         flat_shading: material.flat_shading,
+        splat: false,
         base_color_texture: texture(assets, &material.base_color_texture)?,
         normal_texture: texture(assets, &material.normal_texture)?,
         metallic_roughness_texture: texture(

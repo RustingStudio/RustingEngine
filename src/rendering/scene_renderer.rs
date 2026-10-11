@@ -479,7 +479,8 @@ struct RenderInstanceUpload {
     /// 2 blend); z: mask cutoff as `f32` bits; w: bit 0 casts shadows, bit 1
     /// receives shadows, bits 8 and up hold the lightmap slot plus one.
     physics: [u32; 4],
-    /// x: transmission; y: index of refraction; z: thickness.
+    /// x: transmission; y: index of refraction; z: thickness; w: 1 for a
+    /// terrain splat material.
     transmission: [f32; 4],
     /// xy: texture repeats per face; zw: texture offset.
     uv_transform: [f32; 4],
@@ -6616,7 +6617,7 @@ impl SceneRenderer {
                         material.transmission,
                         material.ior,
                         material.thickness,
-                        0.0,
+                        f32::from(u8::from(material.splat)),
                     ]
                 }),
                 uv_transform: material.map_or(
@@ -10863,6 +10864,24 @@ float shadow_factor(vec3 surface_normal) {
 }
 void main() {
     vec4 base_color = v_color * texture(base_color_texture, v_uv);
+    if (v_transmission.w > 0.5) {
+        // Terrain: blend the 2x2 layer atlas by the vertex color's weights.
+        // Each layer repeats inside its quadrant, inset so filtering does
+        // not bleed in its neighbors; gradients of the unwrapped uv keep
+        // the seam at each repeat from picking the smallest mip.
+        vec4 weights = max(v_color, vec4(0.0));
+        weights /= max(dot(weights, vec4(1.0)), 1e-4);
+        vec2 cell = 0.5 * (0.03 + 0.94 * fract(v_uv));
+        vec2 dx = 0.47 * dFdx(v_uv);
+        vec2 dy = 0.47 * dFdy(v_uv);
+        base_color = vec4(0.0);
+        for (int layer = 0; layer < 4; ++layer) {
+            vec2 corner = 0.5 * vec2(layer % 2, layer / 2);
+            base_color += weights[layer]
+                * textureGrad(base_color_texture, corner + cell, dx, dy);
+        }
+        base_color.a = 1.0;
+    }
     // Flat shading's face normal, taken before any discard or branch:
     // derivatives are undefined once a pixel of the 2x2 quad has left, and
     // some drivers then return garbage.
@@ -20437,6 +20456,91 @@ mod tests {
         scene.render_world.renderables_revision += 1;
         assert!(lit(render_pixel(&mut scene, leaned)), "wind leans the top");
         assert!(!lit(render_pixel(&mut scene, upright)));
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn terrain_paints_splat_layers_and_drops_detail_with_distance() {
+        use crate::runtime::{
+            Heightfield, RenderExtractPlugin, Terrain, TerrainLayer,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A flat 2 x 2 m terrain of one chunk, turned to face the camera.
+        // Every sample paints the blue layer except column 1 (x = -0.5 m),
+        // which paints the orange one; coarse LOD levels skip that column.
+        let extract = |lod_distance: f32| {
+            let mut app = crate::App::new();
+            app.add_plugin(RenderExtractPlugin).unwrap();
+            app.insert_resource(AssetServer::default());
+            let layer = |color: [f32; 3]| TerrainLayer {
+                color,
+                ..TerrainLayer::default()
+            };
+            let splat = (0..5)
+                .map(|_| {
+                    (0..5)
+                        .map(|column| {
+                            if column == 1 {
+                                [0.0, 1.0, 0.0, 0.0]
+                            } else {
+                                [1.0, 0.0, 0.0, 0.0]
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            app.spawn((
+                crate::Transform {
+                    rotation: [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+                    ..crate::Transform::default()
+                },
+                Heightfield {
+                    heights: vec![vec![0.0; 5]; 5],
+                    spacing: 0.5,
+                    ..Heightfield::default()
+                },
+                Terrain {
+                    layers: vec![
+                        layer([0.0, 0.0, 1.0]),
+                        layer([1.0, 0.5, 0.0]),
+                    ],
+                    splat,
+                    chunk_cells: 4,
+                    lod_distance,
+                    cast_shadows: false,
+                    ..Terrain::default()
+                },
+            ));
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+            let world = app.world_mut();
+            let renderables =
+                world.resource::<RenderWorld>().renderables.clone();
+            (renderables, world.remove_resource::<AssetServer>().unwrap())
+        };
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        // Pixels are 1/16 m: column 1 is pixel 8, column 3 is pixel 24.
+        let orange = |[r, g, b]: [u8; 3]| r > 40 && r > g && r > b;
+        let blue = |[r, g, b]: [u8; 3]| b > 40 && b > r && b > g;
+        // The camera is 5 m away; no LOD distance keeps full detail.
+        (scene.render_world.renderables, scene.assets) = extract(0.0);
+        assert_eq!(scene.render_world.renderables.len(), 1);
+        let painted = render_pixel(&mut scene, [8, 16]);
+        assert!(orange(painted), "column 1 paints orange: {painted:?}");
+        let painted = render_pixel(&mut scene, [24, 16]);
+        assert!(blue(painted), "column 3 paints blue: {painted:?}");
+        // Past 2 m the chunk draws its quarter-detail mesh, which only
+        // samples columns 0 and 4.
+        (scene.render_world.renderables, scene.assets) = extract(1.0);
+        scene.render_world.renderables_revision += 1;
+        let painted = render_pixel(&mut scene, [8, 16]);
+        assert!(blue(painted), "coarse level skips column 1: {painted:?}");
     }
 
     #[test]

@@ -1268,6 +1268,9 @@ pub struct MaterialAsset {
     /// Lights each triangle with its own face normal, taken from
     /// screen-space derivatives, for a faceted low-poly look on any mesh.
     pub flat_shading: bool,
+    /// Terrain paint: the base-color texture is a 2x2 atlas of four layers
+    /// blended by the vertex color's RGBA weights. Set by terrain.
+    pub splat: bool,
     pub base_color_texture: Option<Handle<TextureAsset>>,
     pub normal_texture: Option<Handle<TextureAsset>>,
     pub metallic_roughness_texture: Option<Handle<TextureAsset>>,
@@ -1291,6 +1294,7 @@ impl Default for MaterialAsset {
             uv_scale: [1.0; 2],
             uv_offset: [0.0; 2],
             flat_shading: false,
+            splat: false,
             base_color_texture: None,
             normal_texture: None,
             metallic_roughness_texture: None,

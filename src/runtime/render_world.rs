@@ -243,7 +243,7 @@ pub struct RenderWorld {
     foliage: Vec<(usize, [[f32; 4]; 4], f32)>,
     renderables_signature: Option<u64>,
     /// Tick and component counts seen by the last signature hash.
-    renderables_fingerprint: Option<(Tick, [usize; 7])>,
+    renderables_fingerprint: Option<(Tick, [usize; 8])>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -260,6 +260,7 @@ impl Plugin for RenderExtractPlugin {
 
 pub fn extract_render_world(world: &mut World) {
     super::update_skins(world);
+    super::terrain::build_terrains(world);
     // Most game frames do not add objects or change their CPU transforms.
     // Hashing in place is much cheaper than allocating and sorting a new list
     // of ten thousand objects only to discover that nothing changed.
@@ -760,7 +761,7 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
     let newer = |tick: Tick| {
         last_run.is_none_or(|last_run| tick.is_newer_than(last_run, this_run))
     };
-    let mut counts = [0; 7];
+    let mut counts = [0; 8];
     let mut changed = false;
     let mut moved = Vec::new();
     let mut query = world.query_filtered::<(
@@ -772,11 +773,13 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
         Option<Ref<RenderBounds>>,
         Option<Ref<super::SkinnedMesh>>,
         Option<Ref<super::Foliage>>,
+        Option<Ref<super::TerrainChunks>>,
     ), Or<(
         With<MeshRenderer>,
         With<Visibility>,
         With<super::Parent>,
         With<RenderBounds>,
+        With<super::TerrainChunks>,
     )>>();
     for (
         entity,
@@ -787,9 +790,10 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
         bounds,
         skinned,
         foliage,
+        chunks,
     ) in query.iter(world)
     {
-        let scattered = foliage.is_some();
+        let scattered = foliage.is_some() || chunks.is_some();
         let ticks = [
             transform.map(|value| value.last_changed()),
             renderer.map(|value| value.last_changed()),
@@ -798,13 +802,14 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
             bounds.map(|value| value.last_changed()),
             skinned.map(|value| value.last_changed()),
             foliage.map(|value| value.last_changed()),
+            chunks.map(|value| value.last_changed()),
         ];
         for (slot, (count, tick)) in counts.iter_mut().zip(ticks).enumerate() {
             if let Some(tick) = tick {
                 *count += 1;
                 if newer(tick) {
-                    // Foliage copies share their owner's entity, so a
-                    // moved owner rescatters through a rebuild.
+                    // Foliage copies and terrain chunks share their
+                    // owner's entity, so a moved owner rebuilds.
                     if slot == 0 && !scattered {
                         moved.push(entity);
                     } else {
@@ -840,6 +845,8 @@ fn renderables_signature(world: &mut World) -> u64 {
         Option<&super::SkinnedMesh>,
         Option<&super::Foliage>,
     )>();
+    let mut terrains =
+        world.query::<(Entity, &GlobalTransform, &super::TerrainChunks)>();
     let world = &*world;
     for (entity, transform, renderer, bounds, skinned, foliage) in
         query.iter(world)
@@ -857,6 +864,19 @@ fn renderables_signature(world: &mut World) -> u64 {
         renderer.cast_shadows.hash(&mut hasher);
         renderer.receive_shadows.hash(&mut hasher);
         format!("{bounds:?}{foliage:?}").hash(&mut hasher);
+        for row in transform.matrix {
+            for value in row {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
+    }
+    for (entity, transform, chunks) in terrains.iter(world) {
+        if !visible_in_hierarchy(world, entity) {
+            continue;
+        }
+        count += 1;
+        entity.to_bits().hash(&mut hasher);
+        chunks.hash(&mut hasher);
         for row in transform.matrix {
             for value in row {
                 value.to_bits().hash(&mut hasher);
@@ -1005,6 +1025,25 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
                 .collect()
         })
         .collect::<Vec<_>>();
+    let mut terrains =
+        world.query::<(Entity, &GlobalTransform, &super::TerrainChunks)>();
+    let world_ref = &*world;
+    for (entity, transform, chunks) in terrains.iter(world_ref) {
+        if !visible_in_hierarchy(world_ref, entity) {
+            continue;
+        }
+        renderables.extend(chunks.meshes.iter().map(|&mesh| {
+            ExtractedRenderable {
+                entity,
+                transform: *transform,
+                mesh,
+                material: chunks.material,
+                cast_shadows: chunks.cast_shadows,
+                receive_shadows: true,
+                bounds: None,
+            }
+        }));
+    }
     // The sort is stable, so one owner's copies keep their scatter order.
     renderables.sort_by_key(|renderable| {
         (
