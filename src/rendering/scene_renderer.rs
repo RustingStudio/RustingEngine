@@ -18979,4 +18979,105 @@ mod tests {
             );
         }
     }
+
+    /// The 100K pile: `PhysicsBenchmark::Debris` with 100 000 cubes on the
+    /// GPU for 5 s. The score is how far cube corners ended below the
+    /// ground; it and the mean wall time of a tick are printed.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn a_100k_pile_lands_on_the_gpu_and_scores_how_deep_it_sinks() {
+        use crate::runtime::{
+            Collider, CollisionLayers, ExtractedGpuPhysicsBody, GpuCollider,
+            PhysicsBenchmark, PhysicsId,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        const BODIES: u32 = 100_000;
+        const TICKS: u64 = 300;
+        let mut slab = SlabScene::new(&[]);
+        let world = &mut slab.render_world;
+        world.gpu_physics = PhysicsBenchmark::Debris
+            .bodies(BODIES as usize)
+            .into_iter()
+            .zip(0..)
+            .map(|(body, slot)| ExtractedGpuPhysicsBody {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(5000 + slot)
+                    .unwrap(),
+                physics_id: PhysicsId {
+                    slot,
+                    generation: 0,
+                },
+                transform: body.transform,
+                rigid_body: crate::runtime::RigidBody {
+                    linear_velocity: body.linear_velocity,
+                    ..Default::default()
+                },
+                solver: body.solver,
+                collider: Some((
+                    Collider::default(),
+                    CollisionLayers::default(),
+                )),
+                custom_shader: None,
+                rules: Vec::new(),
+                sync: Default::default(),
+            })
+            .collect();
+        world.gpu_colliders = vec![GpuCollider {
+            model: crate::Transform::new([0.0, -0.5, 0.0]).to_matrix(),
+            shape: [0.0, 500.0, 0.5, 500.0],
+            velocity: [0.0; 3],
+            friction: 0.5,
+            restitution: 0.0,
+            layers: CollisionLayers::default(),
+        }];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0, -9.81, 0.0];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        let start = std::time::Instant::now();
+        for tick in 1..=TICKS {
+            let world = &mut slab.render_world;
+            world.physics_tick = tick;
+            world.gpu_physics_read_all = tick == TICKS;
+            world.gpu_physics_commands_serial += u64::from(tick == TICKS);
+            let before = slab.now();
+            let _in_flight =
+                slab.render(before).then_signal_fence_and_flush().unwrap();
+            slab.renderer.block_until_physics_readbacks_complete();
+        }
+        let tick_time = start.elapsed() / TICKS as u32;
+        let states = slab.renderer.take_completed_physics_states();
+        assert_eq!(states.len(), BODIES as usize);
+        // How far each cube's lowest corner went below the ground's top.
+        let depths: Vec<f32> = states
+            .iter()
+            .map(|state| {
+                let [x, y, z] = state.transform.rotation;
+                let rotation =
+                    crate::runtime::sim_math::rotation_from_euler(x, y, z);
+                let reach = (0..3)
+                    .map(|row| 0.5 * rotation.matrix().row(1)[row].abs())
+                    .sum::<f32>();
+                reach - state.transform.position[1]
+            })
+            .collect();
+        assert!(depths.iter().all(|depth| depth.is_finite()));
+        let deepest = depths.iter().copied().fold(f32::MIN, f32::max);
+        let sunk = depths.iter().filter(|&&depth| depth > 0.05).count();
+        let diagnostics = slab.renderer.capacity_diagnostics();
+        eprintln!(
+            "100K pile: {tick_time:?} per tick, deepest {deepest} m, {sunk} \
+             deeper than 5 cm, {} grid overflow",
+            diagnostics.physics_grid_overflow
+        );
+        // Baseline, not a goal: the 47-layer clump presses 86 cubes more
+        // than 5 cm into the ground, the deepest 0.41 m (Milestone 10
+        // follow-up in the roadmap).
+        assert!(sunk <= 150 && deepest < 0.5, "{diagnostics:?}");
+    }
 }
