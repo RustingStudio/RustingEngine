@@ -3461,6 +3461,54 @@ mod tests {
     }
 
     #[test]
+    fn real_files_dedupe_by_canonical_path_and_reload_after_removal() {
+        let folder = std::env::temp_dir()
+            .join(format!("rusting-asset-paths-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(folder.join("meshes")).unwrap();
+        std::fs::write(folder.join("meshes/cube.mesh"), "cube").unwrap();
+        std::fs::write(folder.join("meshes/ball.mesh"), "ball").unwrap();
+        let mut assets = Assets::default();
+        let loads = std::cell::Cell::new(0);
+        let load = |assets: &mut Assets<i32>, path: &str| {
+            assets
+                .get_or_insert_with(folder.join(path), |_| {
+                    loads.set(loads.get() + 1);
+                    Ok(loads.get())
+                })
+                .unwrap()
+        };
+        let cube = load(&mut assets, "meshes/cube.mesh");
+        assert_eq!(load(&mut assets, "meshes/../meshes/./cube.mesh"), cube);
+        assert_eq!(load(&mut assets, "./meshes//cube.mesh"), cube);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                folder.join("meshes"),
+                folder.join("linked"),
+            )
+            .unwrap();
+            assert_eq!(
+                load(&mut assets, "linked/cube.mesh"),
+                cube,
+                "symlinks resolve"
+            );
+        }
+        let ball = load(&mut assets, "meshes/ball.mesh");
+        assert_ne!(ball, cube);
+        assert_eq!(loads.get(), 2, "each file loads once");
+
+        assets.remove(cube).unwrap();
+        let again = load(&mut assets, "meshes/cube.mesh");
+        assert_ne!(again, cube, "a removed asset loads into a new handle");
+        assert_eq!(assets.get(again), Some(&3));
+        assert!(matches!(
+            assets.get_or_insert_with("", |_| Ok(0)),
+            Err(AssetError::EmptyPath)
+        ));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
     fn referenced_assets_cannot_be_removed() {
         let mut assets = Assets::default();
         let handle = assets.insert(42);

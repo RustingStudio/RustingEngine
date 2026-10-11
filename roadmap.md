@@ -4037,7 +4037,7 @@ Depends on: Milestones 3, 4, and 21.
 - [x] Material default consistency and copying.
 - [ ] Stable generational asset handles.
 - [ ] Scene round trips and schema migration.
-- [ ] Asset path canonicalization and deduplication.
+- [x] Asset path canonicalization and deduplication. Done 2026-10-11: `Assets` keys each path by `normalize_path` (`std::fs::canonicalize` for existing files, else a lexical absolute path without `.` and `..`). Evidence: unit tests `assets::tests::equivalent_paths_are_deduplicated` (paths that do not exist: `assets/../assets/cube.mesh` and `./assets/cube.mesh` share one handle and load once) and `assets::tests::real_files_dedupe_by_canonical_path_and_reload_after_removal` (real files reached through `..`, `.`, a doubled slash and, on Unix, a symlinked folder share one handle and load once; a second file gets its own; a removed asset loads again into a new handle; an empty path fails with `EmptyPath`). Full check: fmt, clippy (default, no-default-features, gpu-tests), rustdoc, tests (lib 888, 1005 with gpu-tests) green.
 - [ ] Input action mapping.
 - [ ] Quality-profile selection.
 - [ ] Stable ECS/GPU `PhysicsId` conversion, generation rejection, and entity mapping.
