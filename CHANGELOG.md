@@ -5,6 +5,7 @@
 ### Added
 
 - Rendering: decals take a `roughness` painted with their coverage, so a dark decal can be a wet stain or a puddle that catches highlights
+- Tests: a golden-image test of every primitive's normals
 
 ## [2.4.1] - 2026-10-10
 

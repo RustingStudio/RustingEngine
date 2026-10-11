@@ -4544,7 +4544,15 @@ Depends on: Milestones 3, 4, and 21.
 
 ### Golden-image tests
 
-- [ ] Primitive normals.
+- [x] Primitive normals.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::primitive_normals_match_their_golden_image`
+  renders all 15 `PrimitiveShape`s tilted in a 5 by 3 grid in the Normals
+  debug view (160x96) and compares with
+  `src/rendering/golden/primitive_normals.png` (tolerance 8 per channel;
+  `RUSTING_UPDATE_GOLDEN=1` rewrites it). Mirroring the cube's normal x
+  fails it (difference 162). Full check: workspace lib 964 passed,
+  gpu-tests run 1119 passed.
 - [ ] glTF texture channels and color spaces.
 - [ ] Alpha mask and blend modes.
 - [ ] Directional shadow depth.

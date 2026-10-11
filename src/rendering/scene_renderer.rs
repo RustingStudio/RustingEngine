@@ -18816,6 +18816,71 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn primitive_normals_match_their_golden_image() {
+        use crate::assets::{procedural_primitive_mesh, PrimitiveShape};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Every primitive in a 5 by 3 grid, tilted so its top and two sides
+        // show, in the Normals view: a flipped face, a seam or a smoothed
+        // edge that should be hard changes the colors.
+        let mut scene = SlabScene::with_extent(&[], [160, 96]);
+        scene.debug_view = SceneDebugView::Normals;
+        if let Some(camera) = &mut scene.render_world.active_camera {
+            camera.projection = Projection::Orthographic {
+                vertical_size: 6.0,
+                near: 0.1,
+                far: 100.0,
+            };
+        }
+        let material = scene.assets.materials.insert(MaterialAsset::default());
+        let tilt = nalgebra::Rotation3::from_euler_angles(0.5, 0.6, 0.0)
+            .to_homogeneous();
+        for (index, shape) in PrimitiveShape::ALL.into_iter().enumerate() {
+            let center = Vector3::new(
+                (index % 5) as f32 * 2.0 - 4.0,
+                2.0 - (index / 5) as f32 * 2.0,
+                0.0,
+            );
+            scene.render_world.renderables.push(
+                crate::runtime::ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(
+                        index as u32 + 1,
+                    )
+                    .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: (Matrix4::new_translation(&center)
+                            * tilt
+                            * Matrix4::new_scaling(0.9))
+                        .into(),
+                    },
+                    mesh: scene
+                        .assets
+                        .meshes
+                        .insert(procedural_primitive_mesh(shape)),
+                    material,
+                    cast_shadows: false,
+                    receive_shadows: false,
+                    bounds: None,
+                },
+            );
+        }
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        assert_golden(&scene, "primitive_normals", 8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn a_screen_material_shows_what_its_camera_sees() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
