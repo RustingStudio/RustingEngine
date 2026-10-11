@@ -2848,7 +2848,21 @@ Depends on: Milestones 3 and 4.
   the packed `collide` row. Full check: fmt, clippy (default,
   `--no-default-features`, `gpu-tests`), `cargo test --workspace` (877
   lib) and the gpu-tests run (1005 lib) pass.
-  Not done: sub-emitters, trails.
+  Step 3, trails: `trail` (seconds, GPU emitters) keeps
+  `GPU_TRAIL_POINTS` = 8 past positions per slot after its three particle
+  rows, a new one every `trail / 8` seconds of age (at most one per frame).
+  Each slot draws its billboard plus 8 velocity-style stretched segments
+  back through the points, thinning and fading toward the tail, all in the
+  same instanced draw. Inspector: Trail drag for GPU emitters. Limits:
+  trail spacing is coarse when frames are longer than `trail / 8`; a
+  trailing emitter needs 9 billboards per slot. Evidence: GPU test
+  `gpu_particle_trails_draw_the_path_behind_each_particle` (a particle
+  flying 1 m in 6 frames leaves red behind it with `trail` 0.1 s and none
+  with 0). It failed with the segment size zeroed ("its trail behind it:
+  0"). The unit test checks the trail row. Full check: fmt, clippy
+  (default, `--no-default-features`, `gpu-tests`), `cargo test --workspace`
+  (877 lib) and the gpu-tests run (1006 lib) pass.
+  Not done: sub-emitters.
 - [ ] Particle emission driven by physics events: impacts, fracture, debris settling.
 - [ ] Decals, including decals that survive or are invalidated by fracture.
   Partial (lane/render): `rusting.decal` projects an image (or plain color)

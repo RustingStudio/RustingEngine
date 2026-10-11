@@ -247,6 +247,9 @@ pub struct ParticleEmitter {
     /// `Gpu` simulation: particles bounce off physics colliders by the
     /// collider's restitution.
     pub collide: bool,
+    /// `Gpu` simulation: seconds of path each particle trails behind it,
+    /// 0 for none.
+    pub trail: f32,
     /// Set by `play`, `pause`, `stop`, and `restart`.
     #[serde(skip)]
     pub command: ParticleCommand,
@@ -290,6 +293,7 @@ impl Default for ParticleEmitter {
             sprite: ParticleSprite::Soft,
             simulation: ParticleSimulation::Cpu,
             collide: false,
+            trail: 0.0,
             command: ParticleCommand::None,
         }
     }
@@ -917,10 +921,13 @@ pub struct GpuParticleBatch {
     pub sprite: ParticleSprite,
     /// Shape as 0 point, 1 box, 2 sphere, 3 cone, 4 circle.
     pub shape: u32,
+    /// Trail points each particle keeps: 0, or `GPU_TRAIL_POINTS`.
+    pub trail_points: u32,
     /// Settings the compute shader reads: emitter matrix columns, then
     /// direction and spread, wind and gravity, lifetime and speed ranges,
-    /// size range, drag and emissive, shape size, then
-    /// `GPU_PARTICLE_CURVE` samples of color and of size over life.
+    /// size range, drag and emissive, shape size and collide, trail seconds
+    /// and points, then `GPU_PARTICLE_CURVE` samples of color and of size
+    /// over life.
     pub rows: Vec<[f32; 4]>,
 }
 
@@ -928,6 +935,10 @@ pub struct GpuParticleBatch {
 // ponytail: curves are sampled at 8 points and lerped between.
 pub const GPU_PARTICLE_CURVE: usize = 8;
 
+/// Past positions a trailing GPU particle keeps, evenly spread over
+/// `ParticleEmitter::trail`.
+// ponytail: fixed; long trails get coarse corners, raise if they show.
+pub const GPU_TRAIL_POINTS: u32 = 8;
 /// Builds the settings of one GPU emitter.
 #[must_use]
 pub fn gpu_particle_batch(
@@ -967,6 +978,12 @@ pub fn gpu_particle_batch(
             f32::from(u8::from(emitter.collide)),
         ],
     ]);
+    let trail_points = if emitter.trail > 0.0 {
+        GPU_TRAIL_POINTS
+    } else {
+        0
+    };
+    rows.push([emitter.trail.max(0.0), trail_points as f32, 0.0, 0.0]);
     let life = |sample: usize| sample as f32 / (GPU_PARTICLE_CURVE - 1) as f32;
     rows.extend((0..GPU_PARTICLE_CURVE).map(|i| emitter.color_at(life(i))));
     rows.extend(
@@ -981,6 +998,7 @@ pub fn gpu_particle_batch(
         blend: emitter.blend,
         sprite: emitter.sprite,
         shape: emitter.shape as u32,
+        trail_points,
         rows,
     }
 }
@@ -1075,6 +1093,7 @@ mod tests {
             rate: 60.0,
             simulation: ParticleSimulation::Gpu,
             collide: true,
+            trail: 0.5,
             max_particles: u32::MAX,
             shape: EmitterShape::Sphere,
             ..ParticleEmitter::default()
@@ -1096,14 +1115,16 @@ mod tests {
         assert_eq!(batch.spawned, 60);
         assert_eq!(batch.max_particles, MAX_GPU_PARTICLES);
         assert_eq!(batch.shape, 2);
-        assert_eq!(batch.rows.len(), 9 + 2 * GPU_PARTICLE_CURVE);
+        assert_eq!(batch.rows.len(), 10 + 2 * GPU_PARTICLE_CURVE);
+        assert_eq!(batch.rows[9], [0.5, 8.0, 0.0, 0.0], "trail");
+        assert_eq!(batch.trail_points, GPU_TRAIL_POINTS);
         assert_eq!(batch.rows[3], [3.0, 4.0, 5.0, 1.0]);
         assert_eq!(batch.rows[6], [1.0, 2.0, 1.0, 2.0], "lifetime, speed");
         assert_eq!(batch.rows[8][3], 1.0, "collide");
         // Faded in from transparent, white in the middle of life.
-        assert_eq!(batch.rows[9][3], 0.0);
-        assert_eq!(batch.rows[9 + 3], [1.0; 4]);
-        assert_eq!(batch.rows[9 + GPU_PARTICLE_CURVE], [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(batch.rows[10][3], 0.0);
+        assert_eq!(batch.rows[10 + 3], [1.0; 4]);
+        assert_eq!(batch.rows[10 + GPU_PARTICLE_CURVE], [1.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

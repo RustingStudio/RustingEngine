@@ -5,8 +5,10 @@
 //! read back.
 //!
 //! Each emitter keeps a ring of `max_particles` slots of three rows
-//! (position and age, velocity and lifetime, size); spawn `n` lands in slot
-//! `n % max_particles`, overwriting the oldest particle.
+//! (position and age, velocity and lifetime, size) and then its trail
+//! points; spawn `n` lands in slot `n % max_particles`, overwriting the
+//! oldest particle. A slot draws one billboard, plus one stretched segment
+//! per trail point.
 
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::memory::allocator::{
@@ -27,11 +29,14 @@ pub(super) mod shader {
 
 /// One GPU emitter's buffers on the device.
 pub(super) struct GpuParticleState {
-    /// Three rows per slot.
+    /// Three rows and then the trail points of each slot.
     pub particles: Subbuffer<[[f32; 4]]>,
+    /// `1 + trail_points` per slot.
     pub billboards: Subbuffer<[ParticleVertex]>,
     /// Spawns already placed in `particles`.
     pub spawned: u64,
+    pub slots: u32,
+    pub trail_points: u32,
 }
 
 impl GpuParticleState {
@@ -39,6 +44,7 @@ impl GpuParticleState {
     pub fn new(
         allocator: &Arc<StandardMemoryAllocator>,
         slots: u32,
+        trail_points: u32,
     ) -> Result<Self, SceneRenderError> {
         let error =
             |error: &dyn std::fmt::Display| SceneRenderError(error.to_string());
@@ -61,7 +67,7 @@ impl GpuParticleState {
             allocator.clone(),
             info,
             allocation,
-            3 * u64::from(slots),
+            u64::from(3 + trail_points) * u64::from(slots),
         )
         .map_err(|e| error(&e))?;
         let (info, allocation) = device_buffer(
@@ -71,18 +77,16 @@ impl GpuParticleState {
             allocator.clone(),
             info,
             allocation,
-            u64::from(slots),
+            u64::from(1 + trail_points) * u64::from(slots),
         )
         .map_err(|e| error(&e))?;
         Ok(Self {
             particles,
             billboards,
             spawned: 0,
+            slots,
+            trail_points,
         })
-    }
-
-    pub fn slots(&self) -> u32 {
-        self.billboards.len() as u32
     }
 }
 

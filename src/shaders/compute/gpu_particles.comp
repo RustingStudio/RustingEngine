@@ -24,7 +24,8 @@ struct Billboard {
     float rotation;
 };
 
-layout(set = 0, binding = 0) buffer Particles { Particle particles[]; };
+// Per slot: a `Particle`, then the trail points, newest first.
+layout(set = 0, binding = 0) buffer Particles { vec4 slot_rows[]; };
 layout(set = 0, binding = 1) writeonly buffer Billboards {
     Billboard billboards[];
 };
@@ -51,7 +52,7 @@ layout(push_constant) uniform Step {
 } step;
 
 const uint CURVE = 8u;
-const uint COLOR = 9u;
+const uint COLOR = 10u;
 const uint SIZE = COLOR + CURVE;
 const float PI = 3.14159265;
 
@@ -93,8 +94,11 @@ void main() {
     if (slot >= slots) {
         return;
     }
-    Particle p = particles[slot];
+    uint points = uint(rows[9].y);
+    uint base = slot * (3u + points);
+    Particle p = Particle(slot_rows[base], slot_rows[base + 1u], slot_rows[base + 2u]);
     float dt = step.time.x;
+    bool born = false;
     // The new spawn landing in this slot, if any.
     uint offset = (slot + slots - step.spawn.x % slots) % slots;
     if (offset < step.spawn.y) {
@@ -130,7 +134,9 @@ void main() {
         p.size = vec4(mix(rows[7].x, rows[7].y, unit(n, 7u)), 0.0, 0.0, 0.0);
         // Born this frame, so it shows at its start before moving.
         dt = 0.0;
+        born = true;
     }
+    float age = p.position_age.w;
     if (p.position_age.w < p.velocity_lifetime.w) {
         vec3 accel = rows[5].xyz - vec3(0.0, rows[5].w, 0.0)
             + field_push(p.position_age.xyz, 0.0, step.seed.w, step.time.y);
@@ -153,15 +159,38 @@ void main() {
         }
         p.position_age.w += dt;
     }
-    particles[slot] = p;
+    slot_rows[base] = p.position_age;
+    slot_rows[base + 1u] = p.velocity_lifetime;
+    slot_rows[base + 2u] = p.size;
     bool alive = p.position_age.w < p.velocity_lifetime.w;
     float life = p.position_age.w / max(p.velocity_lifetime.w, 1e-6);
     vec4 color = curve(COLOR, life);
     color.rgb *= rows[7].w;
-    billboards[slot] = Billboard(
-        p.position_age.xyz,
-        alive ? p.size.x * curve(SIZE, life).x : 0.0,
-        color,
-        vec3(0.0),
-        0.0);
+    float size = alive ? p.size.x * curve(SIZE, life).x : 0.0;
+    uint first = slot * (1u + points);
+    billboards[first] = Billboard(p.position_age.xyz, size, color, vec3(0.0), 0.0);
+    if (points == 0u) {
+        return;
+    }
+    // A new trail point every `trail / points` seconds of age.
+    float spacing = max(rows[9].x / float(points), 1e-4);
+    bool shift = floor(p.position_age.w / spacing) > floor(age / spacing);
+    for (uint k = points; k > 0u; k--) {
+        uint at = base + 2u + k;
+        if (born) {
+            slot_rows[at] = vec4(p.position_age.xyz, 0.0);
+        } else if (shift) {
+            slot_rows[at] = k == 1u ? vec4(p.position_age.xyz, 0.0) : slot_rows[at - 1u];
+        }
+    }
+    // Segments from the particle back through its points, thinning out.
+    vec3 ahead = p.position_age.xyz;
+    for (uint k = 0u; k < points; k++) {
+        vec3 behind = slot_rows[base + 3u + k].xyz;
+        float taper = 1.0 - float(k + 1u) / float(points + 1u);
+        billboards[first + 1u + k] = Billboard(
+            0.5 * (ahead + behind), size * taper,
+            vec4(color.rgb, color.a * taper), ahead - behind, 0.0);
+        ahead = behind;
+    }
 }

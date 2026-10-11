@@ -478,6 +478,7 @@ crate::reflect! {
             doc: "Gpu: up to 1M particles, fewer settings",
         },
         collide: bool { doc: "Gpu: bounce off physics colliders" },
+        trail: f32 { unit: "s", min: 0.0, doc: "Gpu: seconds of path trailing each particle, 0 for none" },
         #[skip] command: crate::runtime::ParticleCommand,
     }
 }

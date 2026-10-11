@@ -89,6 +89,14 @@ pub(super) fn draw_particle_emitter(
         if emitter.simulation == ParticleSimulation::Gpu {
             widgets::describe_next_row(ui, "bounce off physics colliders");
             changed |= widgets::checkbox(ui, "Collide", &mut emitter.collide);
+            changed |= widgets::drag(
+                ui,
+                "Trail",
+                DragValue::new(&mut emitter.trail)
+                    .range(0.0..=10.0)
+                    .speed(0.01)
+                    .suffix(" s"),
+            );
         }
         let most = match emitter.simulation {
             ParticleSimulation::Cpu => 100_000,

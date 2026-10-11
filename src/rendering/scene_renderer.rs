@@ -4858,10 +4858,10 @@ impl SceneRenderer {
                     },
                 )
                 .map_err(|error| SceneRenderError(error.to_string()))?;
-            count_work(&recorded, 1, 0, u64::from(state.slots()) * 2);
+            count_work(&recorded, 1, 0, state.billboards.len() * 2);
             unsafe {
                 commands
-                    .draw(6, state.slots(), 0, 0)
+                    .draw(6, state.billboards.len() as u32, 0, 0)
                     .map_err(|error| SceneRenderError(error.to_string()))?;
             }
         }
@@ -5642,7 +5642,8 @@ impl SceneRenderer {
         for batch in batches {
             let state = match self.gpu_particles.entry(batch.entity) {
                 std::collections::hash_map::Entry::Occupied(entry)
-                    if entry.get().slots() == batch.max_particles =>
+                    if entry.get().slots == batch.max_particles
+                        && entry.get().trail_points == batch.trail_points =>
                 {
                     entry.into_mut()
                 }
@@ -5650,6 +5651,7 @@ impl SceneRenderer {
                     let state = GpuParticleState::new(
                         &self.memory_allocator,
                         batch.max_particles,
+                        batch.trail_points,
                     )?;
                     match entry {
                         std::collections::hash_map::Entry::Occupied(
@@ -5664,7 +5666,7 @@ impl SceneRenderer {
                     }
                 }
             };
-            let slots = state.slots();
+            let slots = state.slots;
             let (first, count) =
                 new_spawns(state.spawned, batch.spawned, slots);
             state.spawned = batch.spawned;
@@ -20256,6 +20258,79 @@ mod tests {
         // Unstopped it would be 2 m further, off screen.
         assert_eq!(frame(0.2), (0, 255), "stopped by the wall");
         assert_eq!(frame(0.3), (0, 255), "still at the wall");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_particle_trails_draw_the_path_behind_each_particle() {
+        use crate::runtime::{
+            gpu_particle_batch, ColorKey, ParticleEmitter, ParticleSimulation,
+            ParticleSprite, ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A particle flies from x = -0.8 along +x at 10 m/s for 0.1 s,
+        // over 6 frames. Returns the red of pixels at x = -0.3 (behind it)
+        // and x = 0.2 (where it ends).
+        let run = |trail: f32| {
+            let emitter = ParticleEmitter {
+                simulation: ParticleSimulation::Gpu,
+                trail,
+                max_particles: 1,
+                direction: [1.0, 0.0, 0.0],
+                spread: 0.0,
+                speed: [10.0, 10.0],
+                size: [0.25, 0.25],
+                lifetime: [5.0, 5.0],
+                fade_in: 0.0,
+                fade_out: 0.0,
+                color_over_life: vec![ColorKey {
+                    t: 0.0,
+                    color: [1.0, 0.0, 0.0, 1.0],
+                }],
+                sprite: ParticleSprite::Square,
+                ..ParticleEmitter::default()
+            };
+            let global = crate::runtime::GlobalTransform {
+                matrix: Matrix4::new_translation(&Vector3::new(-0.8, 0.0, 0.0))
+                    .into(),
+            };
+            let system = ParticleSystem {
+                spawned: 1,
+                ..ParticleSystem::default()
+            };
+            let entity = bevy_ecs::entity::Entity::from_raw_u32(1).unwrap();
+            let mut scene = SlabScene::with_extent(&[], [32, 32]);
+            scene.render_world.gpu_particles = vec![gpu_particle_batch(
+                entity,
+                &emitter,
+                &system,
+                Some(&global),
+                None,
+            )];
+            for frame in 0..6 {
+                scene.render_world.elapsed_seconds = frame as f32 * 0.02;
+                let before = scene.now();
+                scene
+                    .render(before)
+                    .then_signal_fence_and_flush()
+                    .unwrap()
+                    .wait(None)
+                    .unwrap();
+            }
+            let pixels = scene.pixels();
+            let red = |x: usize| pixels[(16 * 32 + x) * 4 + 2];
+            (red(11), red(19))
+        };
+        let (behind, head) = run(0.1);
+        assert_eq!(head, 255, "the particle itself");
+        assert!(behind > 50, "its trail behind it: {behind}");
+        assert_eq!(run(0.0), (0, 255), "no trail without `trail`");
     }
 
     #[test]
