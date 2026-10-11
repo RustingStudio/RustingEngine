@@ -1376,8 +1376,8 @@ fn custom_solver_shaders(
 mod tests {
     use std::time::Duration;
 
-    use crate::Transform;
     use crate::assets::AssetServer;
+    use crate::Transform;
 
     use super::*;
 
@@ -1884,12 +1884,11 @@ mod tests {
         ));
         app.update(Duration::ZERO).unwrap();
         // No policy, no LOD.
-        assert!(
-            app.world()
-                .resource::<RenderWorld>()
-                .gpu_observers
-                .is_empty()
-        );
+        assert!(app
+            .world()
+            .resource::<RenderWorld>()
+            .gpu_observers
+            .is_empty());
         let lod = super::super::GpuSimulationLod {
             full_radius: 10.0,
             reduced_radius: 30.0,
@@ -1940,12 +1939,11 @@ mod tests {
         let light = app.spawn((Transform::default(), PointLight::default()));
         app.set_parent(light, parent).unwrap();
         app.update(Duration::ZERO).unwrap();
-        assert!(
-            app.world()
-                .resource::<RenderWorld>()
-                .point_lights
-                .is_empty()
-        );
+        assert!(app
+            .world()
+            .resource::<RenderWorld>()
+            .point_lights
+            .is_empty());
 
         app.world_mut()
             .get_mut::<Visibility>(parent)
