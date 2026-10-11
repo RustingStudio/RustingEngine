@@ -21,6 +21,9 @@ fn main() {
         (SuiteScene::RagdollPile, 100, 300),
         (SuiteScene::ArticulatedChain, 20, 600),
         (SuiteScene::CharacterStairs, 10, 240),
+        (SuiteScene::BuoyancySort, 16, 300),
+        (SuiteScene::SheetCatch, 16, 300),
+        (SuiteScene::JellyRaft, 16, 300),
     ] {
         let score = scene.run(size, steps);
         println!(

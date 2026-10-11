@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Physics suite scenes `BuoyancySort`, `SheetCatch` and `JellyRaft` check two-way coupling between rigid bodies, cloth, soft bodies and fluid
+
 ## [2.4.1] - 2026-10-10
 
 Fixes 2.4.0 builds: without the Vulkan SDK the cloth shader failed to compile, and the crates.io package needed a newer `rusting-core` than the one published.
