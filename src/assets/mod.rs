@@ -332,7 +332,11 @@ impl<T> Assets<T> {
         if let Some(path) = path {
             self.paths.remove(&path);
         }
-        self.free.push(handle.index);
+        // A slot whose generation would wrap is never reused, so a handle
+        // from its first use cannot resolve again.
+        if handle.generation < u32::MAX {
+            self.free.push(handle.index);
+        }
         value.ok_or_else(|| AssetError::Missing(handle.into()))
     }
 
@@ -482,7 +486,7 @@ impl<T> Assets<T> {
         let modified = path.as_deref().and_then(file_modified);
         let handle = if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
-            slot.generation = slot.generation.wrapping_add(1).max(1);
+            slot.generation += 1;
             slot.revision = slot.revision.saturating_add(1);
             slot.value = value;
             slot.path = path.clone();
@@ -3445,6 +3449,35 @@ mod tests {
         assert_ne!(stale.generation(), current.generation());
         assert!(assets.get(stale).is_none());
         assert_eq!(assets.get(current).map(String::as_str), Some("new"));
+    }
+
+    #[test]
+    fn handles_stay_unique_across_reuse_keys_and_exhausted_slots() {
+        let mut assets = Assets::default();
+        let mut seen = std::collections::HashSet::new();
+        let mut handle = assets.insert(0);
+        for round in 1..100 {
+            assert!(seen.insert(handle), "handle {handle:?} came back");
+            assets.remove(handle).unwrap();
+            handle = assets.insert(round);
+            assert_eq!(handle.index(), 0, "the slot is reused");
+        }
+        // The key round-trips through serde and `from_key`.
+        let json = serde_json::to_string(&handle).unwrap();
+        let back: Handle<i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, handle);
+        assert_eq!(Handle::<i32>::from_key(handle.key()), handle);
+        assert_eq!(assets.get(back), Some(&99));
+        // A handle past the last slot resolves to nothing.
+        assert!(assets.get(Handle::from_key(7)).is_none());
+
+        // A slot at the last generation is retired, not wrapped.
+        assets.slots[0].generation = u32::MAX;
+        let last = Handle::from_key(u64::from(u32::MAX) << 32);
+        assert_eq!(assets.remove(last), Ok(99));
+        let next = assets.insert(100);
+        assert_ne!(next.index(), 0, "an exhausted slot is not reused");
+        assert!(assets.get(last).is_none());
     }
 
     #[test]
