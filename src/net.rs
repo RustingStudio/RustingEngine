@@ -2343,4 +2343,125 @@ mod tests {
         // input, and every peer runs the same repeat.
         assert!(fresh > 0 && late > 0, "{fresh} fresh inputs, {late} late");
     }
+
+    #[test]
+    fn the_host_rejects_positions_and_terrain_a_client_claims() {
+        use crate::runtime::{Name, SceneComponentRegistry, SceneId};
+        use crate::Transform;
+        use bevy_ecs::prelude::World;
+        use input::InputBuffer;
+        use replicate::{Replicated, Replication, TRANSFORM};
+        use rpc::{Authority, Reliability, Rpcs};
+
+        let (host, clients) = NetSession::loopback(1);
+        let cheat = &clients[0];
+        host.poll();
+        let world = || {
+            let mut world = World::new();
+            world.insert_resource(SceneComponentRegistry::default());
+            world
+        };
+        let id = SceneId::new();
+        let hero = |world: &mut World| {
+            world
+                .spawn((
+                    Replicated,
+                    id,
+                    Name("Hero".into()),
+                    Transform::default(),
+                ))
+                .id()
+        };
+        let mut host_world = world();
+        let host_hero = hero(&mut host_world);
+        let mut replication = Replication::new();
+        replication.component(TRANSFORM);
+        replication.delta(&mut host_world).unwrap();
+        // Terrain changes and teleports are the host's own calls.
+        let mut rpcs = Rpcs::new();
+        rpcs.register("break_chunk", Authority::Host, Reliability::Reliable)
+            .register("teleport", Authority::Host, Reliability::Reliable);
+        let mut inputs = InputBuffer::new(1);
+
+        // A modified client builds real replication messages of its own
+        // world, with its hero far away, registers the host's methods as
+        // open to anyone, and sends inputs out of range and far ahead.
+        let mut forged = world();
+        let fake = hero(&mut forged);
+        forged.get_mut::<Transform>(fake).unwrap().position = [1e9, 0.0, 0.0];
+        let mut theirs = Replication::new();
+        theirs.component(TRANSFORM);
+        let delta = theirs.delta(&mut forged).unwrap().unwrap();
+        theirs.snapshot(&mut forged).unwrap();
+        for bytes in [
+            delta,
+            theirs.full(),
+            theirs.snapshot_for(HOST).unwrap(),
+            theirs.checksum(),
+        ] {
+            cheat.send(HOST, &bytes).unwrap();
+        }
+        let mut open = Rpcs::new();
+        open.register("break_chunk", Authority::Anyone, Reliability::Reliable)
+            .register("teleport", Authority::Anyone, Reliability::Reliable);
+        open.call(cheat, "Terrain", "break_chunk", b"0,0,0")
+            .unwrap();
+        open.call(cheat, "Hero", "teleport", b"1e9,0,0").unwrap();
+        for (tick, stick) in
+            [(1_u64, f32::NAN), (2, 50.0), (500, 1.0), (3, 0.5)]
+        {
+            let bytes =
+                [tick.to_le_bytes().as_slice(), &stick.to_le_bytes()].concat();
+            cheat.send(HOST, &bytes).unwrap();
+        }
+
+        // The host's loop, as docs/networking.md has it: replication and
+        // RPCs check the sender, the game checks each input's range, and
+        // the input buffer checks its tick.
+        let mut refused = Vec::new();
+        for event in wait(&host, 10) {
+            let NetEvent::Message { from, bytes } = event else {
+                continue;
+            };
+            if let Some(result) = replication.accept(from, &bytes) {
+                refused.push(result.unwrap_err());
+            } else if let Some(result) = rpcs.accept(from, &bytes) {
+                refused.push(result.unwrap_err());
+            } else {
+                let tick = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                let stick = f32::from_le_bytes(bytes[8..].try_into().unwrap());
+                if !(stick.is_finite() && stick.abs() <= 1.0) {
+                    refused.push(format!("peer {from}: stick {stick}"));
+                } else if let Err(reason) = inputs.push(from, tick, stick) {
+                    refused.push(reason);
+                }
+            }
+        }
+        assert_eq!(
+            refused,
+            [
+                "peer 1 sent state; only the host may",
+                "peer 1 sent state; only the host may",
+                "peer 1 sent state; only the host may",
+                "peer 1 sent state; only the host may",
+                "peer 1 may not call \"break_chunk\" on \"Terrain\"",
+                "peer 1 may not call \"teleport\" on \"Hero\"",
+                "peer 1: stick NaN",
+                "peer 1: stick 50",
+                "peer 1: input for tick 500 is too far ahead",
+            ]
+        );
+        // Only the one valid input gets through, and the host's state is
+        // its own.
+        inputs.take();
+        inputs.take();
+        let (_, third) = inputs.take();
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].input, 0.5);
+        assert_eq!(
+            host_world.get::<Transform>(host_hero).unwrap().position,
+            [0.0; 3]
+        );
+        assert_eq!(replication.delta(&mut host_world).unwrap(), None);
+    }
 }

@@ -243,7 +243,10 @@ authority:
   (`x.is_finite() && x.abs() <= 1.0`), ticks near the host's, names
   ones you registered. Drop the message on any failure.
 - `net::rpc` already checks who may call a method, and
-  `net::replicate` only moves state from the host to clients.
+  `net::replicate` only moves state from the host to clients: the
+  host's `Replication::accept` returns an error for a delta, snapshot,
+  whole state or checksum a client sends. Drop the message, or the
+  client.
 - Limit how often each client may send with `net::limit::RateLimit`:
 
 ```rust

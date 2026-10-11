@@ -223,14 +223,23 @@ impl Replication {
 
     /// Reads a client's acknowledgement ([`Replica::ack`]) or request for
     /// a resynchronization ([`Replica::resync`]). Returns `None` for any
-    /// other message. On a request, the next
-    /// [`snapshot_for`](Self::snapshot_for) that client is whole; with
-    /// deltas, send it [`full`](Self::full).
+    /// other message, and an error for state a client sent (a delta,
+    /// snapshot, whole state or checksum): only the host has state. On a
+    /// request, the next [`snapshot_for`](Self::snapshot_for) that client
+    /// is whole; with deltas, send it [`full`](Self::full).
     pub fn accept(
         &mut self,
         from: PeerId,
         bytes: &[u8],
     ) -> Option<Result<FromClient, String>> {
+        if [MAGIC, SNAPSHOT, FULL, CHECKSUM]
+            .iter()
+            .any(|kind| bytes.starts_with(kind.as_slice()))
+        {
+            return Some(Err(format!(
+                "peer {from} sent state; only the host may"
+            )));
+        }
         if bytes == RESYNC {
             if self.resynced.get(&from) == Some(&self.checksums) {
                 return Some(Err(format!(
