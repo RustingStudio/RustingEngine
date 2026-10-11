@@ -1568,41 +1568,127 @@ mod tests {
         assert!(stale.is_empty(), "stale examples:\n{}", stale.join("\n"));
     }
 
-    /// API audit (roadmap L2): a public gameplay method must not return a
-    /// borrow of the scene, which blocks the next `GameScene` call. The
-    /// methods below predate the rule; the list may only shrink.
+    /// API audit (roadmap L2): a public method of a prelude type must not
+    /// return a borrow, which blocks the next `GameScene` call, and a
+    /// prelude type must not need a lifetime. The entries below predate the
+    /// rule; the lists may only shrink.
     #[test]
     fn gameplay_methods_do_not_return_new_borrows() {
-        // `&mut Self` on `GameObject` is the chaining builder, not a borrow
-        // of the scene that outlives the statement.
-        const KNOWN: [&str; 4] = [
-            "api/GameScene::object",
-            "api/GameScene::try_object",
-            "api/GameScene::counter",
-            "api/GameScene::world",
+        const KNOWN: [&str; 6] = [
+            "GameScene::object",
+            "GameScene::try_object",
+            "GameScene::counter",
+            "GameScene::world",
+            // Reached through `world`; read-only slices of the resource.
+            "PhysicsWorld::contacts",
+            "PhysicsWorld::impacts",
         ];
-        let mut found = Vec::new();
-        for item in items().into_iter().filter(|item| item.kind == "api") {
-            let signature = item.text.lines().next().unwrap_or_default();
-            let Some((_, returns)) = signature.split_once("->") else {
-                continue;
-            };
-            let chaining = item.id.starts_with("api/GameObject::")
-                && returns.trim() == "&mut Self";
-            if !chaining && returns.contains(['&', '\'']) {
-                found.push(item.id);
+        // Games name `&mut GameScene` with the lifetime elided.
+        const KNOWN_LIFETIMES: [&str; 2] = ["GameScene", "GameObject"];
+        let lib = include_str!("lib.rs");
+        let prelude = &lib[lib.find("pub mod prelude {").unwrap()..];
+        let prelude = &prelude[..prelude.find("\n}").unwrap()];
+        let types: Vec<&str> = prelude
+            .lines()
+            .filter(|line| !line.trim().starts_with("//"))
+            .flat_map(|line| line.split(|c: char| !c.is_alphanumeric()))
+            .filter(|word| word.starts_with(|c: char| c.is_ascii_uppercase()))
+            .collect();
+        let mut files = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src"
+        ))];
+        let mut sources = Vec::new();
+        while let Some(path) = files.pop() {
+            if path.is_dir() {
+                files.extend(
+                    std::fs::read_dir(&path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                sources.push(std::fs::read_to_string(&path).unwrap());
             }
         }
-        let new: Vec<_> = found
-            .iter()
-            .filter(|id| !KNOWN.contains(&id.as_str()))
-            .collect();
-        assert!(new.is_empty(), "returns a borrow: {new:?}");
-        let gone: Vec<_> = KNOWN
-            .iter()
-            .filter(|id| !found.iter().any(|f| f == *id))
-            .collect();
-        assert!(gone.is_empty(), "fixed; remove from KNOWN: {gone:?}");
+        let mut found = Vec::new();
+        let mut lifetimes = Vec::new();
+        for source in &sources {
+            let mut owner = None;
+            let mut signature: Option<String> = None;
+            for line in source.lines() {
+                for kind in ["pub struct ", "pub enum "] {
+                    let Some(rest) = line.strip_prefix(kind) else {
+                        continue;
+                    };
+                    let name = rest.split(['<', ' ', '(', ';']).next();
+                    if rest.contains("<'")
+                        && name.is_some_and(|name| types.contains(&name))
+                    {
+                        lifetimes.push(name.unwrap().to_owned());
+                    }
+                }
+                if let Some(rest) = line.strip_prefix("impl") {
+                    // `impl<'w> GameScene<'w> {`, not `impl Trait for T`.
+                    let rest = match rest.strip_prefix('<') {
+                        Some(generic) => {
+                            generic.split_once("> ").map_or("", |(_, r)| r)
+                        }
+                        None => rest.trim_start(),
+                    };
+                    owner = types.iter().copied().find(|name| {
+                        !rest.contains(" for ")
+                            && rest
+                                .strip_prefix(name)
+                                .is_some_and(|r| r.starts_with(['<', ' ']))
+                    });
+                    continue;
+                }
+                if line == "}" {
+                    owner = None;
+                }
+                let Some(name) = owner else { continue };
+                if let Some(sig) = signature.as_mut() {
+                    sig.push(' ');
+                    sig.push_str(line.trim());
+                } else if line.starts_with("    pub fn ") {
+                    signature = Some(line.trim().to_owned());
+                } else {
+                    continue;
+                }
+                if !line.trim_end().ends_with(['{', ';']) {
+                    continue;
+                }
+                let sig = signature.take().unwrap();
+                let Some((head, returns)) = sig.split_once("->") else {
+                    continue;
+                };
+                // `&mut Self` is a chaining builder, not a borrow that
+                // outlives the statement.
+                let returns = returns.trim_end_matches(['{', ';']).trim();
+                if returns != "&mut Self" && returns.contains(['&', '\'']) {
+                    let method = head["pub fn ".len()..]
+                        .split(['<', '('])
+                        .next()
+                        .unwrap();
+                    found.push(format!("{name}::{method}"));
+                }
+            }
+        }
+        for (found, known, what) in [
+            (&found, &KNOWN[..], "returns a borrow"),
+            (&lifetimes, &KNOWN_LIFETIMES[..], "needs a lifetime"),
+        ] {
+            let new: Vec<_> = found
+                .iter()
+                .filter(|id| !known.contains(&id.as_str()))
+                .collect();
+            assert!(new.is_empty(), "{what}: {new:?}");
+            let gone: Vec<_> = known
+                .iter()
+                .filter(|id| !found.contains(&id.to_string()))
+                .collect();
+            assert!(gone.is_empty(), "fixed; remove from the list: {gone:?}");
+        }
     }
 
     /// A `Preferred:` line in a doc comment names the call to use instead;

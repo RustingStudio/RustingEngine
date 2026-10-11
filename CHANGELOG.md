@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The API audit test covers every type in the prelude: a new public method returning a borrow, or a prelude type gaining a lifetime parameter, fails the build's tests
+
 ## [2.4.1] - 2026-10-10
 
 Fixes 2.4.0 builds: without the Vulkan SDK the cloth shader failed to compile, and the crates.io package needed a newer `rusting-core` than the one published.
