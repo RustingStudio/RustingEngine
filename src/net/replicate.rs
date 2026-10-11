@@ -1031,6 +1031,123 @@ mod tests {
     }
 
     #[test]
+    fn random_edits_round_trip_through_lossy_snapshots_and_deltas() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut roll = move |n: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % n
+        };
+        let configure = || {
+            let mut replication = Replication::new();
+            replication
+                .component(TRANSFORM)
+                .component(NAME)
+                .component("rusting.health");
+            replication
+        };
+        let mut host = world();
+        let (mut snapshots, mut deltas) = (configure(), configure());
+        let (mut lossy, mut reliable) = (world(), world());
+        let mut lossy_replica = Replica::new(&snapshots);
+        let mut reliable_replica = Replica::new(&deltas);
+        let mut late: Option<Vec<u8>> = None;
+        let mut objects = Vec::new();
+        let (mut matched, mut lost) = (0, 0);
+        for tick in 0..300 {
+            for _ in 0..roll(4) {
+                match roll(6) {
+                    0 | 1 => objects.push(
+                        host.spawn((
+                            Replicated,
+                            SceneId::new(),
+                            Name(format!("n{tick}")),
+                            Transform::new([roll(100) as f32 * 0.37, 0.0, 1.5]),
+                        ))
+                        .id(),
+                    ),
+                    2 if !objects.is_empty() => {
+                        let at = roll(objects.len() as u64) as usize;
+                        host.despawn(objects.swap_remove(at));
+                    }
+                    3 if !objects.is_empty() => {
+                        let entity =
+                            objects[roll(objects.len() as u64) as usize];
+                        host.entity_mut(entity).insert(Health {
+                            value: roll(50) as i32 - 10,
+                            max: 40,
+                            team: format!("t{}", roll(3)),
+                        });
+                    }
+                    4 if !objects.is_empty() => {
+                        let entity =
+                            objects[roll(objects.len() as u64) as usize];
+                        host.entity_mut(entity).remove::<Health>();
+                    }
+                    _ if !objects.is_empty() => {
+                        let entity =
+                            objects[roll(objects.len() as u64) as usize];
+                        let mut transform =
+                            host.get_mut::<Transform>(entity).unwrap();
+                        transform.position[1] += 0.125;
+                        transform.rotation[2] -= 0.3;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Reliable deltas: every one arrives, in order.
+            if let Some(delta) = deltas.delta(&mut host).unwrap() {
+                reliable_replica
+                    .apply(&mut reliable, HOST, &delta)
+                    .unwrap()
+                    .unwrap();
+            }
+            let checksum = deltas.checksum();
+            assert_eq!(
+                reliable_replica.verify(&mut reliable, HOST, &checksum),
+                Some(Ok(Check::Match)),
+                "tick {tick}"
+            );
+
+            // Unreliable snapshots: a third are lost, some arrive a tick
+            // late, and acknowledgements go missing too.
+            snapshots.snapshot(&mut host).unwrap();
+            let message = snapshots.snapshot_for(1).unwrap();
+            if let Some(old) = late.take() {
+                lossy_replica
+                    .apply(&mut lossy, HOST, &old)
+                    .unwrap()
+                    .unwrap();
+            }
+            match roll(6) {
+                0 | 1 => lost += 1,
+                2 => late = Some(message),
+                _ => {
+                    lossy_replica
+                        .apply(&mut lossy, HOST, &message)
+                        .unwrap()
+                        .unwrap();
+                    if roll(2) == 0 {
+                        let ack = lossy_replica.ack().unwrap();
+                        snapshots.accept(1, &ack).unwrap().unwrap();
+                    }
+                    let checksum = snapshots.checksum();
+                    assert_eq!(
+                        lossy_replica.verify(&mut lossy, HOST, &checksum),
+                        Some(Ok(Check::Match)),
+                        "tick {tick}"
+                    );
+                    matched += 1;
+                }
+            }
+        }
+        assert!(matched > 100 && lost > 50, "{matched} {lost}");
+        assert!(!objects.is_empty());
+    }
+
+    #[test]
     fn objects_from_the_same_scene_update_in_place() {
         let (mut host, mut client) = (world(), world());
         let id = SceneId::new();
