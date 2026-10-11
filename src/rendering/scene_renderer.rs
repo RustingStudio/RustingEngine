@@ -694,6 +694,11 @@ struct PhysicsPushConstants {
     command_first: u32,
     field_count: u32,
     lock_mask: u32,
+    /// [`crate::runtime::GpuSimulationLod`]; 0 observers means no LOD.
+    observer_count: u32,
+    lod_full_squared: f32,
+    lod_reduced_squared: f32,
+    lod_stride: u32,
 }
 
 /// A GPU body's own collider (binding 6), in [`crate::runtime::GpuCollider`]
@@ -3464,6 +3469,15 @@ impl SceneRenderer {
         } else {
             Vec::new()
         };
+        let observers = match render_world.gpu_lod {
+            Some(_) if physics_ran => render_world
+                .gpu_observers
+                .iter()
+                .map(|&[x, y, z]| [x, y, z, 0.0])
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let lod = render_world.gpu_lod.unwrap_or_default();
         let physics_resources = if let Some(event_capacity) = event_capacity {
             let transient = &self.frame_contexts[self.frame_index].transient;
             let event_header = transient
@@ -3554,6 +3568,16 @@ impl SceneRenderer {
                     .copy_from_slice(&force_fields);
                 self.counters.upload_bytes += force_field_buffer.size();
             }
+            let observer_buffer = transient
+                .allocate_slice::<[f32; 4]>(observers.len().max(1) as u64)
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            if !observers.is_empty() {
+                observer_buffer
+                    .write()
+                    .map_err(|error| SceneRenderError(error.to_string()))?
+                    .copy_from_slice(&observers);
+                self.counters.upload_bytes += observer_buffer.size();
+            }
             let physics_set = DescriptorSet::new(
                 self.descriptor_allocator.clone(),
                 self.physics_pipeline.layout().set_layouts()[0].clone(),
@@ -3568,6 +3592,7 @@ impl SceneRenderer {
                     WriteDescriptorSet::buffer(7, colliders_buffer),
                     WriteDescriptorSet::buffer(12, collider_tree_buffer),
                     WriteDescriptorSet::buffer(14, force_field_buffer),
+                    WriteDescriptorSet::buffer(15, observer_buffer.clone()),
                 ],
                 [],
             )
@@ -3604,6 +3629,7 @@ impl SceneRenderer {
                         grid.oversized_dispatch.clone(),
                     ),
                     WriteDescriptorSet::buffer(14, grid.oversized.clone()),
+                    WriteDescriptorSet::buffer(15, observer_buffer.clone()),
                 ]
                 .into_iter()
                 .filter(|write| {
@@ -3775,6 +3801,11 @@ impl SceneRenderer {
                     collider_count: colliders.len() as u32,
                     field_count: force_fields.len() as u32,
                     lock_mask: render_world.physics_lock_mask,
+                    observer_count: observers.len() as u32,
+                    lod_full_squared: lod.full_radius * lod.full_radius,
+                    lod_reduced_squared: lod.reduced_radius
+                        * lod.reduced_radius,
+                    lod_stride: lod.reduced_stride.max(1),
                     grid_cell_size: physics.grid_cell_size,
                 };
                 let grid = self.physics_contact_grid.as_ref().unwrap();
@@ -15263,6 +15294,83 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn simulation_lod_slows_distant_gpu_bodies_and_freezes_far_ones() {
+        use crate::runtime::{
+            ExtractedGpuPhysicsBody, GpuSimulationLod, PhysicsId,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let ball = |slot: u32, x: f32| ExtractedGpuPhysicsBody {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(7000 + slot)
+                .unwrap(),
+            physics_id: PhysicsId {
+                slot,
+                generation: 0,
+            },
+            transform: crate::Transform::new([x, 0.0, 0.0]),
+            rigid_body: Default::default(),
+            solver: Default::default(),
+            collider: None,
+            custom_shader: None,
+            rules: Vec::new(),
+            sync: Default::default(),
+        };
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        // Full rate, every fourth tick, and frozen.
+        world.gpu_physics = vec![ball(0, 0.0), ball(1, 20.0), ball(2, 50.0)];
+        world.gpu_lod = Some(GpuSimulationLod {
+            full_radius: 10.0,
+            reduced_radius: 30.0,
+            reduced_stride: 4,
+        });
+        world.gpu_observers = vec![[0.0; 3]];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0, -9.81, 0.0];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        let mut states = Vec::new();
+        for tick in 1..=61 {
+            let world = &mut scene.render_world;
+            world.physics_tick = tick;
+            world.gpu_physics_read_all = tick >= 60;
+            world.gpu_physics_commands_serial += u64::from(tick >= 60);
+            let before = scene.now();
+            let _in_flight =
+                scene.render(before).then_signal_fence_and_flush().unwrap();
+            scene.renderer.block_until_physics_readbacks_complete();
+            if tick >= 60 {
+                states.push(scene.renderer.take_completed_physics_states());
+            }
+        }
+        for states in &mut states {
+            states.sort_by_key(|state| state.physics_id.slot);
+            assert_eq!(states.len(), 3);
+        }
+        let fall =
+            |tick: usize, slot: usize| states[tick][slot].linear_velocity[1];
+        // 60 ticks: the near ball took 60 steps, the mid one 15 of four
+        // ticks each (slot 1 steps when tick + 1 is a multiple of 4), so
+        // both fell for one second.
+        assert!((fall(0, 0) + 9.81).abs() < 1e-3, "{:?}", states[0]);
+        assert!((fall(0, 1) + 9.81).abs() < 1e-3, "{:?}", states[0]);
+        // Tick 61: the near ball steps, the mid one waits.
+        assert!(fall(1, 0) < fall(0, 0));
+        assert_eq!(fall(1, 1), fall(0, 1));
+        // The far ball never moved.
+        for states in &states {
+            assert_eq!(states[2].linear_velocity, [0.0; 3]);
+            assert_eq!(states[2].transform.position, [50.0, 0.0, 0.0]);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn gpu_axis_locks_keep_2d_bodies_in_their_plane() {
         use crate::runtime::{
             AxisLock, Collider, ColliderShape, CollisionLayers,
@@ -18870,5 +18978,458 @@ mod tests {
                 scene.renderer.culling_stats().submitted
             );
         }
+    }
+
+    /// The 100K pile: `PhysicsBenchmark::Debris` with 100 000 cubes on the
+    /// GPU for 5 s. The score is how far cube corners ended below the
+    /// ground; it and the mean wall time of a tick are printed.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn a_100k_pile_lands_on_the_gpu_without_sinking() {
+        use crate::runtime::{
+            Collider, CollisionLayers, ExtractedGpuPhysicsBody, GpuCollider,
+            PhysicsBenchmark, PhysicsId,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        const BODIES: u32 = 100_000;
+        const TICKS: u64 = 300;
+        let mut slab = SlabScene::new(&[]);
+        let world = &mut slab.render_world;
+        world.gpu_physics = PhysicsBenchmark::Debris
+            .bodies(BODIES as usize)
+            .into_iter()
+            .zip(0..)
+            .map(|(body, slot)| ExtractedGpuPhysicsBody {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(5000 + slot)
+                    .unwrap(),
+                physics_id: PhysicsId {
+                    slot,
+                    generation: 0,
+                },
+                transform: body.transform,
+                rigid_body: crate::runtime::RigidBody {
+                    linear_velocity: body.linear_velocity,
+                    ..Default::default()
+                },
+                solver: body.solver,
+                collider: Some((
+                    Collider::default(),
+                    CollisionLayers::default(),
+                )),
+                custom_shader: None,
+                rules: Vec::new(),
+                sync: Default::default(),
+            })
+            .collect();
+        world.gpu_colliders = vec![GpuCollider {
+            model: crate::Transform::new([0.0, -0.5, 0.0]).to_matrix(),
+            shape: [0.0, 500.0, 0.5, 500.0],
+            velocity: [0.0; 3],
+            friction: 0.5,
+            restitution: 0.0,
+            layers: CollisionLayers::default(),
+        }];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0, -9.81, 0.0];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        let start = std::time::Instant::now();
+        for tick in 1..=TICKS {
+            let world = &mut slab.render_world;
+            world.physics_tick = tick;
+            world.gpu_physics_read_all = tick == TICKS;
+            world.gpu_physics_commands_serial += u64::from(tick == TICKS);
+            let before = slab.now();
+            let _in_flight =
+                slab.render(before).then_signal_fence_and_flush().unwrap();
+            slab.renderer.block_until_physics_readbacks_complete();
+        }
+        let tick_time = start.elapsed() / TICKS as u32;
+        let states = slab.renderer.take_completed_physics_states();
+        assert_eq!(states.len(), BODIES as usize);
+        // How far each cube's lowest corner went below the ground's top.
+        let depths: Vec<f32> = states
+            .iter()
+            .map(|state| {
+                let [x, y, z] = state.transform.rotation;
+                let rotation =
+                    crate::runtime::sim_math::rotation_from_euler(x, y, z);
+                let reach = (0..3)
+                    .map(|row| 0.5 * rotation.matrix().row(1)[row].abs())
+                    .sum::<f32>();
+                reach - state.transform.position[1]
+            })
+            .collect();
+        assert!(depths.iter().all(|depth| depth.is_finite()));
+        let deepest = depths.iter().copied().fold(f32::MIN, f32::max);
+        let sunk = depths.iter().filter(|&&depth| depth > 0.05).count();
+        let diagnostics = slab.renderer.capacity_diagnostics();
+        eprintln!(
+            "100K pile: {tick_time:?} per tick, deepest {deepest} m, {sunk} \
+             deeper than 5 cm, {} grid overflow",
+            diagnostics.physics_grid_overflow
+        );
+        // Sleeping cubes at the bottom are pushed out of the ground too;
+        // before that the pile pressed 86 of them up to 0.41 m in.
+        assert!(sunk == 0 && deepest < 0.01, "{deepest} {diagnostics:?}");
+    }
+
+    /// Twenty unit cubes dropped 1 cm apart, each 2 cm off the one below in
+    /// turn along x and z, onto a GPU ground collider must settle into a
+    /// standing tower and sleep.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn a_twenty_cube_tower_stands_and_sleeps_on_the_gpu() {
+        use crate::runtime::{
+            Collider, ColliderShape, CollisionLayers, ExtractedGpuPhysicsBody,
+            GpuCollider, PhysicsId, PhysicsSolver,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        const LEVELS: u32 = 20;
+        const TICKS: u64 = 300;
+        let unit_box = Collider {
+            shape: ColliderShape::Box {
+                half_extents: [0.5; 3],
+            },
+            ..Collider::default()
+        };
+        let offset = |level: u32| {
+            let side = if level % 4 < 2 { 0.02 } else { -0.02 };
+            let (x, z) = if level.is_multiple_of(2) {
+                (side, 0.0)
+            } else {
+                (0.0, side)
+            };
+            [x, 0.5 + level as f32 * 1.01, z]
+        };
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        world.gpu_physics = (0..LEVELS)
+            .map(|slot| ExtractedGpuPhysicsBody {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(4000 + slot)
+                    .unwrap(),
+                physics_id: PhysicsId {
+                    slot,
+                    generation: 0,
+                },
+                transform: crate::Transform::new(offset(slot)),
+                rigid_body: crate::runtime::RigidBody::default(),
+                solver: PhysicsSolver::Full,
+                collider: Some((unit_box, CollisionLayers::default())),
+                custom_shader: None,
+                rules: Vec::new(),
+                sync: Default::default(),
+            })
+            .collect();
+        world.gpu_colliders = vec![GpuCollider {
+            model: crate::Transform::new([0.0, -0.5, 0.0]).to_matrix(),
+            shape: [0.0, 10.0, 0.5, 10.0],
+            velocity: [0.0; 3],
+            friction: 0.5,
+            restitution: 0.0,
+            layers: CollisionLayers::default(),
+        }];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0, -9.81, 0.0];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        for tick in 1..=TICKS {
+            let world = &mut scene.render_world;
+            world.physics_tick = tick;
+            world.gpu_physics_read_all = tick == TICKS;
+            world.gpu_physics_commands_serial += u64::from(tick == TICKS);
+            let before = scene.now();
+            let _in_flight =
+                scene.render(before).then_signal_fence_and_flush().unwrap();
+            scene.renderer.block_until_physics_readbacks_complete();
+        }
+        let mut states = scene.renderer.take_completed_physics_states();
+        states.sort_by_key(|state| state.physics_id.slot);
+        assert_eq!(states.len(), LEVELS as usize);
+        for (level, state) in states.iter().enumerate() {
+            let [x, y, z] = state.transform.position;
+            let [x0, _, z0] = offset(level as u32);
+            let height = 0.5 + level as f32;
+            assert!(
+                (x - x0).hypot(z - z0) < 0.05 && (y - height).abs() < 0.03,
+                "cube {level}: {state:?}"
+            );
+            assert!(
+                state.transform.rotation.iter().all(|a| a.abs() < 0.02),
+                "cube {level} tilts: {state:?}"
+            );
+            assert_eq!(state.linear_velocity, [0.0; 3], "cube {level} sleeps");
+        }
+    }
+
+    /// Fast GPU bodies meet a 10 cm wall collider on their way, not only
+    /// where their step ends.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn fast_gpu_bodies_do_not_tunnel_through_thin_colliders() {
+        use crate::runtime::{
+            Collider, ColliderShape, CollisionLayers, ExtractedGpuPhysicsBody,
+            GpuCollider, PhysicsId, PhysicsSolver,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A 0.1 m ball at 270 m/s moves 4.5 m a tick, a 0.1 m cube at
+        // 100 m/s 1.7 m; the wall's front face is at z = -4.95.
+        let bullet = |slot: u32, x: f32, shape: ColliderShape, speed: f32| {
+            ExtractedGpuPhysicsBody {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(4100 + slot)
+                    .unwrap(),
+                physics_id: PhysicsId {
+                    slot,
+                    generation: 0,
+                },
+                transform: crate::Transform::new([x, 0.0, 0.0]),
+                rigid_body: crate::runtime::RigidBody {
+                    linear_velocity: [0.0, 0.0, -speed],
+                    ..Default::default()
+                },
+                solver: PhysicsSolver::Full,
+                collider: Some((
+                    Collider {
+                        shape,
+                        ..Collider::default()
+                    },
+                    CollisionLayers::default(),
+                )),
+                custom_shader: None,
+                rules: Vec::new(),
+                sync: Default::default(),
+            }
+        };
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        world.gpu_physics = vec![
+            bullet(0, -1.0, ColliderShape::Sphere { radius: 0.1 }, 270.0),
+            bullet(
+                1,
+                1.0,
+                ColliderShape::Box {
+                    half_extents: [0.1; 3],
+                },
+                100.0,
+            ),
+        ];
+        world.gpu_colliders = vec![GpuCollider {
+            model: crate::Transform::new([0.0, 0.0, -5.0]).to_matrix(),
+            shape: [0.0, 4.0, 4.0, 0.05],
+            velocity: [0.0; 3],
+            friction: 0.5,
+            restitution: 0.0,
+            layers: CollisionLayers::default(),
+        }];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0; 3];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        const TICKS: u64 = 10;
+        for tick in 1..=TICKS {
+            let world = &mut scene.render_world;
+            world.physics_tick = tick;
+            world.gpu_physics_read_all = tick == TICKS;
+            world.gpu_physics_commands_serial += u64::from(tick == TICKS);
+            let before = scene.now();
+            let _in_flight =
+                scene.render(before).then_signal_fence_and_flush().unwrap();
+            scene.renderer.block_until_physics_readbacks_complete();
+        }
+        let mut states = scene.renderer.take_completed_physics_states();
+        states.sort_by_key(|state| state.physics_id.slot);
+        assert_eq!(states.len(), 2);
+        for state in &states {
+            let z = state.transform.position[2];
+            // Each stops against the wall's front face.
+            assert!((-4.86..=-4.84).contains(&z), "{state:?}");
+            assert!(state.linear_velocity[2] > -0.1, "{state:?}");
+        }
+    }
+
+    /// Each event mode fires on its own ticks for a body crossing a range.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn built_in_conditions_fire_by_mode_and_cooldown() {
+        use crate::runtime::{
+            ExtractedGpuPhysicsBody, ExtractedGpuPhysicsRule, GpuCondition,
+            GpuEventId, GpuEventMode, GpuEventPayload, GpuStateField,
+            PhysicsId,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let x = || GpuCondition::field(GpuStateField::PositionX);
+        // The bodies move 0.5 m a tick from x = 0, so x is in 0.9..=2.1 on
+        // ticks 2, 3 and 4. The range and the boolean form agree.
+        let range = || x().inside(0.9, 2.1);
+        let both = || x().greater_than(0.9).and(x().less_than(2.1));
+        let rules = [
+            (range(), GpuEventMode::OnEnter, 0.0),
+            (both(), GpuEventMode::OnExit, 0.0),
+            (range(), GpuEventMode::WhileTrue, 0.0),
+            (both(), GpuEventMode::Once, 0.0),
+            // 1.5 ticks: every other tick while true.
+            (range(), GpuEventMode::WhileTrue, 1.5 / 60.0),
+        ];
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        world.gpu_physics = rules
+            .into_iter()
+            .zip(0..)
+            .map(|((condition, mode, cooldown_seconds), slot)| {
+                ExtractedGpuPhysicsBody {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(3000 + slot)
+                        .unwrap(),
+                    physics_id: PhysicsId {
+                        slot,
+                        generation: 0,
+                    },
+                    transform: crate::Transform::new([
+                        0.0,
+                        0.0,
+                        slot as f32 * 2.0,
+                    ]),
+                    rigid_body: crate::runtime::RigidBody {
+                        linear_velocity: [30.0, 0.0, 0.0],
+                        ..Default::default()
+                    },
+                    solver: Default::default(),
+                    collider: None,
+                    custom_shader: None,
+                    rules: vec![ExtractedGpuPhysicsRule {
+                        event_id: GpuEventId(10 + slot),
+                        instructions: condition.compile().unwrap(),
+                        mode,
+                        payload: GpuEventPayload::None,
+                        cooldown_seconds,
+                    }],
+                    sync: Default::default(),
+                }
+            })
+            .collect();
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0; 3];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        let mut fired = vec![Vec::new(); 5];
+        for tick in 1..=8 {
+            scene.render_world.physics_tick = tick;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            for event in scene.renderer.take_completed_physics_events() {
+                assert_eq!(event.event_id, 10 + event.body_slot);
+                fired[event.body_slot as usize].push(event.tick_low);
+            }
+        }
+        assert_eq!(
+            fired,
+            [vec![2], vec![5], vec![2, 3, 4], vec![2], vec![2, 4]]
+        );
+    }
+
+    /// State read back while frames overlap carries the tick it was taken
+    /// on, and the counters report how many frames it waited.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn overlapped_state_readback_reports_its_tick_and_frame_age() {
+        use crate::runtime::{
+            ExtractedGpuPhysicsBody, PhysicsId, PhysicsSyncMode,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        // 6 m/s is 0.1 m a tick.
+        world.gpu_physics = vec![ExtractedGpuPhysicsBody {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(3000).unwrap(),
+            physics_id: PhysicsId {
+                slot: 0,
+                generation: 0,
+            },
+            transform: crate::Transform::default(),
+            rigid_body: crate::runtime::RigidBody {
+                linear_velocity: [6.0, 0.0, 0.0],
+                ..Default::default()
+            },
+            solver: Default::default(),
+            collider: None,
+            custom_shader: None,
+            rules: Vec::new(),
+            sync: PhysicsSyncMode::SelectedState,
+        }];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0; 3];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        // Three frames go out before any is waited on.
+        let mut in_flight = Vec::new();
+        for tick in 1..=3 {
+            scene.render_world.physics_tick = tick;
+            let before = scene.now();
+            in_flight.push(
+                scene.render(before).then_signal_fence_and_flush().unwrap(),
+            );
+        }
+        scene.renderer.block_until_physics_readbacks_complete();
+        let states = scene.renderer.take_completed_physics_states();
+        let mut ticks =
+            states.iter().map(|state| state.tick).collect::<Vec<_>>();
+        ticks.sort_unstable();
+        assert_eq!(ticks, [1, 2, 3]);
+        for state in &states {
+            let x = state.transform.position[0];
+            assert!((x - 0.1 * state.tick as f32).abs() < 1e-5, "{state:?}");
+        }
+        drop(in_flight);
+        // The next frame's counters show the oldest waited two frames
+        // past its own.
+        scene.render_world.physics_tick = 4;
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        assert_eq!(
+            scene
+                .renderer
+                .render_counters()
+                .physics_readback_latency_frames,
+            2
+        );
     }
 }

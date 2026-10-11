@@ -1048,4 +1048,198 @@ mod tests {
         let red = capture.rgba()[(4 * 8 + 4) * 4];
         assert!(red.abs_diff(100) <= 2, "{red}");
     }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_events_past_the_buffer_are_counted_and_reported_to_the_world() {
+        use crate::rendering::scene_renderer::RenderCapacityDiagnostics;
+        use crate::runtime::{
+            EventQueue, GpuConditionShader, GpuConditionShaders,
+            GpuPhysicsEvent, GpuPhysicsEventsLost, HybridPhysicsPlugin,
+            PhysicsBody, SimulationClass,
+        };
+
+        let mut app = App::new();
+        app.add_plugin(AssetPlugin).unwrap();
+        app.add_plugin(HybridPhysicsPlugin).unwrap();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        const BODIES: usize = 100;
+        for index in 0..BODIES {
+            app.spawn((
+                Transform::new([index as f32 * 2.0, 0.0, 0.0]),
+                PhysicsBody {
+                    simulation: SimulationClass::Gpu,
+                    ..PhysicsBody::default()
+                },
+            ));
+        }
+        // The shader promises one event per body and tick but sends two,
+        // so the buffer holds half of them.
+        app.world_mut().resource_mut::<GpuConditionShaders>().0 =
+            vec![GpuConditionShader {
+                events: vec!["ping".into()],
+                glsl: "void condition(inout PhysicsState body) {\n\
+                       emit_event(body, EVENTS[0], 0u, vec4(0.0));\n\
+                       emit_event(body, EVENTS[0], 0u, vec4(0.0));\n\
+                       }"
+                .into(),
+                events_per_body: 1,
+                ..Default::default()
+            }];
+        let mut capture = HeadlessCapture::new([16, 16]).unwrap();
+        let (mut delivered, mut lost) = (0, 0);
+        for _ in 0..8 {
+            capture.frame(&mut app, Duration::from_millis(16)).unwrap();
+            let world = app.world();
+            delivered += world.resource::<EventQueue<GpuPhysicsEvent>>().len();
+            lost += world
+                .resource::<EventQueue<GpuPhysicsEventsLost>>()
+                .iter()
+                .map(|event| event.count)
+                .sum::<u64>();
+        }
+        assert!(delivered >= 2 * BODIES, "{delivered}");
+        assert_eq!(lost, delivered as u64);
+        // The diagnostics keep the running total for the profiler.
+        let dropped = app
+            .world()
+            .resource::<RenderCapacityDiagnostics>()
+            .physics_events_dropped;
+        assert_eq!(dropped, lost);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_condition_events_reach_their_entity_with_id_and_payload() {
+        use crate::runtime::{
+            EventQueue, GpuCondition, GpuEventPayload, GpuEventRegistry,
+            GpuPhysicsEvent, GpuPhysicsRule, GpuPhysicsWatch,
+            HybridPhysicsPlugin, PhysicsBody, SimulationClass,
+        };
+
+        let mut app = App::new();
+        app.add_plugin(AssetPlugin).unwrap();
+        app.add_plugin(HybridPhysicsPlugin).unwrap();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        // A despawned entity and an unwatched body keep entity, slot and
+        // spawn order apart.
+        let gone = app.spawn(Transform::default());
+        app.world_mut().despawn(gone);
+        let gpu = || PhysicsBody {
+            simulation: SimulationClass::Gpu,
+            ..PhysicsBody::default()
+        };
+        app.spawn((Transform::new([-4.0, 2.0, 0.0]), gpu()));
+        let watched = |rule| GpuPhysicsWatch { rules: vec![rule] };
+        // Both fall from rest: past 3 m/s after 0.31 s, below 1 m after
+        // 0.45 s.
+        let fast = app.spawn((
+            Transform::new([3.0, 2.0, 0.0]),
+            gpu(),
+            watched(
+                GpuPhysicsRule::new(
+                    "fast",
+                    GpuCondition::velocity_y().less_than(-3.0),
+                )
+                .payload(GpuEventPayload::Velocity),
+            ),
+        ));
+        let low = app.spawn((
+            Transform::new([5.0, 2.0, -1.0]),
+            gpu(),
+            watched(
+                GpuPhysicsRule::new(
+                    "low",
+                    GpuCondition::position_y().less_than(1.0),
+                )
+                .payload(GpuEventPayload::Position),
+            ),
+        ));
+        let mut capture = HeadlessCapture::new([16, 16]).unwrap();
+        let mut events = Vec::new();
+        for _ in 0..45 {
+            capture.frame(&mut app, Duration::from_millis(16)).unwrap();
+            let queue = app.world().resource::<EventQueue<GpuPhysicsEvent>>();
+            events.extend(queue.iter().copied());
+        }
+        let registry = app.world().resource::<GpuEventRegistry>();
+        let [first, second] = events[..] else {
+            panic!("{events:?}");
+        };
+        assert_eq!(first.entity, fast);
+        assert_eq!(first.event_id, registry.id("fast").unwrap());
+        assert!(first.tick < second.tick, "{events:?}");
+        let [_, vy, _, _] = first.payload;
+        assert!((-3.2..-3.0).contains(&vy), "{first:?}");
+        assert_eq!(second.entity, low);
+        assert_eq!(second.event_id, registry.id("low").unwrap());
+        let [x, y, z, _] = second.payload;
+        assert_eq!([x, z], [5.0, -1.0]);
+        assert!((0.9..1.0).contains(&y), "{second:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_commands_for_a_despawned_body_skip_the_one_reusing_its_slot() {
+        use crate::rendering::scene_renderer::RenderCapacityDiagnostics;
+        use crate::runtime::{
+            GpuBodyCommand, GpuPhysicsCommands, GpuStateMirror,
+            HybridPhysicsPlugin, PhysicsBody, PhysicsId, PhysicsSyncMode,
+            SimulationClass,
+        };
+
+        let mut app = App::new();
+        app.add_plugin(AssetPlugin).unwrap();
+        app.add_plugin(HybridPhysicsPlugin).unwrap();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let gpu = || PhysicsBody {
+            simulation: SimulationClass::Gpu,
+            ..PhysicsBody::default()
+        };
+        let mut capture = HeadlessCapture::new([16, 16]).unwrap();
+        let mut frames = |app: &mut App, count| {
+            for _ in 0..count {
+                capture.frame(app, Duration::from_millis(16)).unwrap();
+            }
+        };
+        let old = app.spawn((Transform::new([0.0, 5.0, 0.0]), gpu()));
+        frames(&mut app, 3);
+        let old_id = *app.world().get::<PhysicsId>(old).unwrap();
+        app.world_mut().despawn(old);
+        let new = app.spawn((
+            Transform::new([7.0, 5.0, 0.0]),
+            gpu(),
+            PhysicsSyncMode::SelectedState,
+        ));
+        frames(&mut app, 2);
+        let new_id = *app.world().get::<PhysicsId>(new).unwrap();
+        assert_eq!(new_id.slot, old_id.slot);
+        assert_ne!(new_id.generation, old_id.generation);
+        let rejected = |app: &App| {
+            app.world()
+                .resource::<RenderCapacityDiagnostics>()
+                .physics_commands_rejected
+        };
+        let before = rejected(&app);
+        // Gameplay still holding the old ID pushes a big sideways shove; the
+        // new body's own command goes through.
+        let mut commands = app.world_mut().resource_mut::<GpuPhysicsCommands>();
+        commands.push(old_id, GpuBodyCommand::Impulse([50.0, 0.0, 0.0]));
+        commands.push(new_id, GpuBodyCommand::Impulse([0.0, 0.0, 2.0]));
+        frames(&mut app, 6);
+        let mirror = app.world().get::<GpuStateMirror>(new).unwrap();
+        assert_eq!(mirror.linear_velocity[0], 0.0, "{mirror:?}");
+        assert_eq!(mirror.linear_velocity[2], 2.0, "{mirror:?}");
+        assert_eq!(mirror.transform.position[0], 7.0, "{mirror:?}");
+        assert_eq!(rejected(&app) - before, 1);
+    }
 }

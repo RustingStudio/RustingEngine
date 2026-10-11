@@ -135,5 +135,9 @@ path = "src/examples/tower_collapse.rs"
 required-features = ["window"]
 
 [[example]]
+name = "physics_suite"
+path = "src/examples/physics_suite.rs"
+
+[[example]]
 name = "render_bench"
 path = "src/examples/render_bench.rs"

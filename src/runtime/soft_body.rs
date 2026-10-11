@@ -211,6 +211,16 @@ fn tet_edges(tet: [u32; 4]) -> [[u32; 2]; 6] {
 }
 
 impl SoftBody {
+    /// Shortest rest edge, 0 with no edges: the lattice spacing of a block.
+    #[must_use]
+    pub fn min_rest_length(&self) -> f32 {
+        self.rest_lengths
+            .iter()
+            .copied()
+            .reduce(f32::min)
+            .unwrap_or(0.0)
+    }
+
     /// Builds a body from particle positions and tetrahedra. Each
     /// tetrahedron's mass (`density` times its volume) is shared equally by
     /// its four particles. Inside-out tetrahedra are turned the right way.
@@ -612,10 +622,8 @@ pub(super) fn solve_holds(
         let Some(body) = bodies.get_mut(obstacle.body) else {
             continue;
         };
+        // Pinned particles push too: they move the body alone.
         for i in 0..positions.len() {
-            if inverse_masses[i] == 0.0 {
-                continue;
-            }
             let arm = vector(positions[i]) - vector(body.position);
             let local = body.rotation.inverse() * arm;
             if let Some((normal, depth)) = obstacle.shape.push_out(local) {
@@ -641,13 +649,16 @@ fn close_gap(
 ) {
     let weight = inverse_masses[particle];
     let length = gap.norm();
-    if length < 1e-9 || weight == 0.0 {
+    if length < 1e-9 {
         return;
     }
     let normal = gap / length;
     let turn = arm.cross(&normal);
     let body_weight =
         body.inverse_mass + turn.dot(&(body.inverse_inertia * turn));
+    if weight + body_weight == 0.0 {
+        return;
+    }
     let lambda = length / (weight + body_weight);
     positions[particle] =
         (vector(positions[particle]) + normal * (weight * lambda)).into();
@@ -1079,10 +1090,16 @@ pub(super) type CoupledBodies<'w, 's> = bevy_ecs::prelude::Query<
         &'static mut crate::Transform,
         Option<&'static mut super::RigidBody>,
         Option<&'static super::Collider>,
-        bevy_ecs::prelude::Has<super::PhysicsBody>,
+        Option<&'static super::PhysicsBody>,
+        Option<&'static super::PhysicsId>,
+        Option<&'static super::GpuStateMirror>,
     ),
     bevy_ecs::prelude::Without<super::Parent>,
 >;
+
+/// Fixed tick and command queue for GPU bodies that soft bodies and cloth
+/// meet, when a GPU backend takes commands.
+type GpuLink<'a> = Option<(u64, &'a mut super::GpuPhysicsCommands)>;
 
 /// A collider soft bodies and cloth keep out of, with its visit key.
 type ColliderEntry = (
@@ -1099,12 +1116,24 @@ type ColliderEntry = (
 /// box and capsule colliders, then writes back the pose and velocities of
 /// the dynamic bodies it moved. Attachments to a missing or parented body
 /// hold nothing; a volume does not collide with the bodies it is attached
-/// to.
+/// to. Particles of every [`super::FluidVolume`] (fluid or granular) near
+/// a volume join its step as small dynamic spheres (see [`grain_bodies`]),
+/// so the two push each other with their masses: a light jelly floats, a
+/// heavy one sinks, and a sheet holds water and sags under it. A dynamic
+/// GPU body takes part through its read-back state, and what the step does
+/// to its velocity goes back as an impulse (see the `hybrid_physics` module
+/// docs on latency); without fresh state it is left out.
+// ponytail: a GPU body gets no angular impulse back (the command queue has
+// none), so a deformable cannot spin it. Add a torque impulse command if
+// that matters.
 // ponytail: every collider is checked against every volume each tick (a
 // bounding-sphere test); use the broad phase if scenes get many of both.
 #[allow(clippy::type_complexity)]
 pub(super) fn step_soft_bodies(
     time: bevy_ecs::prelude::Res<super::FrameTime>,
+    mut gpu_commands: Option<
+        bevy_ecs::prelude::ResMut<super::GpuPhysicsCommands>,
+    >,
     mut volumes: bevy_ecs::prelude::Query<
         (
             bevy_ecs::prelude::Entity,
@@ -1122,13 +1151,26 @@ pub(super) fn step_soft_bodies(
         bevy_ecs::prelude::Without<super::gpu_cloth::GpuCloth>,
     >,
     mut bodies: CoupledBodies,
+    mut fluids: bevy_ecs::prelude::Query<(
+        bevy_ecs::prelude::Entity,
+        Option<&super::SpawnOrder>,
+        &mut super::FluidVolume,
+    )>,
 ) {
     let dt = time.fixed_delta.as_secs_f32();
+    let mut fluids: Vec<_> = fluids.iter_mut().collect();
+    fluids.sort_by_key(|(entity, order, _)| {
+        super::fluid::visit_key(*order, *entity)
+    });
+    let mut fluids: Vec<_> = fluids
+        .iter_mut()
+        .map(|(_, _, fluid)| &mut **fluid)
+        .collect();
     let mut colliders: Vec<ColliderEntry> = bodies
         .iter()
-        .filter_map(|(entity, order, transform, _, collider, physics)| {
+        .filter_map(|(entity, order, transform, _, collider, physics, ..)| {
             let shape = ObstacleShape::from_collider(
-                collider.filter(|_| physics)?.shape,
+                collider.filter(|_| physics.is_some())?.shape,
                 transform.scale,
             )?;
             Some((
@@ -1154,7 +1196,12 @@ pub(super) fn step_soft_bodies(
             &volume.attachments,
             particles,
             bounds,
+            &mut fluids,
+            volume.body.min_rest_length() / 2.0,
             dt,
+            gpu_commands
+                .as_deref_mut()
+                .map(|commands| (time.fixed_tick, commands)),
             |held, anchors, obstacles| {
                 volume.body.step_coupled(
                     &volume.settings,
@@ -1180,7 +1227,12 @@ pub(super) fn step_soft_bodies(
             &cloth.attachments,
             particles,
             bounds,
+            &mut fluids,
+            cloth.cloth.min_rest_length() / 2.0,
             dt,
+            gpu_commands
+                .as_deref_mut()
+                .map(|commands| (time.fixed_tick, commands)),
             |held, anchors, obstacles| {
                 cloth.cloth.step_coupled(
                     &cloth.settings,
@@ -1194,26 +1246,56 @@ pub(super) fn step_soft_bodies(
     }
 }
 
-/// Gathers the bodies one volume hangs on and the colliders near its
-/// `bounds`, runs `step` with them and writes back the dynamic ones.
+/// Gathers the bodies one volume hangs on, the colliders near its
+/// `bounds` and the grains of `fluids` near it (its particles are balls of
+/// `radius`), runs `step` with them and writes back the dynamic ones.
+#[allow(clippy::too_many_arguments)]
 fn couple(
     bodies: &mut CoupledBodies,
     colliders: &[ColliderEntry],
     attachments: &[SoftAttachment],
     particles: usize,
     (low, high): (Vector3<f32>, Vector3<f32>),
+    fluids: &mut [&mut super::FluidVolume],
+    radius: f32,
     dt: f32,
+    mut gpu: GpuLink,
     step: impl FnOnce(&mut [AnchorBody], &[Anchor], &[Obstacle]),
 ) {
+    // Entity and, for a GPU body, its id and starting velocity.
     let mut entities = Vec::new();
     let mut held = Vec::new();
+    let tick = gpu.as_ref().map(|(tick, _)| *tick);
     let mut slot = |entity| {
-        if let Some(index) = entities.iter().position(|&e| e == entity) {
+        if let Some(index) = entities.iter().position(|&(e, _)| e == entity) {
             return Some(index);
         }
-        let (_, _, transform, rigid, collider, _) = bodies.get(entity).ok()?;
-        entities.push(entity);
-        held.push(anchor_body(transform, rigid, collider, dt));
+        let (_, _, transform, rigid, collider, physics, id, mirror) =
+            bodies.get(entity).ok()?;
+        let dynamic_gpu = physics
+            .is_some_and(|p| p.simulation == super::SimulationClass::Gpu)
+            && rigid.is_some_and(|rigid| {
+                rigid.kind == super::RigidBodyKind::Dynamic
+            });
+        if !dynamic_gpu {
+            entities.push((entity, None));
+            held.push(anchor_body(transform, rigid, collider, dt));
+            return Some(held.len() - 1);
+        }
+        let (pose, velocity) = super::coupled_gpu_state(mirror?, tick?, dt)?;
+        let mirror = mirror?;
+        // `anchor_body` takes a pose at the end of the tick.
+        let mut pose = pose;
+        for axis in 0..3 {
+            pose.position[axis] += velocity[axis] * dt;
+        }
+        let rigid = super::RigidBody {
+            linear_velocity: velocity,
+            angular_velocity: mirror.angular_velocity,
+            ..*rigid?
+        };
+        entities.push((entity, Some((*id?, velocity))));
+        held.push(anchor_body(&pose, Some(&rigid), collider, dt));
         Some(held.len() - 1)
     };
     let mut anchors = Vec::new();
@@ -1247,9 +1329,38 @@ fn couple(
             obstacles.push(Obstacle { body, shape });
         }
     }
+    let rigid = held.len();
+    let grains = grain_bodies(fluids, (low, high), radius, dt);
+    for (index, &(_, _, shape, body)) in grains.iter().enumerate() {
+        held.push(body);
+        obstacles.push(Obstacle {
+            body: rigid + index,
+            shape,
+        });
+    }
     step(&mut held, &anchors, &obstacles);
-    for (entity, state) in entities.into_iter().zip(held) {
+    for (&(fluid, grain, ..), state) in grains.iter().zip(&held[rigid..]) {
+        let fluid = &mut fluids[fluid].fluid;
+        fluid.positions[grain] = state.position;
+        fluid.velocities[grain] = state.velocity;
+    }
+    held.truncate(rigid);
+    for ((entity, gpu_body), state) in entities.into_iter().zip(held) {
         if state.inverse_mass == 0.0 {
+            continue;
+        }
+        if let Some((id, start)) = gpu_body {
+            let mass = state.inverse_mass.recip();
+            if let Some((_, commands)) =
+                gpu.as_mut().filter(|_| state.velocity != start)
+            {
+                commands.push(
+                    id,
+                    super::GpuBodyCommand::Impulse(std::array::from_fn(
+                        |axis| mass * (state.velocity[axis] - start[axis]),
+                    )),
+                );
+            }
             continue;
         }
         let Ok((_, _, mut transform, Some(mut rigid), ..)) =
@@ -1263,6 +1374,64 @@ fn couple(
         rigid.linear_velocity = state.velocity;
         rigid.angular_velocity = state.angular_velocity;
     }
+}
+
+/// Every particle of `fluids` that can reach the box `bounds` this tick,
+/// as `(fluid index, particle index, shape, body)`: a dynamic sphere of
+/// the particle's mass, `radius` plus half the fluid spacing across (so a
+/// soft-body particle, a point in the step, stops at the sum of both
+/// radii), with no spin. The fluid has already stepped this tick, so like a
+/// rigid body the grain starts where it was a tick ago and moves through
+/// the tick again. Fluids and particles go in index order.
+// ponytail: grains finer than about 3/4 of a deformable's spacing can slip
+// between its particles, and a grain over about 30 times the mass of the
+// particles it rests on overpowers their constraints and tears through
+// (1 kg water grains need a sheet of 3 kg/m² or more at 0.1 m spacing).
+// Push grains out of tetrahedra and triangles, or scale contact masses,
+// if fine or heavy fluids meet coarse or light deformables.
+fn grain_bodies(
+    fluids: &[&mut super::FluidVolume],
+    (low, high): (Vector3<f32>, Vector3<f32>),
+    radius: f32,
+    dt: f32,
+) -> Vec<(usize, usize, ObstacleShape, AnchorBody)> {
+    let mut grains = Vec::new();
+    for (index, volume) in fluids.iter().enumerate() {
+        let settings = &volume.settings;
+        if settings.particle_mass <= 0.0 {
+            continue;
+        }
+        let reach = radius + settings.spacing / 2.0;
+        let fluid = &volume.fluid;
+        for (grain, (&position, &velocity)) in
+            fluid.positions.iter().zip(&fluid.velocities).enumerate()
+        {
+            let velocity = vector(velocity);
+            let start = vector(position) - velocity * dt;
+            // Distance from the box to the start and to the end of the
+            // grain's path through the tick.
+            let gap = |p: Vector3<f32>| {
+                (low - p).sup(&(p - high)).sup(&Vector3::zeros()).norm()
+            };
+            if gap(start).min(gap(vector(position))) > reach {
+                continue;
+            }
+            grains.push((
+                index,
+                grain,
+                ObstacleShape::Sphere(reach),
+                AnchorBody {
+                    position: start.into(),
+                    rotation: nalgebra::Rotation3::identity(),
+                    velocity: velocity.into(),
+                    angular_velocity: [0.0; 3],
+                    inverse_mass: 1.0 / settings.particle_mass,
+                    inverse_inertia: nalgebra::Matrix3::zeros(),
+                },
+            ));
+        }
+    }
+    grains
 }
 
 /// The smallest box around some points.
@@ -1591,5 +1760,346 @@ mod tests {
                 assert!(vector(vertex.normal).dot(&outward) > 0.0);
             }
         }
+    }
+
+    use crate::runtime::{
+        App, Cloth, ClothSettings, ClothVolume, Fluid, FluidSettings,
+        FluidSolver, FluidVolume,
+    };
+
+    fn run_app(app: &mut App, ticks: u32) {
+        for _ in 0..ticks {
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+        }
+    }
+
+    /// Lowest point of a 0.3 m jelly of `density` dropped into a 0.4 m
+    /// deep pool of water or sand after 4 s.
+    fn jelly_rest(density: f32, solver: FluidSolver) -> f32 {
+        let mut app = App::new();
+        let settings = FluidSettings {
+            bounds: ([-0.4, 0.0, -0.4], [0.4, 2.0, 0.4]),
+            particle_mass: 1.0,
+            solver,
+            ..FluidSettings::default()
+        };
+        let fluid = Fluid::block([-0.35, 0.0, -0.35], [8, 4, 8], 0.1);
+        app.world_mut().spawn(FluidVolume::new(settings, fluid));
+        let body =
+            SoftBody::block([-0.15, 0.6, -0.15], [3; 3], 0.1, density).unwrap();
+        let jelly = app
+            .world_mut()
+            .spawn(SoftBodyVolume::new(SoftBodySettings::default(), body))
+            .id();
+        run_app(&mut app, 240);
+        let volume = app.world().get::<SoftBodyVolume>(jelly).unwrap();
+        volume
+            .body
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    #[test]
+    fn a_light_jelly_floats_on_water_and_sand_and_a_heavy_one_sinks() {
+        for solver in [FluidSolver::Particles, FluidSolver::Granular] {
+            let light = jelly_rest(300.0, solver);
+            let heavy = jelly_rest(5000.0, solver);
+            assert!(light > 0.12, "{solver:?}: light jelly bottom at {light}");
+            assert!(
+                light > heavy + 0.08,
+                "{solver:?}: light {light} vs heavy {heavy}"
+            );
+        }
+        assert!(jelly_rest(5000.0, FluidSolver::Particles) < 0.1);
+    }
+
+    /// One tick of a 1 kg GPU ball falling at 2 m/s onto a pinned sheet,
+    /// with read-back state `age` ticks old: the impulses sent back, the
+    /// sheet's middle height, and whether the ball's authored pose stayed.
+    fn gpu_ball_on_sheet(age: u64) -> (Vec<[f32; 3]>, f32, bool) {
+        use crate::runtime::{
+            Collider, ColliderShape, FrameTime, GpuBodyCommand,
+            GpuPhysicsCommands, GpuStateMirror, PhysicsBody, PhysicsId,
+            RigidBody, SimulationClass,
+        };
+        let mut app = App::new();
+        app.world_mut()
+            .insert_resource(GpuPhysicsCommands::default());
+        app.world_mut().resource_mut::<FrameTime>().fixed_tick = 20;
+        let mut cloth = Cloth::grid(
+            [-0.5, 1.0, -0.5],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [10, 10],
+            0.1,
+            10.0,
+        )
+        .unwrap();
+        for (index, mass) in cloth.inverse_masses.iter_mut().enumerate() {
+            let (x, z) = (index % 11, index / 11);
+            if x == 0 || x == 10 || z == 0 || z == 10 {
+                *mass = 0.0;
+            }
+        }
+        let sheet = app
+            .world_mut()
+            .spawn(ClothVolume::new(ClothSettings::default(), cloth))
+            .id();
+        // Writing a GPU body's `Transform` would restart it from there.
+        let authored = crate::Transform {
+            position: [0.0, 1.14, 0.0],
+            ..crate::Transform::default()
+        };
+        let id = PhysicsId {
+            slot: 5,
+            generation: 1,
+        };
+        let ball = app
+            .world_mut()
+            .spawn((
+                authored,
+                RigidBody {
+                    mass: 1.0,
+                    ..RigidBody::default()
+                },
+                Collider {
+                    shape: ColliderShape::Sphere { radius: 0.15 },
+                    ..Collider::default()
+                },
+                PhysicsBody {
+                    simulation: SimulationClass::Gpu,
+                    ..PhysicsBody::default()
+                },
+                id,
+                GpuStateMirror {
+                    tick: 20 - age,
+                    transform: authored,
+                    linear_velocity: [0.0, -2.0, 0.0],
+                    angular_velocity: [0.0; 3],
+                    custom_values: None,
+                },
+            ))
+            .id();
+        run_app(&mut app, 1);
+        let impulses = app
+            .world()
+            .resource::<GpuPhysicsCommands>()
+            .commands
+            .iter()
+            .map(|&(body, command)| match (body == id, command) {
+                (true, GpuBodyCommand::Impulse(impulse)) => impulse,
+                other => panic!("unexpected command {other:?}"),
+            })
+            .collect();
+        let middle = app
+            .world()
+            .get::<ClothVolume>(sheet)
+            .unwrap()
+            .cloth
+            .positions[5 * 11 + 5][1];
+        let kept =
+            *app.world().get::<crate::Transform>(ball).unwrap() == authored;
+        (impulses, middle, kept)
+    }
+
+    #[test]
+    fn a_gpu_ball_and_a_sheet_push_each_other_through_read_back_state() {
+        let (fresh, pressed, kept) = gpu_ball_on_sheet(0);
+        assert!(kept, "the GPU body's authored pose was overwritten");
+        assert_eq!(fresh.len(), 1);
+        assert!(fresh[0][1] > 0.0, "{fresh:?}");
+        let stale = crate::runtime::MAX_COUPLED_STATE_AGE + 1;
+        let (none, untouched, kept) = gpu_ball_on_sheet(stale);
+        assert!(kept && none.is_empty());
+        assert!(pressed < untouched - 0.005, "{pressed} vs {untouched}");
+    }
+
+    #[test]
+    fn water_poured_on_a_pinned_sheet_stays_on_it_and_sags_it() {
+        let mut app = App::new();
+        let settings = FluidSettings {
+            bounds: ([-0.5, 0.0, -0.5], [0.5, 3.0, 0.5]),
+            particle_mass: 1.0,
+            ..FluidSettings::default()
+        };
+        let fluid = Fluid::block([-0.15, 1.3, -0.15], [4, 3, 4], 0.1);
+        let count = fluid.positions.len();
+        app.world_mut().spawn(FluidVolume::new(settings, fluid));
+        let mut cloth = Cloth::grid(
+            [-0.5, 1.0, -0.5],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [10, 10],
+            0.1,
+            10.0,
+        )
+        .unwrap();
+        for (index, mass) in cloth.inverse_masses.iter_mut().enumerate() {
+            let (x, z) = (index % 11, index / 11);
+            if x == 0 || x == 10 || z == 0 || z == 10 {
+                *mass = 0.0;
+            }
+        }
+        let sheet = app
+            .world_mut()
+            .spawn(ClothVolume::new(ClothSettings::default(), cloth))
+            .id();
+        run_app(&mut app, 180);
+        let fluid = &app
+            .world_mut()
+            .query::<&FluidVolume>()
+            .single(app.world())
+            .unwrap()
+            .fluid;
+        let lowest = fluid.positions.iter().map(|p| p[1]).fold(9.0, f32::min);
+        assert_eq!(fluid.positions.len(), count);
+        let cloth = &app.world().get::<ClothVolume>(sheet).unwrap().cloth;
+        let middle = cloth.positions[5 * 11 + 5][1];
+        assert!(lowest > 0.5, "water fell through to {lowest}");
+        // 48 kg of water on a 10 kg sheet pulls its middle down from the
+        // 0.97 it hangs at alone.
+        assert!(middle < 0.95, "sheet middle at {middle}");
+        assert!(middle > 0.3, "sheet middle at {middle}");
+    }
+
+    /// Water, sand, a jelly, a pinned sheet with a ball on it and a hinged
+    /// arm with a ball paddle, all in one 1.2 m tank. Returns every particle
+    /// and body position after `ticks` (over 60), the paddle's highest point
+    /// after its first second, and the jelly's lowest point.
+    fn mixed_scene(water: bool, ticks: u32) -> (Vec<[f32; 3]>, f32, f32) {
+        use crate::runtime::{
+            Articulation, Collider, ColliderShape, Joint, JointKind,
+            PhysicsBody, RigidBody, RigidBodyKind,
+        };
+        use crate::Transform;
+        let mut app = App::new();
+        let world = app.world_mut();
+        let tank = ([-0.6, 0.0, -0.6], [0.6, 3.0, 0.6]);
+        if water {
+            let settings = FluidSettings {
+                bounds: tank,
+                ..FluidSettings::default()
+            };
+            let pool = Fluid::block([-0.55, 0.0, -0.55], [12, 3, 12], 0.1);
+            world.spawn(FluidVolume::new(settings, pool));
+        }
+        let settings = FluidSettings {
+            bounds: tank,
+            particle_mass: 3.0,
+            solver: FluidSolver::Granular,
+            ..FluidSettings::default()
+        };
+        let sand = Fluid::block([-0.5, 0.6, 0.2], [3, 2, 3], 0.1);
+        world.spawn(FluidVolume::new(settings, sand));
+        let body =
+            SoftBody::block([-0.1, 0.6, -0.5], [3; 3], 0.1, 300.0).unwrap();
+        let jelly = world
+            .spawn(SoftBodyVolume::new(SoftBodySettings::default(), body))
+            .id();
+        let mut cloth = Cloth::grid(
+            [0.1, 1.0, 0.1],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [4, 4],
+            0.1,
+            10.0,
+        )
+        .unwrap();
+        for (index, mass) in cloth.inverse_masses.iter_mut().enumerate() {
+            if index % 5 == 0 || index % 5 == 4 {
+                *mass = 0.0;
+            }
+        }
+        world.spawn(ClothVolume::new(ClothSettings::default(), cloth));
+        let body = |world: &mut bevy_ecs::world::World, at, radius, kind| {
+            world
+                .spawn((
+                    Transform::new(at),
+                    PhysicsBody::default(),
+                    RigidBody {
+                        kind,
+                        ..RigidBody::default()
+                    },
+                    Collider {
+                        shape: ColliderShape::Sphere { radius },
+                        ..Collider::default()
+                    },
+                ))
+                .id()
+        };
+        // The arm swings down from level through the pool.
+        let base = body(world, [0.0, 0.55, -0.3], 0.05, RigidBodyKind::Fixed);
+        world.entity_mut(base).insert(Articulation {});
+        let paddle =
+            body(world, [0.45, 0.55, -0.3], 0.12, RigidBodyKind::Dynamic);
+        world.entity_mut(paddle).insert(Joint {
+            frame: [0.0, -std::f32::consts::FRAC_PI_2, 0.0],
+            target_frame: [0.0, -std::f32::consts::FRAC_PI_2, 0.0],
+            ..Joint::new(
+                JointKind::Hinge {
+                    limit: None,
+                    spring: None,
+                    motor: None,
+                },
+                base,
+                [-0.45, 0.0, 0.0],
+                [0.0; 3],
+            )
+        });
+        // A ball dropped on the sheet.
+        let ball = body(world, [0.3, 1.6, 0.3], 0.08, RigidBodyKind::Dynamic);
+        // How high the paddle swings back after its first pass.
+        run_app(&mut app, 60);
+        let mut swing = f32::MIN;
+        for _ in 60..ticks {
+            run_app(&mut app, 1);
+            swing = swing
+                .max(app.world().get::<Transform>(paddle).unwrap().position[1]);
+        }
+        let world = app.world_mut();
+        let mut points = Vec::new();
+        for volume in world.query::<&FluidVolume>().iter(world) {
+            points.extend(&volume.fluid.positions);
+        }
+        for volume in world.query::<&SoftBodyVolume>().iter(world) {
+            points.extend(&volume.body.positions);
+        }
+        for volume in world.query::<&ClothVolume>().iter(world) {
+            points.extend(&volume.cloth.positions);
+        }
+        for entity in [paddle, ball] {
+            points.push(world.get::<Transform>(entity).unwrap().position);
+        }
+        let bottom = world
+            .get::<SoftBodyVolume>(jelly)
+            .unwrap()
+            .body
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min);
+        (points, swing, bottom)
+    }
+
+    #[test]
+    fn every_kind_of_body_shares_one_tank_and_runs_the_same_twice() {
+        let (points, swing, bottom) = mixed_scene(true, 240);
+        let (_, dry_swing, dry_bottom) = mixed_scene(false, 240);
+        assert!(points.iter().flatten().all(|x| x.is_finite()));
+        // The water and the floating jelly stop the arm; dry, it swings on.
+        assert!(swing < 0.4, "wet paddle swung to {swing}");
+        assert!(dry_swing > 0.45, "dry paddle swung to {dry_swing}");
+        assert!(bottom > 0.04, "jelly bottom at {bottom}");
+        assert!(dry_bottom < 0.01, "dry jelly bottom at {dry_bottom}");
+        // The ball rests on the sheet.
+        let ball = points[points.len() - 1];
+        assert!(ball[1] > 0.9, "ball at {ball:?}");
+        assert!(
+            points == mixed_scene(true, 240).0,
+            "the scene ran differently"
+        );
     }
 }

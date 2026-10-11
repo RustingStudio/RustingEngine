@@ -2918,6 +2918,12 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
     } else {
         RenderDebugOverlay::default()
     };
+    if let (Some(settings), Some(physics)) = (
+        world.get_resource::<crate::runtime::PhysicsDebugDraw>(),
+        world.get_resource::<crate::runtime::PhysicsWorld>(),
+    ) {
+        physics.debug_draw(world, *settings, &mut overlay);
+    }
     if let Some((map, rects)) = tile_preview {
         if let (Some(tiles), Some(transform)) = (
             world.get::<crate::runtime::TileMap>(map),

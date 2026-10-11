@@ -1,0 +1,154 @@
+#version 450
+// Shared broad phase over axis-aligned boxes in one workgroup;
+// src/runtime/broad_phase.rs packs the words and holds the Rust reference
+// (`pairs_on_cpu`); change both.
+//
+// Header words: 0 proxy count, 1 bucket count (a power of two), 2 row
+// capacity, 3 inverse cell size; offsets: 4 proxies, 5 bucket starts,
+// 6 bucket cursors, 7 bucket items, 8 row counts, 9 rows.
+// Proxy: min xyz, max xyz, layer, mask.
+// Row i: partners j > i of proxy i, ascending, at most capacity; its row
+// count is the true number, so a count above capacity means overflow.
+//
+// Atomics decide only the order buckets fill in. Each proxy enters a
+// bucket once, a pair is taken only in the cell holding the low corner of
+// the boxes' overlap, and rows are kept sorted, so the output is the same
+// whatever the scheduling.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0) coherent buffer Data { uint words[]; };
+
+const uint LANES = 256u;
+const uint PROXY_WORDS = 8u;
+
+float word(uint index) { return uintBitsToFloat(words[index]); }
+vec3 read3(uint index) { return vec3(word(index), word(index + 1u), word(index + 2u)); }
+void sync() {
+    memoryBarrierBuffer();
+    barrier();
+}
+
+ivec3 cell_of(vec3 p, float inverse) {
+    precise vec3 scaled = p * inverse;
+    return ivec3(floor(scaled));
+}
+
+uint bucket_of(ivec3 cell, uint buckets) {
+    uvec3 u = uvec3(cell);
+    return (u.x * 73856093u ^ u.y * 19349663u ^ u.z * 83492791u) & (buckets - 1u);
+}
+
+// True when no cell before `cell` in lo..hi (x fastest) maps to `bucket`.
+bool first_in_bucket(ivec3 lo, ivec3 hi, ivec3 cell, uint bucket, uint buckets) {
+    for (int z = lo.z; z <= hi.z; z++) {
+        for (int y = lo.y; y <= hi.y; y++) {
+            for (int x = lo.x; x <= hi.x; x++) {
+                ivec3 c = ivec3(x, y, z);
+                if (c == cell) return true;
+                if (bucket_of(c, buckets) == bucket) return false;
+            }
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint count = words[0];
+    uint buckets = words[1];
+    uint capacity = words[2];
+    float inverse = word(3u);
+    uint proxies = words[4];
+    uint starts = words[5];
+    uint cursors = words[6];
+    uint items = words[7];
+    uint counts = words[8];
+    uint rows = words[9];
+
+    // Count each proxy into its buckets (cursors hold counts for now).
+    for (uint i = lane; i < count; i += LANES) {
+        uint p = proxies + i * PROXY_WORDS;
+        ivec3 lo = cell_of(read3(p), inverse);
+        ivec3 hi = cell_of(read3(p + 3u), inverse);
+        for (int z = lo.z; z <= hi.z; z++) {
+            for (int y = lo.y; y <= hi.y; y++) {
+                for (int x = lo.x; x <= hi.x; x++) {
+                    ivec3 c = ivec3(x, y, z);
+                    uint b = bucket_of(c, buckets);
+                    if (first_in_bucket(lo, hi, c, b, buckets)) atomicAdd(words[cursors + b], 1u);
+                }
+            }
+        }
+    }
+    sync();
+    // ponytail: one lane scans; a workgroup scan if bucket counts grow.
+    if (lane == 0u) {
+        uint sum = 0u;
+        for (uint b = 0u; b < buckets; b++) {
+            uint n = words[cursors + b];
+            words[starts + b] = sum;
+            words[cursors + b] = sum;
+            sum += n;
+        }
+    }
+    sync();
+    // Fill: afterwards a bucket's items run from its start to its cursor.
+    for (uint i = lane; i < count; i += LANES) {
+        uint p = proxies + i * PROXY_WORDS;
+        ivec3 lo = cell_of(read3(p), inverse);
+        ivec3 hi = cell_of(read3(p + 3u), inverse);
+        for (int z = lo.z; z <= hi.z; z++) {
+            for (int y = lo.y; y <= hi.y; y++) {
+                for (int x = lo.x; x <= hi.x; x++) {
+                    ivec3 c = ivec3(x, y, z);
+                    uint b = bucket_of(c, buckets);
+                    if (first_in_bucket(lo, hi, c, b, buckets)) {
+                        uint at = atomicAdd(words[cursors + b], 1u);
+                        words[items + at] = i;
+                    }
+                }
+            }
+        }
+    }
+    sync();
+    // Rows: each proxy gathers its higher-index partners.
+    for (uint i = lane; i < count; i += LANES) {
+        uint p = proxies + i * PROXY_WORDS;
+        vec3 a_min = read3(p);
+        vec3 a_max = read3(p + 3u);
+        uint a_layer = words[p + 6u];
+        uint a_mask = words[p + 7u];
+        ivec3 lo = cell_of(a_min, inverse);
+        ivec3 hi = cell_of(a_max, inverse);
+        uint row = rows + i * capacity;
+        uint found = 0u;
+        for (int z = lo.z; z <= hi.z; z++) {
+            for (int y = lo.y; y <= hi.y; y++) {
+                for (int x = lo.x; x <= hi.x; x++) {
+                    ivec3 c = ivec3(x, y, z);
+                    uint b = bucket_of(c, buckets);
+                    for (uint k = words[starts + b]; k < words[cursors + b]; k++) {
+                        uint j = words[items + k];
+                        if (j <= i) continue;
+                        uint q = proxies + j * PROXY_WORDS;
+                        vec3 b_min = read3(q);
+                        vec3 b_max = read3(q + 3u);
+                        if (!all(lessThanEqual(a_min, b_max)) || !all(lessThanEqual(b_min, a_max))) continue;
+                        if ((a_layer & words[q + 7u]) == 0u || (words[q + 6u] & a_mask) == 0u) continue;
+                        if (cell_of(max(a_min, b_min), inverse) != c) continue;
+                        uint kept = min(found, capacity);
+                        found++;
+                        if (kept == capacity && (capacity == 0u || j > words[row + capacity - 1u])) continue;
+                        // Insert j in order, dropping the largest when full.
+                        uint m = kept == capacity ? capacity - 1u : kept;
+                        while (m > 0u && words[row + m - 1u] > j) {
+                            words[row + m] = words[row + m - 1u];
+                            m--;
+                        }
+                        words[row + m] = j;
+                    }
+                }
+            }
+        }
+        words[counts + i] = found;
+    }
+}

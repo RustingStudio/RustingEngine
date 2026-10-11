@@ -151,6 +151,9 @@ void collide_with_colliders(inout PhysicsState body, BodyShape own) {
     }
 }
 
+// Most pieces one tick's motion is split into against colliders.
+const uint MAX_SWEEP_PIECES = 64u;
+
 // Built-in sleep; see the end of main.
 const float REST_SPEED = 0.05;
 const float REST_TICKS = 20.0;
@@ -290,7 +293,13 @@ void main() {
     vec3 settled_position = body.model[3].xyz;
     float settled_speed = sim_length(body.velocity.xyz);
     float settled_spin = sim_length(body.angular_velocity.xyz);
-    if (is_dynamic(body) && from_solver.y > 0.5) {
+    // `GpuSimulationLod`: a reduced body takes one longer step every
+    // `lod_stride` ticks; a waiting or frozen one keeps its state.
+    // ponytail: a body that changes rate mid-stride gains or loses up to a
+    // stride of time; carry a per-body last-step tick if that shows.
+    uint lod = lod_steps(body.model[3].xyz, body.metadata.x);
+    float dt = pc.dt * float(lod);
+    if (is_dynamic(body) && from_solver.y > 0.5 && lod > 0u) {
         precise vec3 velocity = body.velocity.xyz;
         if (from_solver.z < 0.5) {
             // Space mode attracts bodies toward the origin. The force is
@@ -302,28 +311,45 @@ void main() {
                 float safe_distance_squared = max(distance_squared, 4.0);
                 velocity += direction
                     * sim_div(500.0, safe_distance_squared)
-                    * body.properties.y * pc.dt;
+                    * body.properties.y * dt;
             }
         } else {
             velocity += vec3(pc.gravity_x, pc.gravity_y, pc.gravity_z)
-                * body.properties.y * pc.dt;
+                * body.properties.y * dt;
         }
         if (pc.field_count > 0u) {
             vec4 own_shape = body_shapes.data[body_index].shape;
             float reach = own_shape.x < 2.5 ? bounding_radius(own_shape) : 0.0;
-            velocity += field_push(body.model[3].xyz, reach) * pc.dt;
+            velocity += field_push(body.model[3].xyz, reach) * dt;
         }
         velocity *= axis_keep(0u);
-        precise vec3 position = body.model[3].xyz + velocity * pc.dt;
         body.velocity.xyz = velocity;
-        body.model[3].xyz = position;
         BodyShape own = body_shapes.data[body_index];
         // Solver 2 is NoCollision.
-        if (own.shape.x < 2.5 && from_solver.x > 0.5) {
-            collide_with_colliders(body, own);
+        bool collides = own.shape.x < 2.5 && from_solver.x > 0.5;
+        // Sweep: a step longer than the body's inner radius is taken in
+        // pieces no longer than it, meeting the colliders after each, so a
+        // fast body cannot pass through a thin collider. Each piece moves
+        // at the velocity the last one left.
+        // ponytail: at most MAX_SWEEP_PIECES pieces, so past about 64 inner
+        // radii per tick a body can still tunnel; bodies against each other
+        // are not swept.
+        uint pieces = 1u;
+        if (collides) {
+            float travel = sim_length(velocity) * dt;
+            float inner = inner_radius(own.shape);
+            if (inner > 0.0 && travel > inner) {
+                pieces = min(uint(ceil(sim_div(travel, inner))), MAX_SWEEP_PIECES);
+            }
+        }
+        float piece_dt = sim_div(dt, float(pieces));
+        for (uint piece = 0u; piece < pieces; piece++) {
+            precise vec3 position = body.model[3].xyz + body.velocity.xyz * piece_dt;
+            body.model[3].xyz = position;
+            if (collides) collide_with_colliders(body, own);
         }
         if (body.velocity.w > 0.5) {
-            precise vec3 spin = body.angular_velocity.xyz * max(1.0 - CONTACT_SPIN_DAMPING * pc.dt, 0.0);
+            precise vec3 spin = body.angular_velocity.xyz * max(1.0 - CONTACT_SPIN_DAMPING * dt, 0.0);
             body.angular_velocity.xyz = spin;
         }
         body.angular_velocity.xyz *= axis_keep(3u);
@@ -334,7 +360,7 @@ void main() {
         // the ticks. A push from a contact or collider, a command, or
         // losing all contact wakes it.
         precise float speed_now = sim_length(body.velocity.xyz);
-        precise float gravity_step = sim_length(vec3(pc.gravity_x, pc.gravity_y, pc.gravity_z)) * abs(body.properties.y) * pc.dt;
+        precise float gravity_step = sim_length(vec3(pc.gravity_x, pc.gravity_y, pc.gravity_z)) * abs(body.properties.y) * dt;
         bool resting = body.velocity.w > 0.5
             && settled_speed < REST_SPEED
             && settled_spin < REST_SPEED
@@ -345,6 +371,13 @@ void main() {
             body.model[3].xyz = settled_position;
             body.velocity.xyz = vec3(0.0);
             body.angular_velocity.xyz = vec3(0.0);
+            // The settled position is from before the colliders: without
+            // pushing it out again, the weight of a pile presses its
+            // sleeping bottom layer into the ground a little every tick.
+            if (own.shape.x < 2.5 && from_solver.x > 0.5) {
+                collide_with_colliders(body, own);
+                body.velocity.xyz = vec3(0.0);
+            }
         }
     }
     bodies.data[body_index] = body;

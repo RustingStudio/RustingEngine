@@ -12,6 +12,16 @@
 //! [`GpuStateMirror::tick`] record that tick. Gameplay that needs an answer
 //! in the same tick (a jump check, a hit-scan) must use
 //! [`SimulationClass::Cpu`](super::SimulationClass) bodies instead.
+//!
+//! A dynamic GPU body that reads its state back couples with CPU
+//! simulation through that state. CPU solvers meet it at its
+//! [`GpuStateMirror`] pose carried forward by its velocity over the state's
+//! age, up to [`MAX_COUPLED_STATE_AGE`] ticks; older state is not coupled.
+//! Fluids, granular media, water, soft bodies and cloth send what they do
+//! to it back as a [`GpuBodyCommand::Impulse`] that applies before the next
+//! GPU tick, so the body feels them one tick later. CPU rigid bodies meet it
+//! as a kinematic body, and the GPU meets them as colliders from the last
+//! CPU step, so each side answers the other's last known state.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -21,7 +31,8 @@ use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::lifecycle::RemovedComponents;
 use bevy_ecs::prelude::{
-    Changed, Commands, IntoScheduleConfigs, Query, Ref, ResMut, Resource, World,
+    Changed, Commands, Has, IntoScheduleConfigs, Query, Ref, Res, ResMut,
+    Resource, With, Without, World,
 };
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -1020,6 +1031,187 @@ impl GpuStateMirror {
     }
 }
 
+/// Oldest read-back GPU state, in fixed ticks, that CPU fluids and water
+/// still couple with. Readback normally runs one to three frames behind; a
+/// body whose state is older (paused readback, a stalled GPU) is left out
+/// rather than pushed from a pose that may be far from where it is.
+pub const MAX_COUPLED_STATE_AGE: u64 = 8;
+
+/// A point that keeps GPU bodies near it simulated at full rate under
+/// [`GpuSimulationLod`], at its world position. Put it on
+/// players or other gameplay points, not on the render camera, so every
+/// peer steps the same bodies at the same rate.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct SimulationObserver;
+
+/// Level of detail for GPU simulation. With this resource and at least one
+/// [`SimulationObserver`], a dynamic GPU body steps every tick within
+/// `full_radius` of its nearest observer, takes one step of
+/// `reduced_stride` ticks once every `reduced_stride` ticks out to
+/// `reduced_radius`, and freezes beyond that, keeping its state until an
+/// observer comes back in range. A body that does not step on a tick holds
+/// still in contacts like a fixed one. Without the resource or without
+/// observers every body steps every tick.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct GpuSimulationLod {
+    /// Meters.
+    pub full_radius: f32,
+    /// Meters; `f32::INFINITY` never freezes.
+    pub reduced_radius: f32,
+    /// Ticks per reduced step; below 1 counts as 1.
+    pub reduced_stride: u32,
+}
+
+impl Default for GpuSimulationLod {
+    fn default() -> Self {
+        Self {
+            full_radius: 64.0,
+            reduced_radius: 256.0,
+            reduced_stride: 4,
+        }
+    }
+}
+
+/// Device budget for GPU bodies. With this resource and at least one
+/// [`SimulationObserver`], at most `max_resident` GPU bodies (each a
+/// [`GpuBodyState`] in device memory) stay on the GPU: the nearest to an
+/// observer, ties broken by [`PhysicsId::slot`]. The rest stream out: each
+/// takes its last read-back state into its `Transform` and `RigidBody`,
+/// gains [`StreamedOut`] and leaves the GPU; it streams back in from that
+/// state when it ranks inside the budget again. A body without read-back
+/// state (`PhysicsSyncMode::None`) comes back from wherever its `Transform`
+/// last was. Decided each fixed tick, from observer world positions as of
+/// the last frame.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuStreamingBudget {
+    pub max_resident: usize,
+}
+
+/// A GPU body that [`GpuStreamingBudget`] moved out of device memory. It is
+/// not simulated and is drawn at its `Transform`.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamedOut;
+
+/// Applies [`GpuStreamingBudget`].
+/// ponytail: no hysteresis, so two bodies trading places at the budget's edge
+/// stream every tick; add a margin if that shows. The saved state is the
+/// last read-back one, up to a few ticks old (exact for a body frozen by
+/// [`GpuSimulationLod`]).
+#[allow(clippy::type_complexity)]
+fn stream_gpu_bodies(
+    mut commands: Commands,
+    budget: Option<Res<GpuStreamingBudget>>,
+    observers: Query<
+        (&Transform, Option<&super::GlobalTransform>),
+        With<SimulationObserver>,
+    >,
+    mut bodies: Query<
+        (
+            Entity,
+            &PhysicsId,
+            &super::PhysicsBody,
+            &mut Transform,
+            Option<&mut super::RigidBody>,
+            Option<&GpuStateMirror>,
+            Has<StreamedOut>,
+        ),
+        Without<SimulationObserver>,
+    >,
+) {
+    let observers: Vec<[f32; 3]> = observers
+        .iter()
+        .map(|(transform, global)| {
+            global.map_or(transform.position, |global| {
+                let [x, y, z, _] = global.matrix[3];
+                [x, y, z]
+            })
+        })
+        .collect();
+    let keep = match budget {
+        Some(budget) if !observers.is_empty() => budget.max_resident,
+        _ => usize::MAX,
+    };
+    let mut ranked: Vec<_> = bodies
+        .iter()
+        .filter(|(_, _, body, ..)| body.uses_gpu())
+        .map(|(entity, id, _, transform, _, mirror, out)| {
+            let at = match mirror {
+                Some(mirror) if !out => mirror.transform.position,
+                _ => transform.position,
+            };
+            let nearest = observers
+                .iter()
+                .map(|o| (0..3).map(|i| (at[i] - o[i]).powi(2)).sum::<f32>())
+                .fold(f32::INFINITY, f32::min);
+            (nearest, id.slot, entity)
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    for (rank, (_, _, entity)) in ranked.into_iter().enumerate() {
+        let Ok((_, _, _, mut transform, rigid, mirror, out)) =
+            bodies.get_mut(entity)
+        else {
+            continue;
+        };
+        let resident = rank < keep;
+        if resident && out {
+            commands.entity(entity).remove::<StreamedOut>();
+        } else if !resident && !out {
+            if let Some(mirror) = mirror {
+                *transform = mirror.transform;
+                if let Some(mut rigid) = rigid {
+                    rigid.linear_velocity = mirror.linear_velocity;
+                    rigid.angular_velocity = mirror.angular_velocity;
+                }
+            }
+            commands
+                .entity(entity)
+                .insert(StreamedOut)
+                .remove::<GpuStateMirror>();
+        }
+    }
+}
+
+impl GpuSimulationLod {
+    /// Ticks of time a body `distance_squared` from its nearest observer
+    /// steps over on `tick`: 1 at full rate, `reduced_stride` on its reduced
+    /// ticks, 0 while it waits or is frozen. `slot` is its
+    /// [`PhysicsId::slot`], which spreads reduced bodies over the stride.
+    /// The reference for `lod_steps` in `physics_shapes.glsl`.
+    #[must_use]
+    pub fn steps(&self, distance_squared: f32, tick: u64, slot: u32) -> u32 {
+        let stride = self.reduced_stride.max(1);
+        if distance_squared <= self.full_radius * self.full_radius {
+            1
+        } else if distance_squared > self.reduced_radius * self.reduced_radius {
+            0
+        } else if (tick as u32).wrapping_add(slot).is_multiple_of(stride) {
+            stride
+        } else {
+            0
+        }
+    }
+}
+
+/// Pose and linear velocity CPU coupling uses for a GPU body during the
+/// tick after `fixed_tick`: the read-back pose carried forward by its
+/// velocity over the state's age. `None` past [`MAX_COUPLED_STATE_AGE`].
+pub(crate) fn coupled_gpu_state(
+    mirror: &GpuStateMirror,
+    fixed_tick: u64,
+    dt: f32,
+) -> Option<(Transform, [f32; 3])> {
+    let age = mirror.age_ticks(fixed_tick);
+    if age > MAX_COUPLED_STATE_AGE {
+        return None;
+    }
+    let mut pose = mirror.transform;
+    for axis in 0..3 {
+        pose.position[axis] += mirror.linear_velocity[axis] * age as f32 * dt;
+    }
+    Some((pose, mirror.linear_velocity))
+}
+
 /// Lets the engine choose CPU or GPU simulation for this body.
 ///
 /// [`allocate_auto_simulation`] decides once, writes the choice into
@@ -1049,6 +1241,56 @@ pub struct AutoSimulation {
 pub struct AllocationDecision {
     pub class: super::SimulationClass,
     pub reason: AllocationReason,
+}
+
+impl AllocationDecision {
+    /// One sentence saying why the body got its class, with the
+    /// thresholds from `policy` filled in.
+    pub fn explain(&self, policy: &AutoAllocationPolicy) -> String {
+        let class = match self.class {
+            super::SimulationClass::None => "no simulation",
+            super::SimulationClass::Static => "static",
+            super::SimulationClass::Cpu => "the CPU",
+            super::SimulationClass::Gpu => "the GPU",
+        };
+        let why = match self.reason {
+            AllocationReason::NotDynamic => {
+                return format!("Kept as {class}: the body is not dynamic.");
+            }
+            AllocationReason::NoGpuBackend => {
+                "no GPU physics backend is connected".to_owned()
+            }
+            AllocationReason::CustomSolver => {
+                "custom solvers run only on the GPU".to_owned()
+            }
+            AllocationReason::Kinematic => {
+                "gameplay moves kinematic bodies on the CPU".to_owned()
+            }
+            AllocationReason::CpuOnlyCollider => {
+                "sensors and mesh, polygon and chain colliders exist only \
+                 in the CPU solver"
+                    .to_owned()
+            }
+            AllocationReason::ReadsStateEveryTick => {
+                "reading its full state back every tick costs more than \
+                 simulating it on the CPU"
+                    .to_owned()
+            }
+            AllocationReason::FewBodies => format!(
+                "fewer than {} flexible auto bodies",
+                policy.gpu_min_bodies
+            ),
+            AllocationReason::ManyBodies => format!(
+                "at least {} flexible auto bodies",
+                policy.gpu_min_bodies
+            ),
+            AllocationReason::CpuOverBudget => format!(
+                "CPU physics took over {:?} last frame",
+                policy.cpu_physics_budget
+            ),
+        };
+        format!("On {class}: {why}.")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1315,9 +1557,10 @@ pub fn apply_gpu_state_samples(
             report.stale += 1;
             continue;
         };
-        if entity
-            .get::<GpuStateMirror>()
-            .is_some_and(|mirror| mirror.tick > sample.tick)
+        if entity.contains::<StreamedOut>()
+            || entity
+                .get::<GpuStateMirror>()
+                .is_some_and(|mirror| mirror.tick > sample.tick)
         {
             continue;
         }
@@ -1407,7 +1650,7 @@ pub(super) fn simple_gpu_physics_signature(world: &mut World) -> u64 {
         .get()
         .hash(&mut hasher);
     let mut count = 0_u64;
-    let mut query = world.query::<(
+    let mut query = world.query_filtered::<(
         Entity,
         &PhysicsId,
         &Transform,
@@ -1418,7 +1661,7 @@ pub(super) fn simple_gpu_physics_signature(world: &mut World) -> u64 {
         Option<&PhysicsSyncMode>,
         Option<Ref<super::Collider>>,
         Option<Ref<super::CollisionLayers>>,
-    )>();
+    ), Without<StreamedOut>>();
     for (
         entity,
         id,
@@ -1491,7 +1734,7 @@ pub(super) fn extract_gpu_physics_bodies(
     let class_watches = world.resource::<GpuPhysicsClassWatches>().clone();
     let needs_class_lookup = !class_watches.classes.is_empty();
     let raw = {
-        let mut query = world.query::<(
+        let mut query = world.query_filtered::<(
             Entity,
             &PhysicsId,
             &Transform,
@@ -1502,7 +1745,7 @@ pub(super) fn extract_gpu_physics_bodies(
             Option<&PhysicsSyncMode>,
             Option<&super::Collider>,
             Option<&super::CollisionLayers>,
-        )>();
+        ), Without<StreamedOut>>();
         query
             .iter(world)
             .filter(|(_, _, _, body, ..)| body.uses_gpu())
@@ -1691,7 +1934,8 @@ impl Plugin for HybridPhysicsPlugin {
                 ScheduleStage::PostUpdate,
                 (allocate_auto_simulation, maintain_gpu_physics_ids).chain(),
             )
-            .add_systems(ScheduleStage::Update, sync_gpu_query_proxies);
+            .add_systems(ScheduleStage::Update, sync_gpu_query_proxies)
+            .add_systems(ScheduleStage::FixedUpdate, stream_gpu_bodies);
         Ok(())
     }
 }

@@ -449,6 +449,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::AxisLock>();
     types.register::<super::Heightfield>();
     types.register::<super::Polygon2d>();
+    types.register::<super::Fracture>();
     types.register::<super::MeshSurfaces>();
     types.register::<super::PhysicsMaterial>();
     types.register::<super::WaterMesh>();
@@ -528,6 +529,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<EventQueue<CollisionEvent>>();
     types.register::<EventQueue<JointBroken>>();
     types.register::<EventQueue<FellOut>>();
+    types.register::<EventQueue<super::Fractured>>();
     types.register::<EventQueue<GpuPhysicsEvent>>();
     types.register::<EventQueue<GpuPhysicsEventsLost>>();
     types.register::<EventQueue<HudButtonPressed>>();
@@ -540,6 +542,10 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<GpuEventRegistry>();
     types.register::<GpuPhysicsClassWatches>();
     types.register::<GpuPhysicsCommands>();
+    types.register::<super::GpuSimulationLod>();
+    types.register::<super::SimulationObserver>();
+    types.register::<super::GpuStreamingBudget>();
+    types.register::<super::StreamedOut>();
     types.register::<HierarchyDiagnostics>();
     types.register::<PhysicsBackendStatus>();
     types.register::<PhysicsIdRegistry>();

@@ -15,16 +15,17 @@ use crate::runtime::{
     CameraShake, ColorGrading, ColorLut, CombineMode, Connection, Connections,
     Counter, CullingMode, DepthOfField, DeterminismMode, Dialogue,
     DialogueChoice, DialogueLine, Easing, EnvironmentMap, FieldKind, Flash,
-    FluidBlock, Fog, ForceField, GravityVolume, GroundSurface, Health,
-    Heightfield, HudAnchor, HudElement, InputAction, Joint, JointAxis,
-    JointKind, JointMotor, JointSpring, LightCookie, LootEntry, LootTable,
-    MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial, PhysicsSettings,
-    PhysicsSyncMode, Pickup, PlatformerController, PlayerController, Polygon2d,
-    PostVolume, QualityProfile, RandomSeed, ReflectionProbe, RenderBounds,
-    RenderSettings, ReverbZone, SceneBackground, SceneInstance, ShadowQuality,
-    SkyLight, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, TileKind, TileMap, ToneMapper, ToneMapping,
-    Tween, TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
+    FluidBlock, FluidSolver, Fog, ForceField, Fracture, GravityVolume,
+    GroundSurface, Health, Heightfield, HudAnchor, HudElement, InputAction,
+    Joint, JointAxis, JointKind, JointMotor, JointSpring, LightCookie,
+    LootEntry, LootTable, MeshSurfaces, MotionBlur, ObjectState,
+    PhysicsMaterial, PhysicsSettings, PhysicsSyncMode, Pickup,
+    PlatformerController, PlayerController, Polygon2d, PostVolume,
+    QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
+    ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
+    SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash, StateAction,
+    StateTransition, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
+    TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -676,6 +677,10 @@ crate::reflect! {
 }
 
 crate::reflect! {
+    enum FluidSolver { Particles, Grid, Granular }
+}
+
+crate::reflect! {
     struct FluidBlock {
         spacing: f32 { unit: "m", min: 0.02, doc: "rest spacing of particles" },
         count_x: u32 { unit: "particles" },
@@ -686,6 +691,8 @@ crate::reflect! {
         },
         iterations: u32 { unit: "passes", min: 1.0, max: 16.0 },
         viscosity: f32 { unit: "factor", min: 0.0, max: 1.0 },
+        solver: FluidSolver { doc: "Particles for small splashy volumes, Grid (FLIP) for large water, Granular for sand and gravel" },
+        friction: f32 { unit: "factor", min: 0.0, max: 2.0, doc: "Granular: grain friction; higher piles steeper" },
         visible: bool { doc: "draw the fluid as a water surface" },
         show_particles: bool { doc: "also draw one sphere per particle" },
     }
@@ -776,6 +783,17 @@ crate::reflect! {
         points: Vec<[f32; 2]> { unit: "m", doc: "outline in the object's XY plane; counterclockwise, convex for a Polygon collider" },
         depth: f32 { unit: "m", min: 0.001, doc: "thickness along Z, centred on the object" },
         closed: bool { doc: "the chain joins its last point back to the first" },
+    }
+}
+
+crate::reflect! {
+    struct Fracture {
+        pieces: u32 { min: 0.0, max: 256.0, doc: "Voronoi cells to cut the mesh into; 0 or 1 makes no Voronoi cuts" },
+        seed: u64 { doc: "picks where the Voronoi cells lie" },
+        slices: Vec<[f32; 4]> { doc: "planes [x, y, z, d] in the object's frame that cut every piece where [x, y, z] · p = d" },
+        break_energy: f32 { unit: "J", min: 0.0, doc: "impact energy within one fixed tick that breaks the object during play; 0 never breaks it" },
+        debris_lifetime: f32 { unit: "s", min: 0.0, doc: "seconds a piece stays once it sleeps; 0 keeps pieces" },
+        merge_debris: bool { doc: "once every piece of a break sleeps, they merge into one static body" },
     }
 }
 

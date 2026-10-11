@@ -39,6 +39,35 @@ pub struct FluidSettings {
     pub viscosity: f32,
     /// Axis-aligned container as (min, max) corners.
     pub bounds: ([f32; 3], [f32; 3]),
+    /// Which solver steps the particles.
+    pub solver: FluidSolver,
+    /// Coulomb friction between grains and against the container, for
+    /// [`FluidSolver::Granular`]; the others ignore it.
+    pub friction: f32,
+}
+
+/// The solver a fluid runs on.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FluidSolver {
+    /// Position based fluid: stiff and splashy, for small volumes of a few
+    /// thousand particles.
+    #[default]
+    Particles,
+    /// FLIP on a grid over the container: no neighbor search, so it carries
+    /// large water volumes; softer, and it slowly loses volume.
+    Grid,
+    /// Grains with friction (sand, gravel, rubble): they pile into heaps
+    /// whose slope grows with `friction`.
+    Granular,
 }
 
 impl Default for FluidSettings {
@@ -51,6 +80,8 @@ impl Default for FluidSettings {
             relaxation: 10.0,
             viscosity: 0.01,
             bounds: ([-1.0; 3], [1.0; 3]),
+            solver: FluidSolver::Particles,
+            friction: 0.6,
         }
     }
 }
@@ -104,6 +135,48 @@ fn spiky_gradient(d: [f32; 3], h: f32) -> [f32; 3] {
     [d[0] * scale, d[1] * scale, d[2] * scale]
 }
 
+/// Neighbor lists of `points` within `h`. A hash grid with cell size `h` holds the
+/// indices in ascending order, so each list comes out sorted.
+pub(super) fn neighbors(points: &[[f32; 3]], h: f32) -> Vec<Vec<u32>> {
+    let cell = |p: [f32; 3]| {
+        [
+            (p[0] / h).floor() as i32,
+            (p[1] / h).floor() as i32,
+            (p[2] / h).floor() as i32,
+        ]
+    };
+    let mut grid: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+    for (i, p) in points.iter().enumerate() {
+        grid.entry(cell(*p)).or_default().push(i as u32);
+    }
+    let h2 = h * h;
+    let count = points.len();
+    let mut lists = Vec::with_capacity(count);
+    for i in 0..count {
+        let c = cell(points[i]);
+        let mut found = Vec::new();
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let key = [c[0] + dx, c[1] + dy, c[2] + dz];
+                    for &j in grid.get(&key).into_iter().flatten() {
+                        let d = sub(points[i], points[j as usize]);
+                        if j as usize != i && dot(d) < h2 {
+                            found.push(j);
+                        }
+                    }
+                }
+            }
+        }
+        // Cells are visited in a fixed order, but the merged list is
+        // only sorted per cell. Sort so the sum order never depends on
+        // the grid layout.
+        found.sort_unstable();
+        lists.push(found);
+    }
+    lists
+}
+
 impl Fluid {
     /// Fills a box of particles on the rest lattice, x fastest.
     pub fn block(min: [f32; 3], counts: [u32; 3], spacing: f32) -> Self {
@@ -138,48 +211,8 @@ impl Fluid {
         sum * settings.particle_mass
     }
 
-    /// Rebuilds neighbor lists. A hash grid with cell size `h` holds the
-    /// indices in ascending order, so each list comes out sorted.
     fn find_neighbors(&mut self, h: f32) {
-        let cell = |p: [f32; 3]| {
-            [
-                (p[0] / h).floor() as i32,
-                (p[1] / h).floor() as i32,
-                (p[2] / h).floor() as i32,
-            ]
-        };
-        let mut grid: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
-        for (i, p) in self.predicted.iter().enumerate() {
-            grid.entry(cell(*p)).or_default().push(i as u32);
-        }
-        let h2 = h * h;
-        let count = self.predicted.len();
-        self.neighbors.resize_with(count, Vec::new);
-        for i in 0..count {
-            let c = cell(self.predicted[i]);
-            let mut found = Vec::new();
-            for dz in -1..=1 {
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        let key = [c[0] + dx, c[1] + dy, c[2] + dz];
-                        for &j in grid.get(&key).into_iter().flatten() {
-                            let d = sub(
-                                self.predicted[i],
-                                self.predicted[j as usize],
-                            );
-                            if j as usize != i && dot(d) < h2 {
-                                found.push(j);
-                            }
-                        }
-                    }
-                }
-            }
-            // Cells are visited in a fixed order, but the merged list is
-            // only sorted per cell. Sort so the sum order never depends on
-            // the grid layout.
-            found.sort_unstable();
-            self.neighbors[i] = found;
-        }
+        self.neighbors = neighbors(&self.predicted, h);
     }
 
     fn clamp_to_bounds(p: &mut [f32; 3], bounds: ([f32; 3], [f32; 3])) {
@@ -192,6 +225,13 @@ impl Fluid {
     pub fn step(&mut self, settings: &FluidSettings, dt: f32) {
         if dt <= 0.0 {
             return;
+        }
+        match settings.solver {
+            FluidSolver::Particles => {}
+            FluidSolver::Grid => return super::flip::step(self, settings, dt),
+            FluidSolver::Granular => {
+                return super::granular::step(self, settings, dt);
+            }
         }
         let count = self.positions.len();
         let h = settings.radius();
@@ -399,6 +439,11 @@ pub struct FluidBlock {
     pub iterations: u32,
     /// XSPH viscosity in 0..1.
     pub viscosity: f32,
+    /// Particles for small splashy volumes, Grid for large water volumes,
+    /// Granular for sand and gravel.
+    pub solver: FluidSolver,
+    /// Grain friction for the Granular solver; higher piles steeper.
+    pub friction: f32,
     /// Draw the fluid as a water surface.
     pub visible: bool,
     /// Also draw each particle as a sphere (for debugging the solver).
@@ -415,6 +460,8 @@ impl Default for FluidBlock {
             container_half_extents: [0.5, 0.5, 0.5],
             iterations: 4,
             viscosity: 0.01,
+            solver: FluidSolver::Particles,
+            friction: 0.6,
             visible: true,
             show_particles: false,
         }
@@ -449,6 +496,8 @@ fn volume_for_block(
         spacing: block.spacing.max(0.01),
         iterations: block.iterations,
         viscosity: block.viscosity,
+        solver: block.solver,
+        friction: block.friction,
         bounds: (
             std::array::from_fn(|axis| center[axis] - half[axis]),
             std::array::from_fn(|axis| center[axis] + half[axis]),
@@ -612,17 +661,114 @@ pub(super) fn reap_surfaces(
     }
 }
 
-/// Per fixed step: advances every `FluidVolume`.
+/// Per fixed step: advances every `FluidVolume`, then lets volumes push on
+/// each other (see [`separate_volumes`]), in `SpawnOrder`.
 pub(super) fn step_fluids(
     time: bevy_ecs::prelude::Res<super::FrameTime>,
-    mut volumes: bevy_ecs::prelude::Query<&mut FluidVolume>,
+    mut volumes: bevy_ecs::prelude::Query<(
+        bevy_ecs::prelude::Entity,
+        Option<&super::SpawnOrder>,
+        &mut FluidVolume,
+    )>,
 ) {
     let dt = time.fixed_delta.as_secs_f32();
-    for mut volume in &mut volumes {
+    let mut volumes: Vec<_> = volumes.iter_mut().collect();
+    volumes.sort_by_key(|(entity, order, _)| visit_key(*order, *entity));
+    let mut volumes: Vec<&mut FluidVolume> = volumes
+        .iter_mut()
+        .map(|(.., volume)| &mut **volume)
+        .collect();
+    for volume in &mut volumes {
         let FluidVolume {
             settings, fluid, ..
-        } = &mut *volume;
+        } = &mut **volume;
         fluid.step(settings, dt);
+    }
+    separate_volumes(&mut volumes, dt);
+}
+
+/// Passes of [`separate_volumes`] per step.
+const SEPARATION_PASSES: usize = 4;
+
+/// Pushes apart particles of different volumes closer than the mean of
+/// their spacings, shared by particle mass so momentum is kept, and gives the
+/// push to their velocities: so water and sand mix, a heavy fluid sinks
+/// through a light one, and both stay in their own containers. Pairs of
+/// volumes and particles go in index order.
+// ponytail: a few Gauss-Seidel passes after the volumes step, so the
+// volumes feel each other's weight but not each other's pressure; solve
+// them in one density solve if layered fluids must hold rest density.
+fn separate_volumes(volumes: &mut [&mut FluidVolume], dt: f32) {
+    for _ in 0..SEPARATION_PASSES {
+        for b in 1..volumes.len() {
+            let (head, tail) = volumes.split_at_mut(b);
+            let other = &mut *tail[0];
+            for volume in head.iter_mut() {
+                separate(volume, other, dt);
+            }
+        }
+    }
+}
+
+/// One pass of [`separate_volumes`] over the particles of `a` and `b`.
+fn separate(a: &mut FluidVolume, b: &mut FluidVolume, dt: f32) {
+    let (mass_a, mass_b) = (a.settings.particle_mass, b.settings.particle_mass);
+    if mass_a <= 0.0 || mass_b <= 0.0 {
+        return;
+    }
+    let reach = (a.settings.spacing + b.settings.spacing) / 2.0;
+    let cell = |p: [f32; 3]| p.map(|x| (x / reach).floor() as i32);
+    let mut grid: HashMap<[i32; 3], Vec<usize>> = HashMap::new();
+    for (j, &p) in b.fluid.positions.iter().enumerate() {
+        grid.entry(cell(p)).or_default().push(j);
+    }
+    let share_a = mass_b / (mass_a + mass_b);
+    let (bounds_a, bounds_b) = (a.settings.bounds, b.settings.bounds);
+    let (fa, fb) = (&mut a.fluid, &mut b.fluid);
+    for i in 0..fa.positions.len() {
+        let [x, y, z] = cell(fa.positions[i]);
+        for offset in 0..27 {
+            let key = [
+                x + offset % 3 - 1,
+                y + offset / 3 % 3 - 1,
+                z + offset / 9 - 1,
+            ];
+            let Some(near) = grid.get(&key) else {
+                continue;
+            };
+            for &j in near {
+                let delta = Vector3::from(fa.positions[i])
+                    - Vector3::from(fb.positions[j]);
+                let length = delta.norm();
+                if length >= reach || length < 1e-6 {
+                    continue;
+                }
+                let push = delta * ((reach - length) / length);
+                let (move_a, move_b) = (push * share_a, push * (1.0 - share_a));
+                for (p, v, d, (low, high)) in [
+                    (
+                        &mut fa.positions[i],
+                        &mut fa.velocities[i],
+                        move_a,
+                        bounds_a,
+                    ),
+                    (
+                        &mut fb.positions[j],
+                        &mut fb.velocities[j],
+                        -move_b,
+                        bounds_b,
+                    ),
+                ] {
+                    // A push into a wall stays in the container.
+                    let to = (Vector3::from(*p) + d)
+                        .sup(&Vector3::from(low))
+                        .inf(&Vector3::from(high));
+                    *v = (Vector3::from(*v) + (to - Vector3::from(*p)) / dt)
+                        .into();
+                    *p = to.into();
+                }
+            }
+        }
     }
 }
 
@@ -712,12 +858,46 @@ pub(super) fn sync_fluid_visuals(
     }
 }
 
+/// Trades momentum between a particle pushed out of a body along `outward`
+/// and the body: a particle moving into the body leaves with the body's
+/// speed along `outward`, and the body takes the momentum it lost.
+/// `share` is the particle's mass over the body's.
+fn trade(
+    velocity: &mut [f32; 3],
+    outward: [f32; 3],
+    body: &mut [f32; 3],
+    share: f32,
+) {
+    let closing: f32 = (0..3)
+        .map(|axis| (velocity[axis] - body[axis]) * outward[axis])
+        .sum();
+    if closing >= 0.0 {
+        return;
+    }
+    // Split the closing speed so total momentum is kept: the particle and
+    // the body end with the same speed along `outward`.
+    let particle = -closing / (1.0 + share);
+    for axis in 0..3 {
+        velocity[axis] += particle * outward[axis];
+        body[axis] -= particle * share * outward[axis];
+    }
+}
+
 /// Per fixed step, before [`step_fluids`]: couples `FluidVolume`s with
 /// dynamic bodies that have a sphere collider. A body gets buoyancy from the
 /// volume of sphere its overlapping particles fill, and drag; particles
 /// inside the sphere are pushed out to its surface, which displaces the
-/// fluid. Bodies and volumes are visited in `SpawnOrder` (entity order for those without one), and each body
-/// reads the particles as the previous body left them.
+/// fluid, and trade momentum with the body along the way out (see
+/// [`trade`]), so a stream pushes a body and a moving body drags the fluid.
+/// Bodies and volumes are visited in `SpawnOrder` (entity order for those
+/// without one), and each body reads the particles as the previous body left
+/// them.
+///
+/// A GPU body takes part when it reads its state back (a [`super::GpuStateMirror`]
+/// at most [`super::MAX_COUPLED_STATE_AGE`] ticks old): the fluid meets it at the
+/// mirrored pose carried forward by its velocity over the state's age, and
+/// what the fluid does to its velocity goes back as an impulse that applies
+/// before the next GPU tick (see [`super::GpuPhysicsCommands`]).
 /// ponytail: sphere, box and capsule colliders only (a box at a rest pose has no
 /// torque from the fluid), and every body checks every particle.
 /// Add other shapes and use the solver's grid when this shows in profiles.
@@ -725,6 +905,7 @@ pub(super) fn sync_fluid_visuals(
 pub(super) fn couple_fluids(
     time: bevy_ecs::prelude::Res<super::FrameTime>,
     physics: bevy_ecs::prelude::Res<super::PhysicsSettings>,
+    gpu_commands: Option<bevy_ecs::prelude::ResMut<super::GpuPhysicsCommands>>,
     mut volumes: bevy_ecs::prelude::Query<(
         bevy_ecs::prelude::Entity,
         Option<&super::SpawnOrder>,
@@ -739,19 +920,60 @@ pub(super) fn couple_fluids(
             &mut super::RigidBody,
             &super::Collider,
             Option<&super::PhysicsBody>,
+            Option<&super::PhysicsId>,
+            Option<&super::GpuStateMirror>,
         ),
         bevy_ecs::prelude::Without<super::Parent>,
     >,
 ) {
-    use super::{ColliderShape, RigidBodyKind};
+    use super::{ColliderShape, RigidBodyKind, SimulationClass};
     let dt = time.fixed_delta.as_secs_f32();
     let gravity = physics.gravity;
     let gravity_size = dot(gravity).sqrt();
     if volumes.is_empty() {
         return;
     }
-    let mut bodies: Vec<_> = bodies.iter_mut().collect();
-    bodies.sort_by_key(|(entity, order, ..)| visit_key(*order, *entity));
+    // Copies of the coupled bodies, with the velocity they started at and
+    // the GPU id of a GPU body.
+    let mut coupled = Vec::new();
+    for (entity, order, transform, body, collider, physics, id, mirror) in
+        &bodies
+    {
+        if body.kind != RigidBodyKind::Dynamic || body.mass <= 0.0 {
+            continue;
+        }
+        match (physics.map(|p| p.simulation), id, mirror) {
+            (Some(SimulationClass::Cpu), ..) => coupled.push((
+                visit_key(order, entity),
+                *transform,
+                *body,
+                *collider,
+                body.linear_velocity,
+                None,
+            )),
+            (Some(SimulationClass::Gpu), Some(id), Some(mirror))
+                if gpu_commands.is_some() =>
+            {
+                let Some((pose, velocity)) =
+                    super::coupled_gpu_state(mirror, time.fixed_tick, dt)
+                else {
+                    continue;
+                };
+                let mut body = *body;
+                body.linear_velocity = velocity;
+                coupled.push((
+                    visit_key(order, entity),
+                    pose,
+                    body,
+                    *collider,
+                    velocity,
+                    Some(*id),
+                ));
+            }
+            _ => {}
+        }
+    }
+    coupled.sort_by_key(|(key, ..)| *key);
     let mut volumes: Vec<_> = volumes.iter_mut().collect();
     volumes.sort_by_key(|(entity, order, _)| visit_key(*order, *entity));
     for (_, _, volume) in &mut volumes {
@@ -759,16 +981,7 @@ pub(super) fn couple_fluids(
             settings, fluid, ..
         } = &mut **volume;
         let particle_volume = settings.spacing.powi(3);
-        for (_, _, transform, body, collider, physics) in &mut bodies {
-            // The GPU solver never reads back CPU velocities.
-            if body.kind != RigidBodyKind::Dynamic
-                || body.mass <= 0.0
-                || !physics.is_some_and(|p| {
-                    p.simulation == super::SimulationClass::Cpu
-                })
-            {
-                continue;
-            }
+        for (_, transform, body, collider, ..) in &mut coupled {
             let center = transform.position;
             // Particles never leave `bounds`, so a body clear of that box
             // touches none of them.
@@ -795,11 +1008,14 @@ pub(super) fn couple_fluids(
                 continue;
             }
             let mut inside = 0u32;
+            let share = settings.particle_mass / body.mass;
             let displaced = match collider.shape {
                 ColliderShape::Sphere { radius } => {
                     let radius = radius
                         * transform.scale.into_iter().fold(0.0, f32::max);
-                    for position in &mut fluid.positions {
+                    for (position, velocity) in
+                        fluid.positions.iter_mut().zip(&mut fluid.velocities)
+                    {
                         let offset = sub(*position, center);
                         let distance = dot(offset).sqrt();
                         if distance >= radius {
@@ -816,6 +1032,12 @@ pub(super) fn couple_fluids(
                         *position = std::array::from_fn(|axis| {
                             center[axis] + outward[axis] * radius
                         });
+                        trade(
+                            velocity,
+                            outward,
+                            &mut body.linear_velocity,
+                            share,
+                        );
                     }
                     4.0 / 3.0 * PI * radius.powi(3)
                 }
@@ -828,7 +1050,9 @@ pub(super) fn couple_fluids(
                         transform.rotation[1],
                         transform.rotation[2],
                     );
-                    for position in &mut fluid.positions {
+                    for (position, velocity) in
+                        fluid.positions.iter_mut().zip(&mut fluid.velocities)
+                    {
                         let offset = sub(*position, center);
                         let mut local =
                             rotation.inverse() * Vector3::from(offset);
@@ -850,6 +1074,15 @@ pub(super) fn couple_fluids(
                         let world = rotation * local;
                         *position =
                             std::array::from_fn(|i| center[i] + world[i]);
+                        let mut face = Vector3::zeros();
+                        face[axis] = sign;
+                        let outward = rotation * face;
+                        trade(
+                            velocity,
+                            outward.into(),
+                            &mut body.linear_velocity,
+                            share,
+                        );
                     }
                     8.0 * half[0] * half[1] * half[2]
                 }
@@ -866,7 +1099,9 @@ pub(super) fn couple_fluids(
                         transform.rotation[2],
                     );
                     let axis = rotation * Vector3::y();
-                    for position in &mut fluid.positions {
+                    for (position, velocity) in
+                        fluid.positions.iter_mut().zip(&mut fluid.velocities)
+                    {
                         let offset = Vector3::from(sub(*position, center));
                         // The nearest point of the core segment, then the
                         // same push as a sphere from there.
@@ -885,6 +1120,12 @@ pub(super) fn couple_fluids(
                         let pushed = axis * along + outward * radius;
                         *position =
                             std::array::from_fn(|i| center[i] + pushed[i]);
+                        trade(
+                            velocity,
+                            outward.into(),
+                            &mut body.linear_velocity,
+                            share,
+                        );
                     }
                     PI * radius * radius * 2.0 * half
                         + 4.0 / 3.0 * PI * radius.powi(3)
@@ -893,7 +1134,12 @@ pub(super) fn couple_fluids(
             };
             let sphere = displaced;
             let filled = (inside as f32 * particle_volume / sphere).min(1.0);
-            if filled <= 0.0 || gravity_size <= 0.0 {
+            // Grains hold a body up by contact (the push and trade above),
+            // not by buoyancy.
+            if filled <= 0.0
+                || gravity_size <= 0.0
+                || settings.solver == FluidSolver::Granular
+            {
                 continue;
             }
             let lift = settings.rest_density() * filled * sphere * gravity_size
@@ -903,6 +1149,26 @@ pub(super) fn couple_fluids(
                     gravity[axis] / gravity_size * lift * dt;
                 body.linear_velocity[axis] *=
                     1.0 - (2.0 * filled * dt).min(1.0);
+            }
+        }
+    }
+    let mut gpu_commands = gpu_commands;
+    for ((_, _, entity), _, body, _, start, id) in coupled {
+        if body.linear_velocity == start {
+            continue;
+        }
+        match (id, gpu_commands.as_mut()) {
+            (Some(id), Some(commands)) => commands.push(
+                id,
+                super::GpuBodyCommand::Impulse(std::array::from_fn(|axis| {
+                    body.mass * (body.linear_velocity[axis] - start[axis])
+                })),
+            ),
+            _ => {
+                if let Ok((.., mut rigid, _, _, _, _)) = bodies.get_mut(entity)
+                {
+                    rigid.linear_velocity = body.linear_velocity;
+                }
             }
         }
     }
@@ -991,6 +1257,21 @@ pub(super) fn sync_fluid_surfaces(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_trade_keeps_momentum_and_only_acts_on_closing_particles() {
+        let (mut particle, mut body) = ([0.0, -2.0, 1.0], [0.0, 1.0, 0.0]);
+        super::trade(&mut particle, [0.0, 1.0, 0.0], &mut body, 0.25);
+        // 0.25 * -2 + 1 = 0.5 before; both move at 0.4 along y after.
+        assert_eq!([particle[0], particle[2]], [0.0, 1.0]);
+        assert!((particle[1] - 0.4).abs() < 1e-6, "{particle:?}");
+        assert!((body[1] - 0.4).abs() < 1e-6, "{body:?}");
+        assert!((0.25 * particle[1] + body[1] - 0.5).abs() < 1e-6);
+        let leaving = [0.0, 3.0, 0.0];
+        let mut moved = leaving;
+        super::trade(&mut moved, [0.0, 1.0, 0.0], &mut body, 0.25);
+        assert_eq!(moved, leaving);
+    }
+
     use super::*;
 
     #[test]
@@ -1067,5 +1348,172 @@ mod tests {
             / fluid.positions.len() as f32;
         let ratio = mean / s.rest_density();
         assert!((0.5..1.6).contains(&ratio), "density ratio {ratio}");
+    }
+
+    fn run_app(app: &mut crate::runtime::App, ticks: u32) {
+        for _ in 0..ticks {
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+        }
+    }
+
+    /// Impulses one tick of a water block sends a 1 kg GPU ball whose
+    /// read-back state is `age` ticks old, at `position` moving at
+    /// `velocity`.
+    fn gpu_ball_impulses(
+        position: [f32; 3],
+        velocity: [f32; 3],
+        age: u64,
+    ) -> Vec<[f32; 3]> {
+        use crate::runtime::{
+            Collider, ColliderShape, FrameTime, GpuBodyCommand,
+            GpuPhysicsCommands, GpuStateMirror, PhysicsBody, PhysicsId,
+            RigidBody, SimulationClass,
+        };
+        let mut app = crate::runtime::App::new();
+        app.world_mut()
+            .insert_resource(GpuPhysicsCommands::default());
+        app.world_mut().resource_mut::<FrameTime>().fixed_tick = 20;
+        let settings = FluidSettings {
+            bounds: ([-0.4, 0.0, -0.4], [0.4, 1.0, 0.4]),
+            ..FluidSettings::default()
+        };
+        let water = Fluid::block([-0.3, 0.0, -0.3], [7, 4, 7], 0.1);
+        app.world_mut().spawn(FluidVolume::new(settings, water));
+        let transform = crate::Transform {
+            position,
+            ..crate::Transform::default()
+        };
+        let id = PhysicsId {
+            slot: 7,
+            generation: 1,
+        };
+        app.world_mut().spawn((
+            transform,
+            RigidBody {
+                mass: 1.0,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::Sphere { radius: 0.12 },
+                ..Collider::default()
+            },
+            PhysicsBody {
+                simulation: SimulationClass::Gpu,
+                ..PhysicsBody::default()
+            },
+            id,
+            GpuStateMirror {
+                tick: 20 - age,
+                transform,
+                linear_velocity: velocity,
+                angular_velocity: [0.0; 3],
+                custom_values: None,
+            },
+        ));
+        run_app(&mut app, 1);
+        app.world()
+            .resource::<GpuPhysicsCommands>()
+            .commands
+            .iter()
+            .map(|&(body, command)| match (body == id, command) {
+                (true, GpuBodyCommand::Impulse(impulse)) => impulse,
+                other => panic!("unexpected command {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn water_pushes_a_gpu_body_through_impulses_from_its_read_back_state() {
+        // Under water with fresh state: one impulse, up (buoyancy).
+        let fresh = gpu_ball_impulses([0.0, 0.15, 0.0], [0.0; 3], 0);
+        assert_eq!(fresh.len(), 1);
+        assert!(fresh[0][1] > 0.0, "{fresh:?}");
+        // Out of the water two ticks ago, but moving into it: met where it
+        // is now.
+        let late = gpu_ball_impulses([-0.6, 0.15, 0.0], [18.0, 0.0, 0.0], 2);
+        assert_eq!(late.len(), 1);
+        assert!(late[0][1] > 0.0 && late[0][0] < 0.0, "{late:?}");
+        // State older than the limit is not trusted.
+        let stale = crate::runtime::MAX_COUPLED_STATE_AGE + 1;
+        assert!(gpu_ball_impulses([0.0, 0.15, 0.0], [0.0; 3], stale).is_empty());
+    }
+
+    type Block = ([f32; 3], [u32; 3], f32, FluidSolver, [f32; 3]);
+
+    /// The particles of each volume after 300 ticks in one 0.6 m
+    /// container, for blocks `(min, counts, particle mass, solver,
+    /// velocity)`.
+    fn mixed(blocks: &[Block]) -> Vec<Vec<[f32; 3]>> {
+        let mut app = crate::runtime::App::new();
+        let volumes: Vec<_> = blocks
+            .iter()
+            .map(|&(min, counts, particle_mass, solver, velocity)| {
+                let settings = FluidSettings {
+                    bounds: ([-0.3, 0.0, -0.3], [0.3, 2.0, 0.3]),
+                    particle_mass,
+                    solver,
+                    ..FluidSettings::default()
+                };
+                let mut fluid = Fluid::block(min, counts, 0.1);
+                fluid.velocities.fill(velocity);
+                app.world_mut()
+                    .spawn(FluidVolume::new(settings, fluid))
+                    .id()
+            })
+            .collect();
+        run_app(&mut app, 300);
+        volumes
+            .into_iter()
+            .map(|entity| {
+                app.world()
+                    .get::<FluidVolume>(entity)
+                    .unwrap()
+                    .fluid
+                    .positions
+                    .clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn heavy_grains_sink_through_water_light_ones_float_and_a_wave_pushes_a_pile(
+    ) {
+        use FluidSolver::{Granular, Particles};
+        let lowest = |points: &[[f32; 3]]| {
+            points.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min)
+        };
+        let mean_x = |points: &[[f32; 3]]| {
+            points.iter().map(|p| p[0]).sum::<f32>() / points.len() as f32
+        };
+        let pool = ([-0.25, 0.0, -0.25], [6, 3, 6], 1.0, Particles, [0.0; 3]);
+        let grains =
+            |mass| ([-0.15, 0.5, -0.15], [4, 2, 4], mass, Granular, [0.0; 3]);
+        let [water, sand] = &mixed(&[pool, grains(3.0)])[..] else {
+            unreachable!()
+        };
+        assert!(lowest(sand) < 0.02, "sand bottom at {}", lowest(sand));
+        for grain in sand {
+            for drop in water {
+                let gap = (Vector3::from(*grain) - Vector3::from(*drop)).norm();
+                assert!(gap > 0.05, "a grain {gap} m from a drop");
+            }
+        }
+        assert!(lowest(&water[..]) >= 0.0);
+        let [_, chips] = &mixed(&[pool, grains(0.3)])[..] else {
+            unreachable!()
+        };
+        assert!(lowest(chips) > 0.04, "chips bottom at {}", lowest(chips));
+        let pile = ([0.0, 0.0, -0.1], [3, 2, 3], 1.0, Granular, [0.0; 3]);
+        let wave = (
+            [-0.3, 0.0, -0.25],
+            [2, 3, 6],
+            1.0,
+            Particles,
+            [4.0, 0.0, 0.0],
+        );
+        let still = mean_x(&mixed(&[pile])[0]);
+        let pushed = mean_x(&mixed(&[pile, wave])[0]);
+        assert!(pushed > still + 0.04, "pile at {pushed}, alone {still}");
     }
 }

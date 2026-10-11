@@ -1216,6 +1216,91 @@ fn cpu_restitution_bounces_and_sensors_only_report() {
 }
 
 #[test]
+fn cpu_collision_events_follow_touching_pairs_and_stop_when_they_part() {
+    let mut app = App::new();
+    let world = app.world_mut();
+    let ground = cpu_body(
+        world,
+        [0.0, -0.5, 0.0],
+        ColliderShape::Box {
+            half_extents: [10.0, 0.5, 10.0],
+        },
+        RigidBodyKind::Fixed,
+    );
+    let ball = cpu_body(
+        world,
+        [0.0, 1.0, 0.0],
+        ColliderShape::Sphere { radius: 0.5 },
+        RigidBodyKind::Dynamic,
+    );
+    let trigger =
+        cpu_body(world, [4.0, 3.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    world.get_mut::<Collider>(trigger).unwrap().sensor = true;
+    let walker = cpu_body(
+        world,
+        [0.0, 3.0, 0.0],
+        ColliderShape::Sphere { radius: 0.4 },
+        RigidBodyKind::Kinematic,
+    );
+    world.get_mut::<RigidBody>(walker).unwrap().linear_velocity =
+        [3.0, 0.0, 0.0];
+
+    let pair = |event: &CollisionEvent, a, b| {
+        (event.a, event.b) == (a, b) || (event.a, event.b) == (b, a)
+    };
+    let mut landed = None;
+    let mut inside = Vec::new();
+    let mut slept = None;
+    for step in 1..=150 {
+        run_fixed_steps(&mut app, 1);
+        let world = app.world();
+        let events: Vec<_> = world
+            .resource::<EventQueue<CollisionEvent>>()
+            .iter()
+            .copied()
+            .collect();
+        // At most one event per pair per step, whatever the substeps.
+        let landings: Vec<_> =
+            events.iter().filter(|e| pair(e, ball, ground)).collect();
+        assert!(landings.len() <= 1, "{events:?}");
+        assert!(landings.iter().all(|event| !event.sensor));
+        if !landings.is_empty() {
+            landed.get_or_insert(step);
+        }
+        let triggers: Vec<_> =
+            events.iter().filter(|e| pair(e, walker, trigger)).collect();
+        assert!(triggers.len() <= 1, "{events:?}");
+        assert!(triggers.iter().all(|event| event.sensor));
+        if !triggers.is_empty() {
+            inside.push(world.get::<Transform>(walker).unwrap().position[0]);
+        }
+        // Events show the frame after their step. From the step after the
+        // ball falls asleep on the ground, the resting pair goes quiet.
+        if slept.is_some_and(|at| step > at + 1) {
+            assert!(landings.is_empty(), "step {step}: {events:?}");
+        }
+        if world.get::<Sleeping>(ball).is_some() {
+            slept.get_or_insert(step);
+        }
+    }
+    // The ball falls 0.5 m (about 19 steps) before its first event.
+    let landed = landed.expect("the ball never touched the ground");
+    assert!((19..=22).contains(&landed), "landed on step {landed}");
+    assert!(app.world().get::<Sleeping>(ball).is_some());
+    // The walker overlaps the trigger while |x - 4| < 0.9: about 36 steps,
+    // every one of them reported, and none outside. The walker is one step
+    // (5 cm) further on when an event shows.
+    assert!((34..=38).contains(&inside.len()), "{inside:?}");
+    assert!(
+        inside.iter().all(|x| (x - 0.05 - 4.0).abs() < 0.9 + 0.01),
+        "{inside:?}"
+    );
+    // The trigger never pushed the walker.
+    let walker_x = app.world().get::<Transform>(walker).unwrap().position[0];
+    assert!((walker_x - 3.0 * 2.5).abs() < 1e-3, "{walker_x}");
+}
+
+#[test]
 fn cpu_physics_is_deterministic_and_ignores_gpu_bodies() {
     let run = || {
         let mut app = App::new();
@@ -1568,6 +1653,83 @@ fn custom_solver_files_reach_the_render_world_once_per_path() {
 }
 
 #[test]
+fn cpu_queries_skip_filtered_colliders_and_hit_the_one_behind() {
+    let mut app = App::new();
+    let world = app.world_mut();
+    // Along +x from the origin: a layer-2 box at 2, a sensor at 4, a
+    // layer-1 box at 6 and a box on every layer at 8.
+    let near = cpu_body(world, [2.0, 0.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    world.entity_mut(near).insert(CollisionLayers {
+        memberships: 0b10,
+        filters: u32::MAX,
+    });
+    let sensor =
+        cpu_body(world, [4.0, 0.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    world.get_mut::<Collider>(sensor).unwrap().sensor = true;
+    world.entity_mut(sensor).insert(CollisionLayers {
+        memberships: 0b01,
+        filters: u32::MAX,
+    });
+    let middle =
+        cpu_body(world, [6.0, 0.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    world.entity_mut(middle).insert(CollisionLayers {
+        memberships: 0b01,
+        filters: u32::MAX,
+    });
+    let far = cpu_body(world, [8.0, 0.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    run_fixed_steps(&mut app, 1);
+    let physics = app.world().resource::<PhysicsWorld>();
+    let x = [1.0, 0.0, 0.0];
+    let ray = |mask| physics.raycast([0.0; 3], x, 20.0, mask).unwrap();
+
+    let hit = ray(u32::MAX);
+    assert_eq!((hit.entity, hit.distance), (near, 1.5));
+    // Layer 1: past the layer-2 box to the sensor, which rays do hit.
+    assert_eq!(ray(0b01).entity, sensor);
+    // Layer 4: only the box on every layer.
+    let hit = ray(0b100);
+    assert_eq!((hit.entity, hit.distance), (far, 7.5));
+    // The predicate skips what the mask lets through.
+    let hit = physics
+        .raycast_where([0.0; 3], x, 20.0, 0b01, |entity| entity != sensor)
+        .unwrap();
+    assert_eq!(hit.entity, middle);
+    // A ray ends at its max distance, and one starting inside a box hits
+    // the next one.
+    assert!(physics.raycast([0.0; 3], x, 1.4, u32::MAX).is_none());
+    assert_eq!(
+        physics
+            .raycast([2.0, 0.0, 0.0], x, 20.0, u32::MAX)
+            .unwrap()
+            .entity,
+        sensor
+    );
+
+    // Shape casts take the same mask but skip sensors and `exclude`.
+    let ball = ColliderShape::Sphere { radius: 0.25 };
+    let cast = |mask, exclude| {
+        physics
+            .shape_cast(ball, [0.0; 3], x, 20.0, mask, exclude)
+            .unwrap()
+    };
+    assert_eq!(cast(u32::MAX, None).entity, near);
+    let hit = cast(0b01, None);
+    assert_eq!(hit.entity, middle);
+    assert!((hit.distance - 5.25).abs() < 1e-3, "{hit:?}");
+    assert_eq!(cast(0b01, Some(middle)).entity, far);
+
+    // Overlaps take the mask too, in stable entity order (these bodies
+    // have no `SpawnOrder`).
+    let all = physics.overlap_sphere([5.0, 0.0, 0.0], 1.0, u32::MAX);
+    let mut expected = vec![sensor, middle];
+    expected.sort();
+    assert_eq!(all, expected);
+    assert!(physics
+        .overlap_sphere([5.0, 0.0, 0.0], 1.0, 0b10)
+        .is_empty());
+}
+
+#[test]
 fn cpu_shape_casts_stop_before_colliders_and_characters_slide() {
     let mut app = App::new();
     let world = app.world_mut();
@@ -1883,6 +2045,21 @@ fn auto_simulation_picks_cpu_or_gpu_and_stays_overridable() {
     assert_eq!(
         decision(&app, late),
         (SimulationClass::Gpu, AllocationReason::CpuOverBudget)
+    );
+    // Diagnostics explain the decision with the policy's thresholds.
+    let world = app.world_mut();
+    let policy = *world.resource::<AutoAllocationPolicy>();
+    let explain = |entity| {
+        world
+            .get::<AutoSimulation>(entity)
+            .unwrap()
+            .decision
+            .unwrap()
+            .explain(&policy)
+    };
+    assert_eq!(
+        explain(late),
+        "On the GPU: CPU physics took over 4ms last frame."
     );
 }
 
@@ -5987,15 +6164,32 @@ fn fluids_snapshot_and_restore_to_the_same_future() {
 
 #[test]
 fn a_light_ball_floats_in_a_fluid_and_a_heavy_one_sinks() {
-    let rest_height = |mass: f32| {
+    let rest_height = |mass: f32, solver: FluidSolver| {
         let mut app = App::new();
         cpu_ground(app.world_mut());
         let settings = FluidSettings {
             bounds: ([-0.5, 0.0, -0.5], [0.5, 2.0, 0.5]),
+            solver,
+            // The grid's cells (twice the spacing) must be smaller than the
+            // ball, or the hole it leaves in the water stays open.
+            spacing: match solver {
+                FluidSolver::Particles | FluidSolver::Granular => 0.1,
+                FluidSolver::Grid => 0.05,
+            },
             ..FluidSettings::default()
         };
-        let fluid =
-            Fluid::block([-0.4, 0.0, -0.4], [9, 5, 9], settings.spacing);
+        // Water at 1000 kg per cubic meter for either spacing.
+        let settings = FluidSettings {
+            particle_mass: 1000.0 * settings.spacing.powi(3),
+            ..settings
+        };
+        // The same 0.9 by 0.5 by 0.9 m block either way.
+        let per_meter = (1.0 / settings.spacing).round() as u32;
+        let fluid = Fluid::block(
+            [-0.4, 0.0, -0.4],
+            [9 * per_meter / 10, 5 * per_meter / 10, 9 * per_meter / 10],
+            settings.spacing,
+        );
         app.world_mut().spawn(FluidVolume::new(settings, fluid));
         let ball = cpu_body(
             app.world_mut(),
@@ -6007,10 +6201,46 @@ fn a_light_ball_floats_in_a_fluid_and_a_heavy_one_sinks() {
         run_fixed_steps(&mut app, 240);
         app.world().get::<Transform>(ball).unwrap().position[1]
     };
-    let light = rest_height(7.0);
-    let heavy = rest_height(50.0);
-    assert!(heavy < 0.3, "heavy ball rests at {heavy}");
-    assert!(light > heavy + 0.05, "light {light} vs heavy {heavy}");
+    // The grid solver floats it the same way.
+    for solver in [FluidSolver::Particles, FluidSolver::Grid] {
+        let light = rest_height(7.0, solver);
+        let heavy = rest_height(50.0, solver);
+        assert!(heavy < 0.3, "{solver:?}: heavy ball rests at {heavy}");
+        assert!(
+            light > heavy + 0.05,
+            "{solver:?}: light {light} vs heavy {heavy}"
+        );
+    }
+}
+
+#[test]
+fn a_flowing_fluid_pushes_a_floating_ball_along() {
+    let drift = |flow: f32| {
+        let mut app = App::new();
+        cpu_ground(app.world_mut());
+        let settings = FluidSettings {
+            bounds: ([-1.0, 0.0, -0.5], [1.0, 2.0, 0.5]),
+            ..FluidSettings::default()
+        };
+        let mut fluid =
+            Fluid::block([-0.9, 0.0, -0.4], [19, 5, 9], settings.spacing);
+        for velocity in &mut fluid.velocities {
+            velocity[0] = flow;
+        }
+        app.world_mut().spawn(FluidVolume::new(settings, fluid));
+        let ball = cpu_body(
+            app.world_mut(),
+            [-0.3, 0.3, 0.0],
+            ColliderShape::Sphere { radius: 0.15 },
+            RigidBodyKind::Dynamic,
+        );
+        app.world_mut().get_mut::<RigidBody>(ball).unwrap().mass = 7.0;
+        run_fixed_steps(&mut app, 12);
+        app.world().get::<Transform>(ball).unwrap().position[0] + 0.3
+    };
+    let (still, flowing) = (drift(0.0), drift(2.0));
+    assert!(still.abs() < 0.02, "a still pool moves the ball {still}");
+    assert!(flowing > 0.05, "the stream moves the ball {flowing}");
 }
 
 #[test]
@@ -6085,6 +6315,8 @@ fn fluid_blocks_round_trip_through_scenes_and_become_volumes() {
         count_y: 2,
         count_z: 4,
         viscosity: 0.2,
+        solver: FluidSolver::Granular,
+        friction: 0.9,
         visible: false,
         ..FluidBlock::default()
     };
@@ -6103,6 +6335,8 @@ fn fluid_blocks_round_trip_through_scenes_and_become_volumes() {
     let volume = query.single(loaded.world()).unwrap();
     assert_eq!(volume.fluid.positions.len(), 24);
     assert_eq!(volume.settings.bounds.0[1], 1.5);
+    assert_eq!(volume.settings.solver, FluidSolver::Granular);
+    assert_eq!(volume.settings.friction, 0.9);
     let _ = entity;
 }
 
@@ -8029,4 +8263,175 @@ fn a_2d_pin_joint_swings_in_plane_and_rays_hit_polygons_and_chains() {
         physics.overlap_sphere([4.0, -1.0, 0.0], 0.01, u32::MAX),
         [wedge]
     );
+}
+
+#[test]
+fn a_fluid_surface_reaches_rendering_only_through_extraction() {
+    let mut app = App::new();
+    app.add_plugin(crate::assets::AssetPlugin).unwrap();
+    app.add_plugin(RenderExtractPlugin).unwrap();
+    let material = app
+        .world()
+        .resource::<crate::assets::AssetServer>()
+        .fallback_material;
+    let settings = FluidSettings::default();
+    let fluid = Fluid::block([0.0, 1.0, 0.0], [3, 3, 3], settings.spacing);
+    let mut volume = FluidVolume::new(settings, fluid);
+    volume.surface = Some(crate::runtime::FluidSurface::new(material));
+    app.world_mut().spawn(volume);
+    run_fixed_steps(&mut app, 2);
+    // The renderer sees one extracted renderable: a mesh asset and a
+    // material, not the particle buffers.
+    let extracted = app.world().resource::<RenderWorld>().renderables.clone();
+    assert_eq!(extracted.len(), 1);
+    let mesh = extracted[0].mesh;
+    assert_eq!(extracted[0].material, material);
+    let revision = |app: &App| {
+        app.world()
+            .resource::<crate::assets::AssetServer>()
+            .meshes
+            .revision(mesh)
+            .unwrap()
+    };
+    let before = revision(&app);
+    run_fixed_steps(&mut app, 5);
+    // The mesh asset is rewritten in place, so the renderer re-uploads it by
+    // its revision while the extracted handle stays the same.
+    assert!(revision(&app) > before);
+    let extracted = &app.world().resource::<RenderWorld>().renderables;
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].mesh, mesh);
+}
+
+#[test]
+fn a_streaming_budget_keeps_the_nearest_gpu_bodies_and_saves_the_rest() {
+    let mut app = App::new();
+    app.add_plugin(HybridPhysicsPlugin).unwrap();
+    app.insert_resource(GpuStreamingBudget { max_resident: 1 });
+    let observer = app.spawn((Transform::default(), SimulationObserver));
+    let ball = |app: &mut App, x: f32| {
+        app.spawn((
+            Transform::default().with_position(x, 0.0, 0.0),
+            PhysicsBody {
+                simulation: SimulationClass::Gpu,
+                ..PhysicsBody::default()
+            },
+            RigidBody::default(),
+            PhysicsSyncMode::SelectedState,
+        ))
+    };
+    let near = ball(&mut app, 1.0);
+    let far = ball(&mut app, 10.0);
+    app.update(Duration::ZERO).unwrap();
+    // The GPU has moved the far ball on since it was authored.
+    let id = *app.world().get::<PhysicsId>(far).unwrap();
+    apply_gpu_state_samples(
+        app.world_mut(),
+        &[GpuStateSample {
+            physics_id: id,
+            tick: 1,
+            transform: Transform::default().with_position(12.0, 0.0, 0.0),
+            linear_velocity: [3.0, 0.0, 0.0],
+            angular_velocity: [0.0, 1.0, 0.0],
+            custom_values: None,
+        }],
+    );
+    let step = app.world().resource::<TimeControl>().fixed_delta;
+    app.update(step).unwrap();
+
+    let world = app.world();
+    assert!(!world.entity(near).contains::<StreamedOut>());
+    assert!(world.entity(far).contains::<StreamedOut>());
+    assert!(!world.entity(far).contains::<GpuStateMirror>());
+    assert_eq!(
+        world.get::<Transform>(far).unwrap().position,
+        [12.0, 0.0, 0.0]
+    );
+    let rigid = world.get::<RigidBody>(far).unwrap();
+    assert_eq!(rigid.linear_velocity, [3.0, 0.0, 0.0]);
+    assert_eq!(rigid.angular_velocity, [0.0, 1.0, 0.0]);
+    let resident: Vec<_> =
+        super::hybrid_physics::extract_gpu_physics_bodies(app.world_mut())
+            .iter()
+            .map(|body| body.entity)
+            .collect();
+    assert_eq!(resident, [near]);
+
+    // The observer walks over: the far ball comes back from its saved
+    // state and the near one leaves.
+    app.world_mut()
+        .get_mut::<Transform>(observer)
+        .unwrap()
+        .position = [12.0, 0.0, 0.0];
+    // Its world position propagates after the fixed step: one tick late.
+    app.update(step).unwrap();
+    app.update(step).unwrap();
+    let world = app.world();
+    assert!(world.entity(near).contains::<StreamedOut>());
+    assert!(!world.entity(far).contains::<StreamedOut>());
+    let resident: Vec<_> =
+        super::hybrid_physics::extract_gpu_physics_bodies(app.world_mut())
+            .iter()
+            .map(|body| (body.entity, body.transform.position))
+            .collect();
+    assert_eq!(resident, [(far, [12.0, 0.0, 0.0])]);
+}
+
+#[test]
+fn cpu_physics_matches_bit_for_bit_whatever_the_render_frame_rate() {
+    // Frame deltas of a steady 60 Hz, a 144 Hz display, a 30 Hz one, and a
+    // stuttering one that sometimes runs several steps in one frame.
+    let rates: [&[f64]; 4] = [
+        &[1.0 / 60.0],
+        &[1.0 / 144.0],
+        &[1.0 / 30.0],
+        &[0.004, 0.021, 0.0, 0.05, 0.009, 0.033],
+    ];
+    const TICKS: u64 = 240;
+    let runs = rates.map(|deltas| {
+        let mut app = App::new();
+        let world = app.world_mut();
+        cpu_ground(world);
+        let tilted =
+            cpu_body(world, [0.0, 1.5, 0.0], UNIT_BOX, RigidBodyKind::Dynamic);
+        world.get_mut::<Transform>(tilted).unwrap().rotation = [0.3, 0.0, 0.2];
+        let ball = cpu_body(
+            world,
+            [2.0, 3.0, 0.0],
+            ColliderShape::Sphere { radius: 0.25 },
+            RigidBodyKind::Dynamic,
+        );
+        world.get_mut::<Collider>(ball).unwrap().restitution = 0.8;
+        let mut frames = 0;
+        for delta in deltas.iter().cycle() {
+            let ticks = app.world().resource::<FrameTime>().fixed_tick;
+            if ticks >= TICKS {
+                break;
+            }
+            // Never overshoot, so every run stops on the same tick.
+            let left = (TICKS - ticks) as f64 / 60.0;
+            app.update(Duration::from_secs_f64(delta.min(left)))
+                .unwrap();
+            frames += 1;
+        }
+        let world = app.world();
+        assert_eq!(world.resource::<FrameTime>().fixed_tick, TICKS);
+        let state = |entity| {
+            let body = world.get::<RigidBody>(entity).unwrap();
+            (
+                *world.get::<Transform>(entity).unwrap(),
+                body.linear_velocity,
+                body.angular_velocity,
+            )
+        };
+        (frames, state(tilted), state(ball))
+    });
+    let frames = runs.map(|run| run.0);
+    assert!(
+        frames[1] > 2 * frames[0] && frames[2] < frames[0],
+        "{frames:?}"
+    );
+    for run in &runs[1..] {
+        assert_eq!((run.1, run.2), (runs[0].1, runs[0].2));
+    }
 }

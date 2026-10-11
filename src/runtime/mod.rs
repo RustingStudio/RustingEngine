@@ -6,6 +6,7 @@
 mod actions;
 mod animation;
 mod audio;
+pub mod broad_phase;
 mod classes;
 mod click;
 pub mod cloth;
@@ -14,10 +15,13 @@ mod cpu_physics;
 mod determinism;
 mod effect_presets;
 mod events;
+mod flip;
 pub mod fluid;
 pub mod fluid_surface;
+pub mod fracture;
 mod game_feel;
 pub mod gpu_cloth;
+mod granular;
 pub(crate) mod hierarchy;
 mod hybrid_physics;
 mod ik;
@@ -26,6 +30,7 @@ pub mod journal;
 pub mod lease;
 mod particles;
 mod physics_benchmark;
+mod physics_suite;
 pub mod picking;
 mod player;
 mod ragdoll;
@@ -66,21 +71,27 @@ pub use audio::{
 pub use classes::ClassIndex;
 pub use cloth::{Cloth, ClothSettings, ClothSheet, ClothVolume};
 pub use components::*;
+pub use cpu_physics::physics_debug_colors;
 pub(crate) use cpu_physics::{gpu_shape_words, next_spawn_order};
 pub use cpu_physics::{
     Articulation, AxisMotion, CharacterMove, CollisionEvent, CombineMode,
     Contact, FellOut, FieldFunction, FieldKind, FieldSample, ForceField,
     ForceFieldFunctions, GpuCollider, GpuForceField, GravityVolume,
     GroundSurface, Heightfield, Joint, JointAxis, JointBroken, JointKind,
-    JointMotor, JointSpring, MeshSurfaces, NextSpawnOrder, PhysicsMaterial,
-    PhysicsWorld, Polygon2d, RayHit, Sleeping, SpawnOrder, SLEEP_STEPS,
+    JointMotor, JointSpring, MeshSurfaces, NextSpawnOrder, PhysicsDebugDraw,
+    PhysicsMaterial, PhysicsWorld, Polygon2d, RayHit, Sleeping, SpawnOrder,
+    SLEEP_STEPS,
 };
 pub use determinism::*;
 pub use effect_presets::*;
 pub use events::EventQueue;
 pub use fluid::{
     capture_fluids, restore_fluids, Fluid, FluidBlock, FluidParticle,
-    FluidSettings, FluidSurface, FluidVolume,
+    FluidSettings, FluidSolver, FluidSurface, FluidVolume,
+};
+pub use fracture::{
+    Debris, DebrisBudget, Fracture, Fractured, FracturedMesh,
+    MAX_FRACTURE_PIECES,
 };
 pub use game_feel::*;
 pub use hierarchy::{propagate_transforms, HierarchyDiagnostics};
@@ -93,6 +104,7 @@ pub use particles::*;
 pub use physics_benchmark::{
     BenchmarkBody, PhysicsBenchmark, BENCHMARK_TOWER_HEIGHT,
 };
+pub use physics_suite::{SuiteScene, SuiteScore};
 pub use player::*;
 pub use ragdoll::*;
 pub use render_benchmark::*;
@@ -273,6 +285,7 @@ impl Default for App {
         app.add_event::<CollisionEvent>();
         app.add_event::<JointBroken>();
         app.add_event::<FellOut>();
+        app.add_event::<Fractured>();
         app.add_event::<AnimationEvent>();
         // One chain: these systems all write `Transform`, and unordered
         // systems would run in whatever order threads finish.
@@ -283,6 +296,8 @@ impl Default for App {
                     vehicle::drive_vehicles,
                     rope::build_ropes,
                     cpu_physics::step_cpu_physics,
+                    fracture::break_fractures,
+                    fracture::manage_debris,
                 )
                     .chain(),
                 player::player_move,

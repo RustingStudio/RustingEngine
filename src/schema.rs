@@ -1013,9 +1013,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.fluid_block",
-        summary: "Particle fluid: a block of count_x by count_y by count_z particles resting on the floor of a box centered on the entity. It runs every fixed tick, floats and sinks dynamic bodies with sphere colliders, and draws a smooth water surface when visible (show_particles adds a sphere per particle). CPU only, deterministic; a few thousand particles at most.",
+        summary: "Particle fluid: a block of count_x by count_y by count_z particles resting on the floor of a box centered on the entity. It runs every fixed tick, floats and sinks dynamic bodies with sphere colliders, and draws a smooth water surface when visible (show_particles adds a sphere per particle). solver Particles (position based) suits small splashy volumes of a few thousand particles; Grid runs FLIP on a grid over the box and carries large water volumes (softer, slowly loses volume); Granular makes grains with friction (sand, gravel, rubble) that pile into heaps, steeper as friction grows. CPU only, deterministic.",
         gpu: NO_GPU,
-        example: || json!({"spacing": 0.1, "count_x": 6, "count_y": 6, "count_z": 6, "container_half_extents": [0.5, 0.5, 0.5], "iterations": 4, "viscosity": 0.01, "visible": true, "show_particles": false}),
+        example: || json!({"spacing": 0.1, "count_x": 6, "count_y": 6, "count_z": 6, "container_half_extents": [0.5, 0.5, 0.5], "iterations": 4, "viscosity": 0.01, "solver": "Particles", "friction": 0.6, "visible": true, "show_particles": false}),
     },
     ComponentSection {
         key: "rusting.soft_block",
@@ -1048,6 +1048,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         summary: "A 2D outline for a collider with shape \"Polygon\" or \"Chain\" on the same object. points are in the object's XY plane in metres, extruded depth metres along Z, centred on the object and scaled by its transform. Polygon uses the convex hull of the points (dynamic bodies may use it; list the points counterclockwise). Chain makes each segment a thin static wall, closed joins the last point back to the first. Pair dynamic bodies with rusting.axis_lock for 2D. Game code can draw the same shape with Polygon2d::mesh().",
         gpu: NO_GPU,
         example: || json!({"points": [[-1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], "depth": 1.0, "closed": true}),
+    },
+    ComponentSection {
+        key: "rusting.fracture",
+        summary: "How the object's mesh breaks: pieces Voronoi cells around points picked by seed, then every piece cut by each of slices (planes [x, y, z, d] in the object's frame, cutting where [x, y, z] · p = d). The mesh counts as convex, so pieces fill its convex shape; every piece is convex and suits a ConvexMesh collider. Fracture::fracture(mesh) gives the pieces and the connectivity graph of pieces that share a face. At most 256 pieces. During play, contacts bringing break_energy joules or more within one fixed tick (half the reduced mass times the closing speed squared, summed over the tick's hits; 0 never breaks) replace the object (it needs a MeshRenderer) with one dynamic ConvexMesh body per piece, keeping its motion, material and collision layers, and the energy beyond break_energy scatters the pieces from the hardest hit. Pieces only leave or merge once asleep: debris_lifetime seconds after sleeping a piece despawns (0 keeps it), and with merge_debris the pieces of one break, once all asleep, become one Fixed TriangleMesh body. The DebrisBudget resource (default 512, 0 no cap) caps the debris count; a break at the cap first removes the longest-sleeping debris and, when too little sleeps, leaves the object whole for that tick. Each break sends a Fractured event (the object, its name, the piece entities, the hardest hit's point, the tick's energy, the mass, and the world box it filled) for audio, particles, navigation and gameplay.",
+        gpu: NO_GPU,
+        example: || json!({"pieces": 8, "seed": 1, "slices": [[0.0, 1.0, 0.0, 0.0]], "break_energy": 50.0, "debris_lifetime": 10.0, "merge_debris": false}),
     },
     ComponentSection {
         key: "rusting.heightfield",
