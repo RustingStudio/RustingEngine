@@ -81,7 +81,8 @@ pub enum ParticleSimulation {
     /// In a compute shader each frame, for up to `MAX_GPU_PARTICLES`.
     /// Turbulence, start colors, rotation, spin, `Local` space, `Velocity`
     /// facing and collision restarts are ignored, and alpha blended
-    /// particles are not sorted.
+    /// particles are not sorted. GPU force fields push the particles, and
+    /// `collide` bounces them off physics colliders.
     Gpu,
 }
 
@@ -243,6 +244,9 @@ pub struct ParticleEmitter {
     pub blend: ParticleBlend,
     pub sprite: ParticleSprite,
     pub simulation: ParticleSimulation,
+    /// `Gpu` simulation: particles bounce off physics colliders by the
+    /// collider's restitution.
+    pub collide: bool,
     /// Set by `play`, `pause`, `stop`, and `restart`.
     #[serde(skip)]
     pub command: ParticleCommand,
@@ -285,6 +289,7 @@ impl Default for ParticleEmitter {
             blend: ParticleBlend::Alpha,
             sprite: ParticleSprite::Soft,
             simulation: ParticleSimulation::Cpu,
+            collide: false,
             command: ParticleCommand::None,
         }
     }
@@ -959,7 +964,7 @@ pub fn gpu_particle_batch(
             emitter.shape_size[0],
             emitter.shape_size[1],
             emitter.shape_size[2],
-            0.0,
+            f32::from(u8::from(emitter.collide)),
         ],
     ]);
     let life = |sample: usize| sample as f32 / (GPU_PARTICLE_CURVE - 1) as f32;
@@ -1069,6 +1074,7 @@ mod tests {
         let emitter = ParticleEmitter {
             rate: 60.0,
             simulation: ParticleSimulation::Gpu,
+            collide: true,
             max_particles: u32::MAX,
             shape: EmitterShape::Sphere,
             ..ParticleEmitter::default()
@@ -1093,6 +1099,7 @@ mod tests {
         assert_eq!(batch.rows.len(), 9 + 2 * GPU_PARTICLE_CURVE);
         assert_eq!(batch.rows[3], [3.0, 4.0, 5.0, 1.0]);
         assert_eq!(batch.rows[6], [1.0, 2.0, 1.0, 2.0], "lifetime, speed");
+        assert_eq!(batch.rows[8][3], 1.0, "collide");
         // Faded in from transparent, white in the middle of life.
         assert_eq!(batch.rows[9][3], 0.0);
         assert_eq!(batch.rows[9 + 3], [1.0; 4]);

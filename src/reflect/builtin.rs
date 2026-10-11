@@ -477,6 +477,7 @@ crate::reflect! {
         simulation: ParticleSimulation {
             doc: "Gpu: up to 1M particles, fewer settings",
         },
+        collide: bool { doc: "Gpu: bounce off physics colliders" },
         #[skip] command: crate::runtime::ParticleCommand,
     }
 }

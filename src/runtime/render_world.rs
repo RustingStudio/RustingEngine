@@ -471,14 +471,16 @@ pub fn extract_render_world(world: &mut World) {
     };
     // ponytail: rebuilt every frame from the CPU step; a revision would skip
     // the upload for static-only scenes if colliders ever number thousands.
-    let (gpu_colliders, gpu_force_fields) = match world
-        .get_resource::<super::PhysicsWorld>()
-    {
-        Some(physics) if !gpu_physics.as_ref().is_some_and(Vec::is_empty) => {
-            (physics.gpu_colliders(), physics.gpu_force_fields(world))
-        }
-        _ => Default::default(),
-    };
+    let (gpu_colliders, gpu_force_fields) =
+        match world.get_resource::<super::PhysicsWorld>() {
+            Some(physics)
+                if !gpu_physics.as_ref().is_some_and(Vec::is_empty)
+                    || !gpu_particles.is_empty() =>
+            {
+                (physics.gpu_colliders(), physics.gpu_force_fields(world))
+            }
+            _ => Default::default(),
+        };
     let time = *world.resource::<super::FrameTime>();
     let physics_settings = world.resource::<super::PhysicsSettings>().clone();
     let render_settings = world.resource::<super::RenderSettings>();

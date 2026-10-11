@@ -2831,8 +2831,24 @@ Depends on: Milestones 3 and 4.
   `new_spawns_cap_at_one_ring_and_restart_from_zero`. Full check: fmt,
   clippy (default, `--no-default-features`, `gpu-tests`), `cargo test
   --workspace` and the gpu-tests run (1004 lib tests) pass.
-  Not done: collision against physics shapes, attractors, sub-emitters,
-  trails.
+  Step 2, attractors and collision, reusing the physics compute
+  infrastructure: GPU particles feel every GPU force field (directional,
+  radial attractors and repellers, vortex, wind gusts) through
+  `field_push`, now in `src/shaders/physics_fields.glsl` and shared with
+  `physics.comp`. With `collide` on, they bounce off the physics colliders
+  (`physics_shapes.glsl` `shape_distance`, collider restitution). They read
+  the same collider and field uploads (bindings 7 and 14) as GPU physics,
+  now extracted when a GPU emitter exists. Inspector: Collide checkbox for
+  GPU emitters. Limits: each particle tests every collider, ignores
+  collision layers, friction and its own size. Evidence: GPU test
+  `gpu_particles_feel_force_fields_and_stop_at_colliders` (a 100 m/s²
+  field moves a particle 1 m in 0.1 s, then a wall from x = 0.6 holds it).
+  It failed with the field push zeroed ("pushed by the field") and with
+  collision disabled ("stopped by the wall"). The unit test also checks
+  the packed `collide` row. Full check: fmt, clippy (default,
+  `--no-default-features`, `gpu-tests`), `cargo test --workspace` (877
+  lib) and the gpu-tests run (1005 lib) pass.
+  Not done: sub-emitters, trails.
 - [ ] Particle emission driven by physics events: impacts, fracture, debris settling.
 - [ ] Decals, including decals that survive or are invalidated by fracture.
   Partial (lane/render): `rusting.decal` projects an image (or plain color)

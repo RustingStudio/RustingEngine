@@ -20,6 +20,7 @@ use super::scene_renderer::{ParticleVertex, SceneRenderError};
 pub(super) mod shader {
     vulkano_shaders::shader! {
         ty: "compute",
+        include: ["src/shaders"],
         path: "src/shaders/compute/gpu_particles.comp",
     }
 }

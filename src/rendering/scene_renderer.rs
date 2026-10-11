@@ -5616,6 +5616,29 @@ impl SceneRenderer {
                 pipeline
             }
         };
+        let colliders = render_world
+            .gpu_colliders
+            .iter()
+            .map(GpuColliderUpload::from)
+            .collect::<Vec<_>>();
+        let fields = render_world
+            .gpu_force_fields
+            .iter()
+            .map(GpuForceFieldUpload::from)
+            .collect::<Vec<_>>();
+        let transient = &self.frame_contexts[self.frame_index].transient;
+        let collider_buffer = transient
+            .allocate_slice::<GpuColliderUpload>(colliders.len().max(1) as u64)
+            .map_err(|e| error(&e))?;
+        let field_buffer = transient
+            .allocate_slice::<GpuForceFieldUpload>(fields.len().max(1) as u64)
+            .map_err(|e| error(&e))?;
+        collider_buffer.write().map_err(|e| error(&e))?[..colliders.len()]
+            .copy_from_slice(&colliders);
+        field_buffer.write().map_err(|e| error(&e))?[..fields.len()]
+            .copy_from_slice(&fields);
+        self.counters.upload_bytes +=
+            collider_buffer.size() + field_buffer.size();
         for batch in batches {
             let state = match self.gpu_particles.entry(batch.entity) {
                 std::collections::hash_map::Entry::Occupied(entry)
@@ -5661,6 +5684,8 @@ impl SceneRenderer {
                     WriteDescriptorSet::buffer(0, state.particles.clone()),
                     WriteDescriptorSet::buffer(1, state.billboards.clone()),
                     WriteDescriptorSet::buffer(2, settings),
+                    WriteDescriptorSet::buffer(7, collider_buffer.clone()),
+                    WriteDescriptorSet::buffer(14, field_buffer.clone()),
                 ],
                 [],
             )
@@ -5672,10 +5697,10 @@ impl SceneRenderer {
                     seed: [
                         batch.stream as u32,
                         (batch.stream >> 32) as u32,
-                        0,
-                        0,
+                        colliders.len() as u32,
+                        fields.len() as u32,
                     ],
-                    time: [dt, 0.0, 0.0, 0.0],
+                    time: [dt, render_world.elapsed_seconds, 0.0, 0.0],
                 },
                 slots.div_ceil(64),
             ));
@@ -20142,6 +20167,95 @@ mod tests {
         // 0.1 s of 100 m/s² wind: 10 m/s, so 1 m along +x.
         assert_eq!(frame(0.1), (0, 255, 64), "moved by the wind");
         assert_eq!(frame(0.2), (0, 0, 0), "dead past its lifetime");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_particles_feel_force_fields_and_stop_at_colliders() {
+        use crate::runtime::{
+            gpu_particle_batch, CollisionLayers, ColorKey, FieldKind,
+            ForceField, GpuCollider, GpuForceField, ParticleEmitter,
+            ParticleSimulation, ParticleSprite, ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A still particle at x = -0.5 is pushed along +x by a 100 m/s²
+        // field; a thick wall from x = 0.6 stops it.
+        let emitter = ParticleEmitter {
+            simulation: ParticleSimulation::Gpu,
+            collide: true,
+            max_particles: 4,
+            speed: [0.0, 0.0],
+            size: [0.5, 0.5],
+            lifetime: [5.0, 5.0],
+            fade_in: 0.0,
+            fade_out: 0.0,
+            color_over_life: vec![ColorKey {
+                t: 0.0,
+                color: [1.0, 0.0, 0.0, 1.0],
+            }],
+            sprite: ParticleSprite::Square,
+            ..ParticleEmitter::default()
+        };
+        let global = crate::runtime::GlobalTransform {
+            matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                .into(),
+        };
+        let system = ParticleSystem {
+            spawned: 1,
+            ..ParticleSystem::default()
+        };
+        let entity = bevy_ecs::entity::Entity::from_raw_u32(1).unwrap();
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        scene.render_world.gpu_particles = vec![gpu_particle_batch(
+            entity,
+            &emitter,
+            &system,
+            Some(&global),
+            None,
+        )];
+        scene.render_world.gpu_force_fields = vec![GpuForceField {
+            model: crate::Transform::new([0.0; 3]).to_matrix(),
+            shape: [0.0, 100.0, 100.0, 100.0],
+            field: ForceField {
+                kind: FieldKind::Directional,
+                strength: 100.0,
+                direction: [1.0, 0.0, 0.0],
+                ..ForceField::default()
+            },
+        }];
+        scene.render_world.gpu_colliders = vec![GpuCollider {
+            model: crate::Transform::new([5.6, 0.0, 0.0]).to_matrix(),
+            shape: [0.0, 5.0, 5.0, 5.0],
+            velocity: [0.0; 3],
+            friction: 0.0,
+            restitution: 0.0,
+            layers: CollisionLayers::default(),
+        }];
+        let mut frame = |elapsed: f32| {
+            scene.render_world.elapsed_seconds = elapsed;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            let red = |x: usize| pixels[(16 * 32 + x) * 4 + 2];
+            (red(8), red(24))
+        };
+        assert_eq!(frame(0.0), (255, 0), "spawned at x = -0.5");
+        // 0.1 s at 100 m/s²: 10 m/s, so 1 m along +x.
+        assert_eq!(frame(0.1), (0, 255), "pushed by the field");
+        // Unstopped it would be 2 m further, off screen.
+        assert_eq!(frame(0.2), (0, 255), "stopped by the wall");
+        assert_eq!(frame(0.3), (0, 255), "still at the wall");
     }
 
     #[test]
