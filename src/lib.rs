@@ -19,6 +19,7 @@ pub mod cli;
 #[cfg(feature = "editor")]
 pub mod editor;
 pub mod engine;
+pub mod fontgen;
 pub mod geometry;
 pub mod input;
 pub mod meshgen;

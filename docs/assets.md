@@ -25,6 +25,7 @@ Asset: assets/props/crate.png (5cd9ac84-b54f-4ed7-88ad-c8e73cb76421, license CC0
 | Image | `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tga` |
 | Model | `.gltf` (with its external buffers and images), `.glb` |
 | Sound | `.wav`, `.ogg` |
+| Font | `.ttf`, `.otf` |
 
 Import loads the file as the game would, then copies it to
 `assets/<folder>` (`--to props` and `--to assets/props` mean the same
@@ -148,9 +149,10 @@ metadata. It warns on a file changed since import, a file without
 
 ## Generate assets
 
-`asset generate` makes a file from a prompt and imports it. Four
-generators are built in. Each gives the same CC0 file for the same
-prompt, and the optional number picks a variation:
+`asset generate` makes a file from a prompt and imports it. Five
+generators are built in, in one shared palette and chunky style. Each
+gives the same CC0 file for the same prompt, and the optional number
+picks a variation:
 
 | Hook | Prompt | Makes |
 | --- | --- | --- |
@@ -158,6 +160,7 @@ prompt, and the optional number picks a variation:
 | `texture` | `grid`, `checker`, `bricks`, `planks`, `tiles` or `noise`: `bricks 3` | a 256 px tileable PNG |
 | `sprite` | `circle`, `square`, `triangle`, `diamond`, `star` or `heart`: `star 2` | a 128 px outlined PNG on a clear background |
 | `mesh` | `crate`, `barrel`, `rock`, `tree` or `gem`: `barrel 4` | a flat-shaded low-poly `.glb` standing on its origin |
+| `font` | `pixel` or `bold`, with no number | a TrueType pixel font of printable ASCII, for `rusting.hud` `font` and `set_text_in_font` |
 
 ```bash
 rusting asset generate my_game texture "bricks 3" --to textures
@@ -192,7 +195,7 @@ and prints, as its last line, JSON naming it:
 Only `file` is required. The file then goes through `asset import`, so
 its type, size and metadata are checked like any other file. Output with
 no license, from the hook or its config, is refused. A hook named `sfx`,
-`texture`, `sprite` or `mesh` replaces the built-in one.
+`texture`, `sprite`, `mesh` or `font` replaces the built-in one.
 
 ## Export the game
 

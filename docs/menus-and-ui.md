@@ -157,6 +157,20 @@ optional; one left out keeps the default dark look. Colours are RGBA from
 - `rusting lint` judges HUD button text contrast against the theme's
   `button_fill`, so light buttons need dark text.
 
+A HUD element draws in its own font when its `font` names a TTF or OTF
+file under `assets/`. `rusting asset generate . font pixel --to fonts`
+makes a placeholder pixel font (`pixel` or `bold`) in the chunky style
+of the other generated placeholders:
+
+```json
+"rusting.hud": {"text": "Score {coins}", "font": "fonts/pixel.ttf", "font_size": 24.0}
+```
+
+Characters the font lacks come from the built-in font. A missing or
+unreadable file warns once and the text keeps the built-in font. A new
+font shows from the second frame, so a capture at tick 0 still shows the
+built-in one.
+
 ## Scaling the HUD to the window
 
 By default the HUD is drawn at the desktop's DPI scale, so a bigger window

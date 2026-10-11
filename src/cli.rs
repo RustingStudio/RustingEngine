@@ -6339,6 +6339,18 @@ pub fn capture_scene(scene: &Path, options: &CaptureOptions) -> CliResult {
     {
         return CliResult::failure("CAPTURE_FAILED", error.to_string(), None);
     }
+    // HUD fonts and other files under `assets/` resolve from the project.
+    #[cfg(feature = "window")]
+    if let Some(root) = std::path::absolute(scene)
+        .unwrap_or_else(|_| scene.into())
+        .ancestors()
+        .find(|dir| dir.join("project.json").is_file())
+    {
+        app.world_mut()
+            .insert_resource(crate::project_runner::ProjectFolder(
+                root.to_owned(),
+            ));
+    }
     // Game code does not run during a capture, so its components are kept
     // as data rather than rejected.
     app.world_mut()
