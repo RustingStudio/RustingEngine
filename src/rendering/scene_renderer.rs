@@ -20541,6 +20541,27 @@ mod tests {
         assert!(left[0] == left[2] && left[1] > 100, "built-in: {left:?}");
         assert!(near[2] > near[0] && far[0] > far[2], "{near:?} {far:?}");
         assert!(near[1] < 20 && far[1] < 20, "{near:?} {far:?}");
+        // A shader graph compiles to the same gradient.
+        {
+            use crate::rendering::shader_graph::{
+                ShaderGraph, ShaderInput, ShaderNode, SurfaceOutput,
+            };
+            let graph = ShaderGraph {
+                nodes: vec![
+                    ShaderNode::Constant([0.0, 0.0, 1.0, 1.0]),
+                    ShaderNode::Constant([1.0, 0.0, 0.0, 1.0]),
+                    ShaderNode::Input(ShaderInput::Uv),
+                    ShaderNode::Component(2, 0),
+                    ShaderNode::Mix(0, 1, 3),
+                ],
+                outputs: vec![(SurfaceOutput::BaseColor, 4)],
+            };
+            let graphed = shaded(&mut scene, &graph.compile().unwrap());
+            place(&mut scene, graphed);
+            assert_eq!(render_pixel(&mut scene, [21, 16]), near);
+            assert_eq!(render_pixel(&mut scene, [26, 16]), far);
+            assert!(scene.renderer.shader_errors().0.is_empty());
+        }
         // `i.time` is the render world's clock.
         let clock = shaded(
             &mut scene,

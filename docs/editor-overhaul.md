@@ -425,3 +425,12 @@ record mode and the rest-pose preview. Later:
 - `rusting.lightmap` rebakes only when an object, mesh, material or light
   changes. Add a "Rebake lightmaps" button and a texel density preview
   (checker overlay sized by `resolution`) on selected lightmapped objects.
+
+## Deferred: shader graph editor
+
+- `ShaderGraph` (`src/rendering/shader_graph.rs`) compiles nodes to a
+  surface shader but has no editor yet. Add a node canvas area (Blender's
+  shader editor layout: nodes with typed sockets, drag-to-wire, a node
+  search popup) that edits a material's graph and writes the compiled
+  source to its `shader` through snapshot undo. Shader errors already show
+  in Render Settings.

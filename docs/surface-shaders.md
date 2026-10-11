@@ -261,8 +261,40 @@ shader and the fog shader compile together. A fog shader that fails leaves
 the built-in fog, prints the error once, and `SceneRenderer::sky_shader_error`
 and `SceneRenderer::surface_shader_errors` keep it.
 
+## Shader graphs
+
+`rusting_engine::rendering::shader_graph::ShaderGraph` builds a surface
+shader from nodes instead of text, and `compile` turns it into the same
+`#rusting surface 1` GLSL a material's `shader` takes. Every node gives a
+`vec4`, so any node plugs into any other; scalars fill all four lanes and
+vectors pad with zeros. A node reads only nodes before it in the list.
+
+```rust
+use rusting_engine::rendering::shader_graph::*;
+
+// base_color = mix(blue, red, uv.x)
+let graph = ShaderGraph {
+    nodes: vec![
+        ShaderNode::Constant([0.0, 0.0, 1.0, 1.0]),
+        ShaderNode::Constant([1.0, 0.0, 0.0, 1.0]),
+        ShaderNode::Input(ShaderInput::Uv),
+        ShaderNode::Component(2, 0),
+        ShaderNode::Mix(0, 1, 3),
+    ],
+    outputs: vec![(SurfaceOutput::BaseColor, 4)],
+};
+let shader = graph.compile().unwrap();
+assert!(shader.starts_with("#rusting surface 1"));
+```
+
+Nodes: `Input` (a `SurfaceInput` field or the surface's own value),
+`Constant`, `Add`, `Subtract`, `Multiply`, `Mix`, `Sin`, `Fract` and
+`Component` (one lane). Outputs write `base_color`, `normal`, `metallic`
+and `roughness` (lane `x`) or `emissive`. A graph is plain serde data.
+
 ## Not yet
 
+- The editor has no node canvas for shader graphs yet; build them in code.
 - Scene files do not save a material's `shader`, so surface shaders come
   from game code.
 - The depth prepass and shadows ignore the surface shader, so `discard`

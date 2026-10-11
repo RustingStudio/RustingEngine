@@ -20,6 +20,7 @@ mod post_effects;
 pub mod readback;
 pub mod render_scale;
 pub mod scene_renderer;
+pub mod shader_graph;
 mod sky;
 pub mod swapchain;
 

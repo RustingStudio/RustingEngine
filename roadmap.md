@@ -3095,6 +3095,19 @@ Depends on: Milestones 3 and 4.
   `shader` (needs a cooked format version); the depth prepass and shadows
   ignore the surface shader; post shaders cannot read depth.
 - [ ] A visual shader graph that compiles to the same language.
+  Partial (lane/render): `rendering::shader_graph::ShaderGraph` is serde
+  data (nodes `Input`, `Constant`, `Add`, `Subtract`, `Multiply`, `Mix`,
+  `Sin`, `Fract`, `Component`; outputs onto `Surface` fields) whose
+  `compile` emits `#rusting surface 1` GLSL, every node a `vec4` read only
+  by later nodes. Evidence: `graphs_compile_in_node_order_and_reject_bad_wiring`
+  (exact GLSL, serde round trip, forward reads, missing nodes, bad lanes
+  and NaN rejected) and `surface_shaders_color_their_material_per_pixel`
+  (a graph-built `mix(blue, red, uv.x)` draws the hand-written gradient's
+  pixels with no shader errors; it failed with `Mix` arguments swapped).
+  `docs/surface-shaders.md` "Shader graphs" covers it. Full check: fmt,
+  clippy x3, `cargo test --workspace` (lib 890) and the gpu-tests run
+  (lib 1031) pass.
+  Not done: the editor node canvas (backlog in `docs/editor-overhaul.md`).
 - [x] Shader hot reload with error reporting in the editor.
   Evidence: the renderer keys every shader build by its source text and
   drops builds no material, emitter or scene uses, so editing a shader in
