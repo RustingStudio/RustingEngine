@@ -4,7 +4,8 @@
 //! cargo run --release --features window --example black_hole -- 60000
 //! ```
 //!
-//! The argument is the number of disk particles (default 60000). Every body
+//! The argument is the number of disk particles (default 60000); add
+//! `--no-planets` for the disk alone. Every body
 //! is a GPU body with gravity off; one condition shader pulls them all toward
 //! the hole with Newtonian gravity, so the disk turns faster on the inside
 //! than on the outside. Planets also feel a little drag, spiral in, and
@@ -64,7 +65,12 @@ void condition(inout PhysicsState body) {
 fn particle_count() -> usize {
     std::env::args()
         .nth(1)
+        .filter(|arg| !arg.starts_with("--"))
         .map_or(60_000, |count| count.parse().expect("particle count"))
+}
+
+fn with_planets() -> bool {
+    !std::env::args().any(|arg| arg == "--no-planets")
 }
 
 /// A fixed value in [0, 1) for one index and channel.
@@ -213,18 +219,23 @@ fn create(scene: &mut GameScene<'_>) {
         velocities.push(circular_velocity(position));
     }
 
-    let planets = [
-        // Color, radius, distance, angle, share of the circular speed: the
-        // slower ones plunge first.
-        ([0.15, 0.35, 0.9], 4.5, 90.0, 0.0_f32, 0.35),
-        ([0.85, 0.3, 0.1], 3.5, 100.0, 1.3, 0.5),
-        ([0.1, 0.7, 0.6], 2.5, 80.0, 2.4, 0.6),
-        ([0.95, 0.8, 0.45], 5.5, 115.0, 3.6, 0.45),
-        ([0.5, 0.2, 0.8], 2.0, 95.0, 4.9, 0.7),
-    ];
+    let planets = if with_planets() {
+        [
+            // Color, radius, distance, angle, share of the circular speed: the
+            // slower ones plunge first.
+            ([0.15, 0.35, 0.9], 4.5, 90.0, 0.0_f32, 0.35),
+            ([0.85, 0.3, 0.1], 3.5, 100.0, 1.3, 0.5),
+            ([0.1, 0.7, 0.6], 2.5, 80.0, 2.4, 0.6),
+            ([0.95, 0.8, 0.45], 5.5, 115.0, 3.6, 0.45),
+            ([0.5, 0.2, 0.8], 2.0, 95.0, 4.9, 0.7),
+        ]
+        .to_vec()
+    } else {
+        Vec::new()
+    };
     let planet = SphereSpawn::new().subdivisions(64).class("hole_planet");
     for (index, (color, size, radius, angle, _)) in
-        planets.into_iter().enumerate()
+        planets.iter().copied().enumerate()
     {
         let material = scene.create_material(MaterialAsset {
             base_color: [color[0], color[1], color[2], 1.0],

@@ -125,5 +125,15 @@ path = "src/examples/black_hole.rs"
 required-features = ["window"]
 
 [[example]]
+name = "galaxy_collision"
+path = "src/examples/galaxy_collision.rs"
+required-features = ["window"]
+
+[[example]]
+name = "tower_collapse"
+path = "src/examples/tower_collapse.rs"
+required-features = ["window"]
+
+[[example]]
 name = "render_bench"
 path = "src/examples/render_bench.rs"
