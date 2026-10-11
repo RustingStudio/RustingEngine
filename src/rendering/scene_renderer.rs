@@ -19354,4 +19354,82 @@ mod tests {
             [vec![2], vec![5], vec![2, 3, 4], vec![2], vec![2, 4]]
         );
     }
+
+    /// State read back while frames overlap carries the tick it was taken
+    /// on, and the counters report how many frames it waited.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn overlapped_state_readback_reports_its_tick_and_frame_age() {
+        use crate::runtime::{
+            ExtractedGpuPhysicsBody, PhysicsId, PhysicsSyncMode,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        // 6 m/s is 0.1 m a tick.
+        world.gpu_physics = vec![ExtractedGpuPhysicsBody {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(3000).unwrap(),
+            physics_id: PhysicsId {
+                slot: 0,
+                generation: 0,
+            },
+            transform: crate::Transform::default(),
+            rigid_body: crate::runtime::RigidBody {
+                linear_velocity: [6.0, 0.0, 0.0],
+                ..Default::default()
+            },
+            solver: Default::default(),
+            collider: None,
+            custom_shader: None,
+            rules: Vec::new(),
+            sync: PhysicsSyncMode::SelectedState,
+        }];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0; 3];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        // Three frames go out before any is waited on.
+        let mut in_flight = Vec::new();
+        for tick in 1..=3 {
+            scene.render_world.physics_tick = tick;
+            let before = scene.now();
+            in_flight.push(
+                scene.render(before).then_signal_fence_and_flush().unwrap(),
+            );
+        }
+        scene.renderer.block_until_physics_readbacks_complete();
+        let states = scene.renderer.take_completed_physics_states();
+        let mut ticks =
+            states.iter().map(|state| state.tick).collect::<Vec<_>>();
+        ticks.sort_unstable();
+        assert_eq!(ticks, [1, 2, 3]);
+        for state in &states {
+            let x = state.transform.position[0];
+            assert!((x - 0.1 * state.tick as f32).abs() < 1e-5, "{state:?}");
+        }
+        drop(in_flight);
+        // The next frame's counters show the oldest waited two frames
+        // past its own.
+        scene.render_world.physics_tick = 4;
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        assert_eq!(
+            scene
+                .renderer
+                .render_counters()
+                .physics_readback_latency_frames,
+            2
+        );
+    }
 }
