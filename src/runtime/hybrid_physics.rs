@@ -31,7 +31,8 @@ use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::lifecycle::RemovedComponents;
 use bevy_ecs::prelude::{
-    Changed, Commands, IntoScheduleConfigs, Query, Ref, ResMut, Resource, World,
+    Changed, Commands, Has, IntoScheduleConfigs, Query, Ref, Res, ResMut,
+    Resource, With, Without, World,
 };
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -1071,6 +1072,106 @@ impl Default for GpuSimulationLod {
     }
 }
 
+/// Device budget for GPU bodies. With this resource and at least one
+/// [`SimulationObserver`], at most `max_resident` GPU bodies (each a
+/// [`GpuBodyState`] in device memory) stay on the GPU: the nearest to an
+/// observer, ties broken by [`PhysicsId::slot`]. The rest stream out: each
+/// takes its last read-back state into its `Transform` and `RigidBody`,
+/// gains [`StreamedOut`] and leaves the GPU; it streams back in from that
+/// state when it ranks inside the budget again. A body without read-back
+/// state (`PhysicsSyncMode::None`) comes back from wherever its `Transform`
+/// last was. Decided each fixed tick, from observer world positions as of
+/// the last frame.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuStreamingBudget {
+    pub max_resident: usize,
+}
+
+/// A GPU body that [`GpuStreamingBudget`] moved out of device memory. It is
+/// not simulated and is drawn at its `Transform`.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamedOut;
+
+/// Applies [`GpuStreamingBudget`].
+/// ponytail: no hysteresis, so two bodies trading places at the budget's edge
+/// stream every tick; add a margin if that shows. The saved state is the
+/// last read-back one, up to a few ticks old (exact for a body frozen by
+/// [`GpuSimulationLod`]).
+#[allow(clippy::type_complexity)]
+fn stream_gpu_bodies(
+    mut commands: Commands,
+    budget: Option<Res<GpuStreamingBudget>>,
+    observers: Query<
+        (&Transform, Option<&super::GlobalTransform>),
+        With<SimulationObserver>,
+    >,
+    mut bodies: Query<
+        (
+            Entity,
+            &PhysicsId,
+            &super::PhysicsBody,
+            &mut Transform,
+            Option<&mut super::RigidBody>,
+            Option<&GpuStateMirror>,
+            Has<StreamedOut>,
+        ),
+        Without<SimulationObserver>,
+    >,
+) {
+    let observers: Vec<[f32; 3]> = observers
+        .iter()
+        .map(|(transform, global)| {
+            global.map_or(transform.position, |global| {
+                let [x, y, z, _] = global.matrix[3];
+                [x, y, z]
+            })
+        })
+        .collect();
+    let keep = match budget {
+        Some(budget) if !observers.is_empty() => budget.max_resident,
+        _ => usize::MAX,
+    };
+    let mut ranked: Vec<_> = bodies
+        .iter()
+        .filter(|(_, _, body, ..)| body.uses_gpu())
+        .map(|(entity, id, _, transform, _, mirror, out)| {
+            let at = match mirror {
+                Some(mirror) if !out => mirror.transform.position,
+                _ => transform.position,
+            };
+            let nearest = observers
+                .iter()
+                .map(|o| (0..3).map(|i| (at[i] - o[i]).powi(2)).sum::<f32>())
+                .fold(f32::INFINITY, f32::min);
+            (nearest, id.slot, entity)
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    for (rank, (_, _, entity)) in ranked.into_iter().enumerate() {
+        let Ok((_, _, _, mut transform, rigid, mirror, out)) =
+            bodies.get_mut(entity)
+        else {
+            continue;
+        };
+        let resident = rank < keep;
+        if resident && out {
+            commands.entity(entity).remove::<StreamedOut>();
+        } else if !resident && !out {
+            if let Some(mirror) = mirror {
+                *transform = mirror.transform;
+                if let Some(mut rigid) = rigid {
+                    rigid.linear_velocity = mirror.linear_velocity;
+                    rigid.angular_velocity = mirror.angular_velocity;
+                }
+            }
+            commands
+                .entity(entity)
+                .insert(StreamedOut)
+                .remove::<GpuStateMirror>();
+        }
+    }
+}
+
 impl GpuSimulationLod {
     /// Ticks of time a body `distance_squared` from its nearest observer
     /// steps over on `tick`: 1 at full rate, `reduced_stride` on its reduced
@@ -1406,9 +1507,10 @@ pub fn apply_gpu_state_samples(
             report.stale += 1;
             continue;
         };
-        if entity
-            .get::<GpuStateMirror>()
-            .is_some_and(|mirror| mirror.tick > sample.tick)
+        if entity.contains::<StreamedOut>()
+            || entity
+                .get::<GpuStateMirror>()
+                .is_some_and(|mirror| mirror.tick > sample.tick)
         {
             continue;
         }
@@ -1498,7 +1600,7 @@ pub(super) fn simple_gpu_physics_signature(world: &mut World) -> u64 {
         .get()
         .hash(&mut hasher);
     let mut count = 0_u64;
-    let mut query = world.query::<(
+    let mut query = world.query_filtered::<(
         Entity,
         &PhysicsId,
         &Transform,
@@ -1509,7 +1611,7 @@ pub(super) fn simple_gpu_physics_signature(world: &mut World) -> u64 {
         Option<&PhysicsSyncMode>,
         Option<Ref<super::Collider>>,
         Option<Ref<super::CollisionLayers>>,
-    )>();
+    ), Without<StreamedOut>>();
     for (
         entity,
         id,
@@ -1582,7 +1684,7 @@ pub(super) fn extract_gpu_physics_bodies(
     let class_watches = world.resource::<GpuPhysicsClassWatches>().clone();
     let needs_class_lookup = !class_watches.classes.is_empty();
     let raw = {
-        let mut query = world.query::<(
+        let mut query = world.query_filtered::<(
             Entity,
             &PhysicsId,
             &Transform,
@@ -1593,7 +1695,7 @@ pub(super) fn extract_gpu_physics_bodies(
             Option<&PhysicsSyncMode>,
             Option<&super::Collider>,
             Option<&super::CollisionLayers>,
-        )>();
+        ), Without<StreamedOut>>();
         query
             .iter(world)
             .filter(|(_, _, _, body, ..)| body.uses_gpu())
@@ -1782,7 +1884,8 @@ impl Plugin for HybridPhysicsPlugin {
                 ScheduleStage::PostUpdate,
                 (allocate_auto_simulation, maintain_gpu_physics_ids).chain(),
             )
-            .add_systems(ScheduleStage::Update, sync_gpu_query_proxies);
+            .add_systems(ScheduleStage::Update, sync_gpu_query_proxies)
+            .add_systems(ScheduleStage::FixedUpdate, stream_gpu_bodies);
         Ok(())
     }
 }

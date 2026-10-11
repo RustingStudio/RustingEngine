@@ -8125,3 +8125,77 @@ fn a_fluid_surface_reaches_rendering_only_through_extraction() {
     assert_eq!(extracted.len(), 1);
     assert_eq!(extracted[0].mesh, mesh);
 }
+
+#[test]
+fn a_streaming_budget_keeps_the_nearest_gpu_bodies_and_saves_the_rest() {
+    let mut app = App::new();
+    app.add_plugin(HybridPhysicsPlugin).unwrap();
+    app.insert_resource(GpuStreamingBudget { max_resident: 1 });
+    let observer = app.spawn((Transform::default(), SimulationObserver));
+    let ball = |app: &mut App, x: f32| {
+        app.spawn((
+            Transform::default().with_position(x, 0.0, 0.0),
+            PhysicsBody {
+                simulation: SimulationClass::Gpu,
+                ..PhysicsBody::default()
+            },
+            RigidBody::default(),
+            PhysicsSyncMode::SelectedState,
+        ))
+    };
+    let near = ball(&mut app, 1.0);
+    let far = ball(&mut app, 10.0);
+    app.update(Duration::ZERO).unwrap();
+    // The GPU has moved the far ball on since it was authored.
+    let id = *app.world().get::<PhysicsId>(far).unwrap();
+    apply_gpu_state_samples(
+        app.world_mut(),
+        &[GpuStateSample {
+            physics_id: id,
+            tick: 1,
+            transform: Transform::default().with_position(12.0, 0.0, 0.0),
+            linear_velocity: [3.0, 0.0, 0.0],
+            angular_velocity: [0.0, 1.0, 0.0],
+            custom_values: None,
+        }],
+    );
+    let step = app.world().resource::<TimeControl>().fixed_delta;
+    app.update(step).unwrap();
+
+    let world = app.world();
+    assert!(!world.entity(near).contains::<StreamedOut>());
+    assert!(world.entity(far).contains::<StreamedOut>());
+    assert!(!world.entity(far).contains::<GpuStateMirror>());
+    assert_eq!(
+        world.get::<Transform>(far).unwrap().position,
+        [12.0, 0.0, 0.0]
+    );
+    let rigid = world.get::<RigidBody>(far).unwrap();
+    assert_eq!(rigid.linear_velocity, [3.0, 0.0, 0.0]);
+    assert_eq!(rigid.angular_velocity, [0.0, 1.0, 0.0]);
+    let resident: Vec<_> =
+        super::hybrid_physics::extract_gpu_physics_bodies(app.world_mut())
+            .iter()
+            .map(|body| body.entity)
+            .collect();
+    assert_eq!(resident, [near]);
+
+    // The observer walks over: the far ball comes back from its saved
+    // state and the near one leaves.
+    app.world_mut()
+        .get_mut::<Transform>(observer)
+        .unwrap()
+        .position = [12.0, 0.0, 0.0];
+    // Its world position propagates after the fixed step: one tick late.
+    app.update(step).unwrap();
+    app.update(step).unwrap();
+    let world = app.world();
+    assert!(world.entity(near).contains::<StreamedOut>());
+    assert!(!world.entity(far).contains::<StreamedOut>());
+    let resident: Vec<_> =
+        super::hybrid_physics::extract_gpu_physics_bodies(app.world_mut())
+            .iter()
+            .map(|body| (body.entity, body.transform.position))
+            .collect();
+    assert_eq!(resident, [(far, [12.0, 0.0, 0.0])]);
+}
