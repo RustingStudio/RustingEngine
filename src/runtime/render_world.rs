@@ -681,10 +681,36 @@ fn collect_gpu_particles(world: &mut World) -> Vec<super::GpuParticleBatch> {
                 && visible_in_hierarchy(world, *entity)
         })
         .map(|(entity, emitter, system, global, id)| {
-            super::gpu_particle_batch(entity, emitter, system, global, id)
+            let mut batch =
+                super::gpu_particle_batch(entity, emitter, system, global, id);
+            if emitter.on_parent_death > 0 {
+                batch.parent = world
+                    .get::<super::Parent>(entity)
+                    .map(|parent| (parent.0, emitter.on_parent_death));
+            }
+            batch
         })
         .collect::<Vec<_>>();
-    batches.sort_by_key(|batch| batch.entity);
+    // One level: a sub-emitter's parent must be a plain GPU emitter.
+    let parents = batches
+        .iter()
+        .filter(|batch| batch.parent.is_none())
+        .map(|batch| (batch.entity, batch.max_particles))
+        .collect::<std::collections::HashMap<_, _>>();
+    for batch in &mut batches {
+        let Some((parent, burst)) = batch.parent else {
+            continue;
+        };
+        match parents.get(&parent) {
+            Some(slots) => {
+                let most = super::MAX_GPU_PARTICLES / burst * burst;
+                batch.max_particles = slots.saturating_mul(burst).min(most);
+            }
+            None => batch.parent = None,
+        }
+    }
+    // Parents step before their sub-emitters.
+    batches.sort_by_key(|batch| (batch.parent.is_some(), batch.entity));
     batches
 }
 
@@ -1142,6 +1168,47 @@ mod tests {
             material: server.fallback_material,
             cast_shadows: true,
             receive_shadows: true,
+        }
+    }
+
+    #[test]
+    fn sub_emitters_follow_a_plain_gpu_parent_and_step_after_it() {
+        use crate::runtime::{
+            ParticleEmitter, ParticleSimulation, ParticleSystem,
+        };
+        let gpu = |on_parent_death| {
+            (
+                ParticleEmitter {
+                    simulation: ParticleSimulation::Gpu,
+                    max_particles: 10,
+                    on_parent_death,
+                    ..ParticleEmitter::default()
+                },
+                ParticleSystem::default(),
+            )
+        };
+        let mut world = World::new();
+        // Spawned first, so it sorts first by entity alone.
+        let child = world.spawn(gpu(3)).id();
+        let orphan = world.spawn(gpu(3)).id();
+        let parent = world.spawn(gpu(0)).id();
+        let grandchild = world.spawn(gpu(2)).id();
+        world
+            .entity_mut(child)
+            .insert(crate::runtime::Parent(parent));
+        world
+            .entity_mut(grandchild)
+            .insert(crate::runtime::Parent(child));
+        let batches = collect_gpu_particles(&mut world);
+        let found = batches
+            .iter()
+            .map(|batch| (batch.entity, batch.parent, batch.max_particles))
+            .collect::<Vec<_>>();
+        // The sub-emitter steps last, with a slot per parent slot spawn.
+        assert_eq!(found[3], (child, Some((parent, 3)), 30));
+        // No parent, and no sub-emitter parent: plain emitters.
+        for plain in [orphan, parent, grandchild] {
+            assert!(found[..3].contains(&(plain, None, 10)));
         }
     }
 

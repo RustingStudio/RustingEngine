@@ -2808,8 +2808,8 @@ Depends on: Milestones 3 and 4.
 
 ### Geometry and effects
 
-- [ ] GPU particle system reusing the physics compute infrastructure, with collision against physics shapes, attractors, sub-emitters, and trails.
-  Partial (lane/render), step 1, GPU simulation: `rusting.particle_emitter`
+- [x] GPU particle system reusing the physics compute infrastructure, with collision against physics shapes, attractors, sub-emitters, and trails.
+  Done on lane/render in four steps. Step 1, GPU simulation: `rusting.particle_emitter`
   takes `simulation` (`Cpu` default, `Gpu`). A GPU emitter's fixed step only
   counts spawns (same rate, bursts, cycles and seed stream as the CPU path);
   each frame `gpu_particles.comp` respawns the ring slots the new spawns
@@ -2862,7 +2862,23 @@ Depends on: Milestones 3 and 4.
   0"). The unit test checks the trail row. Full check: fmt, clippy
   (default, `--no-default-features`, `gpu-tests`), `cargo test --workspace`
   (877 lib) and the gpu-tests run (1006 lib) pass.
-  Not done: sub-emitters.
+  Step 4, sub-emitters: a GPU emitter with `on_parent_death` N under a
+  parent GPU emitter gets N slots per parent slot. Each frame it steps
+  right after its parent, and when a parent particle dies (the shader
+  flags the death and keeps the spawn number), its N slots respawn at the
+  death point with the child's own settings and a random stream from the
+  parent's spawn number. One level only: a sub-emitter under a sub-emitter
+  is a plain emitter. Inspector: On Parent Death drag for GPU emitters.
+  Evidence: unit test
+  `sub_emitters_follow_a_plain_gpu_parent_and_step_after_it` (parent
+  lookup, slot count, step order, orphans and second-level emitters are
+  plain); GPU test `gpu_sub_emitters_spawn_where_parent_particles_die` (a
+  green parent dies at x = -0.5 and red children appear there, away from
+  the child emitter's own transform, then fly 1 m in 0.1 s). It failed
+  with the parent death check removed ("parent died, children spawned").
+  Full check: fmt, clippy (default, `--no-default-features`,
+  `gpu-tests`), `cargo test --workspace` (878 lib) and the gpu-tests run
+  (1008 lib) pass.
 - [ ] Particle emission driven by physics events: impacts, fracture, debris settling.
 - [ ] Decals, including decals that survive or are invalidated by fracture.
   Partial (lane/render): `rusting.decal` projects an image (or plain color)

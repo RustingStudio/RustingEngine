@@ -5640,6 +5640,11 @@ impl SceneRenderer {
         self.counters.upload_bytes +=
             collider_buffer.size() + field_buffer.size();
         for batch in batches {
+            // A sub-emitter reads its parent's slots, stepped just before.
+            let parent = batch.parent.and_then(|(parent, burst)| {
+                let state = self.gpu_particles.get(&parent)?;
+                Some((state.particles.clone(), burst, 3 + state.trail_points))
+            });
             let state = match self.gpu_particles.entry(batch.entity) {
                 std::collections::hash_map::Entry::Occupied(entry)
                     if entry.get().slots == batch.max_particles
@@ -5667,8 +5672,11 @@ impl SceneRenderer {
                 }
             };
             let slots = state.slots;
-            let (first, count) =
-                new_spawns(state.spawned, batch.spawned, slots);
+            let (first, count) = if parent.is_some() {
+                (0, 0)
+            } else {
+                new_spawns(state.spawned, batch.spawned, slots)
+            };
             state.spawned = batch.spawned;
             let settings = self.frame_contexts[self.frame_index]
                 .transient
@@ -5685,7 +5693,11 @@ impl SceneRenderer {
                 [
                     WriteDescriptorSet::buffer(0, state.particles.clone()),
                     WriteDescriptorSet::buffer(1, state.billboards.clone()),
-                    WriteDescriptorSet::buffer(2, settings),
+                    WriteDescriptorSet::buffer(2, settings.clone()),
+                    WriteDescriptorSet::buffer(
+                        3,
+                        parent.as_ref().map_or(settings, |p| p.0.clone()),
+                    ),
                     WriteDescriptorSet::buffer(7, collider_buffer.clone()),
                     WriteDescriptorSet::buffer(14, field_buffer.clone()),
                 ],
@@ -5702,7 +5714,12 @@ impl SceneRenderer {
                         colliders.len() as u32,
                         fields.len() as u32,
                     ],
-                    time: [dt, render_world.elapsed_seconds, 0.0, 0.0],
+                    time: [
+                        dt,
+                        render_world.elapsed_seconds,
+                        parent.as_ref().map_or(0.0, |p| p.1 as f32),
+                        parent.as_ref().map_or(0.0, |p| p.2 as f32),
+                    ],
                 },
                 slots.div_ceil(64),
             ));
@@ -20331,6 +20348,100 @@ mod tests {
         assert_eq!(head, 255, "the particle itself");
         assert!(behind > 50, "its trail behind it: {behind}");
         assert_eq!(run(0.0), (0, 255), "no trail without `trail`");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_sub_emitters_spawn_where_parent_particles_die() {
+        use crate::runtime::{
+            gpu_particle_batch, ColorKey, ParticleEmitter, ParticleSimulation,
+            ParticleSprite, ParticleSystem,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let emitter =
+            |color: [f32; 4], speed: f32, lifetime: f32| ParticleEmitter {
+                simulation: ParticleSimulation::Gpu,
+                max_particles: 1,
+                direction: [1.0, 0.0, 0.0],
+                spread: 0.0,
+                speed: [speed, speed],
+                size: [0.5, 0.5],
+                lifetime: [lifetime, lifetime],
+                fade_in: 0.0,
+                fade_out: 0.0,
+                color_over_life: vec![ColorKey { t: 0.0, color }],
+                sprite: ParticleSprite::Square,
+                ..ParticleEmitter::default()
+            };
+        // A still green parent particle at x = -0.5 dies after 0.05 s; its
+        // sub-emitter then spawns red particles there that fly along +x at
+        // 10 m/s.
+        let parent = emitter([0.0, 1.0, 0.0, 1.0], 0.0, 0.05);
+        let child = emitter([1.0, 0.0, 0.0, 1.0], 10.0, 5.0);
+        let global = crate::runtime::GlobalTransform {
+            matrix: Matrix4::new_translation(&Vector3::new(-0.5, 0.0, 0.0))
+                .into(),
+        };
+        // The child emitter itself sits elsewhere: spawns follow the parent
+        // particle, not the child's transform.
+        let elsewhere = crate::runtime::GlobalTransform {
+            matrix: Matrix4::new_translation(&Vector3::new(5.0, 5.0, 0.0))
+                .into(),
+        };
+        let parent_entity = bevy_ecs::entity::Entity::from_raw_u32(1).unwrap();
+        let child_entity = bevy_ecs::entity::Entity::from_raw_u32(2).unwrap();
+        let mut child_batch = gpu_particle_batch(
+            child_entity,
+            &child,
+            &ParticleSystem::default(),
+            Some(&elsewhere),
+            None,
+        );
+        child_batch.parent = Some((parent_entity, 2));
+        child_batch.max_particles = 2;
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        scene.render_world.gpu_particles = vec![
+            gpu_particle_batch(
+                parent_entity,
+                &parent,
+                &ParticleSystem {
+                    spawned: 1,
+                    ..ParticleSystem::default()
+                },
+                Some(&global),
+                None,
+            ),
+            child_batch,
+        ];
+        let mut frame = |elapsed: f32| {
+            scene.render_world.elapsed_seconds = elapsed;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            let red = |x: usize| pixels[(16 * 32 + x) * 4 + 2];
+            let green = |x: usize| pixels[(16 * 32 + x) * 4 + 1];
+            (green(8), red(8), red(24))
+        };
+        assert_eq!(frame(0.0), (255, 0, 0), "parent alive");
+        assert_eq!(frame(0.1), (0, 255, 0), "parent died, children spawned");
+        // 0.1 s at 10 m/s: 1 m along +x.
+        assert_eq!(frame(0.2), (0, 0, 255), "children flew on");
+        assert_eq!(
+            frame(0.3),
+            (0, 0, 0),
+            "children flew off screen, none respawned"
+        );
     }
 
     #[test]

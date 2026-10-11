@@ -250,6 +250,10 @@ pub struct ParticleEmitter {
     /// `Gpu` simulation: seconds of path each particle trails behind it,
     /// 0 for none.
     pub trail: f32,
+    /// `Gpu` simulation under a parent `Gpu` emitter: a sub-emitter that
+    /// spawns this many particles where each parent particle dies, instead
+    /// of by rate and bursts. 0 for a normal emitter.
+    pub on_parent_death: u32,
     /// Set by `play`, `pause`, `stop`, and `restart`.
     #[serde(skip)]
     pub command: ParticleCommand,
@@ -294,6 +298,7 @@ impl Default for ParticleEmitter {
             simulation: ParticleSimulation::Cpu,
             collide: false,
             trail: 0.0,
+            on_parent_death: 0,
             command: ParticleCommand::None,
         }
     }
@@ -923,6 +928,9 @@ pub struct GpuParticleBatch {
     pub shape: u32,
     /// Trail points each particle keeps: 0, or `GPU_TRAIL_POINTS`.
     pub trail_points: u32,
+    /// Sub-emitter's parent emitter and spawns per parent death, set by
+    /// render extraction when the parent is a `Gpu` emitter.
+    pub parent: Option<(Entity, u32)>,
     /// Settings the compute shader reads: emitter matrix columns, then
     /// direction and spread, wind and gravity, lifetime and speed ranges,
     /// size range, drag and emissive, shape size and collide, trail seconds
@@ -999,6 +1007,7 @@ pub fn gpu_particle_batch(
         sprite: emitter.sprite,
         shape: emitter.shape as u32,
         trail_points,
+        parent: None,
         rows,
     }
 }

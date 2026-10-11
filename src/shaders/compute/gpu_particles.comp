@@ -31,6 +31,8 @@ layout(set = 0, binding = 1) writeonly buffer Billboards {
 };
 // `GpuParticleBatch::rows`.
 layout(set = 0, binding = 2) readonly buffer Settings { vec4 rows[]; };
+// A sub-emitter's parent `slot_rows`, stepped just before this dispatch.
+layout(set = 0, binding = 3) readonly buffer Parent { vec4 parent_rows[]; };
 
 // Physics colliders, laid out like `physics.comp`'s.
 struct Collider {
@@ -47,7 +49,8 @@ layout(push_constant) uniform Step {
     uvec4 spawn;
     // Stream low and high bits, colliders, force fields.
     uvec4 seed;
-    // Seconds since the last frame, scene time.
+    // Seconds since the last frame, scene time; for a sub-emitter, spawns
+    // per parent death and parent slot stride in rows, else 0.
     vec4 time;
 } step;
 
@@ -99,11 +102,21 @@ void main() {
     Particle p = Particle(slot_rows[base], slot_rows[base + 1u], slot_rows[base + 2u]);
     float dt = step.time.x;
     bool born = false;
-    // The new spawn landing in this slot, if any.
+    mat4 frame = mat4(rows[0], rows[1], rows[2], rows[3]);
+    vec3 origin = frame[3].xyz;
+    // The new spawn landing in this slot, if any: the next in the ring, or
+    // for a sub-emitter, one of the spawns of its parent slot's death.
     uint offset = (slot + slots - step.spawn.x % slots) % slots;
-    if (offset < step.spawn.y) {
-        uint n = step.spawn.x + offset;
-        mat4 frame = mat4(rows[0], rows[1], rows[2], rows[3]);
+    bool spawn = offset < step.spawn.y;
+    uint n = step.spawn.x + offset;
+    uint burst = uint(step.time.z);
+    if (burst > 0u) {
+        uint parent = (slot / burst) * uint(step.time.w);
+        spawn = parent_rows[parent + 2u].y > 0.5;
+        n = floatBitsToUint(parent_rows[parent + 2u].z) * burst + slot % burst;
+        origin = parent_rows[parent].xyz;
+    }
+    if (spawn) {
         vec3 axis = rows[4].xyz;
         float spread = rows[4].w;
         vec3 extent = rows[8].xyz;
@@ -128,15 +141,17 @@ void main() {
         mat3 rotation = mat3(
             normalize(frame[0].xyz), normalize(frame[1].xyz), normalize(frame[2].xyz));
         float speed = mix(rows[6].z, rows[6].w, unit(n, 5u));
-        p.position_age = vec4((frame * vec4(start, 1.0)).xyz, 0.0);
+        p.position_age = vec4(mat3(frame) * start + origin, 0.0);
         p.velocity_lifetime = vec4(
             rotation * direction * speed, max(mix(rows[6].x, rows[6].y, unit(n, 6u)), 1e-3));
-        p.size = vec4(mix(rows[7].x, rows[7].y, unit(n, 7u)), 0.0, 0.0, 0.0);
+        // y = died this frame, z = spawn number, for sub-emitters.
+        p.size = vec4(mix(rows[7].x, rows[7].y, unit(n, 7u)), 0.0, uintBitsToFloat(n), 0.0);
         // Born this frame, so it shows at its start before moving.
         dt = 0.0;
         born = true;
     }
     float age = p.position_age.w;
+    p.size.y = 0.0;
     if (p.position_age.w < p.velocity_lifetime.w) {
         vec3 accel = rows[5].xyz - vec3(0.0, rows[5].w, 0.0)
             + field_push(p.position_age.xyz, 0.0, step.seed.w, step.time.y);
@@ -158,6 +173,9 @@ void main() {
             }
         }
         p.position_age.w += dt;
+        if (p.position_age.w >= p.velocity_lifetime.w) {
+            p.size.y = 1.0;
+        }
     }
     slot_rows[base] = p.position_age;
     slot_rows[base + 1u] = p.velocity_lifetime;

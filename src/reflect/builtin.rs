@@ -479,6 +479,7 @@ crate::reflect! {
         },
         collide: bool { doc: "Gpu: bounce off physics colliders" },
         trail: f32 { unit: "s", min: 0.0, doc: "Gpu: seconds of path trailing each particle, 0 for none" },
+        on_parent_death: u32 { doc: "Gpu under a Gpu parent emitter: particles spawned where each parent particle dies; 0 for a normal emitter" },
         #[skip] command: crate::runtime::ParticleCommand,
     }
 }

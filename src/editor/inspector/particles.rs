@@ -97,6 +97,12 @@ pub(super) fn draw_particle_emitter(
                     .speed(0.01)
                     .suffix(" s"),
             );
+            widgets::describe_next_row(ui, "spawns where parent particles die");
+            changed |= widgets::drag(
+                ui,
+                "On Parent Death",
+                DragValue::new(&mut emitter.on_parent_death).range(0..=64),
+            );
         }
         let most = match emitter.simulation {
             ParticleSimulation::Cpu => 100_000,
