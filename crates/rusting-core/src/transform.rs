@@ -169,7 +169,7 @@ impl Transform {
         // Column 2 = local Z direction multiplied by Z scale
         //
         // The length of each column gives us its scale.
-        let scale = [
+        let mut scale = [
             // Length of column 0: X scale
             Vector3::new(m[(0, 0)], m[(1, 0)], m[(2, 0)]).norm(),
             // Length of column 1: Y scale
@@ -177,6 +177,16 @@ impl Transform {
             // Length of column 2: Z scale
             Vector3::new(m[(0, 2)], m[(1, 2)], m[(2, 2)]).norm(),
         ];
+
+        // A mirrored matrix (negative determinant) cannot be a rotation
+        // times positive scales, so the mirror goes into the X scale.
+        if m.fixed_view::<3, 3>(0, 0).determinant() < 0.0 {
+            scale[0] = -scale[0];
+        }
+
+        // A zero scale has no direction to recover; dividing by 1 instead
+        // keeps the rotation finite (the zero column stays zero).
+        let divisor = scale.map(|s| if s == 0.0 { 1.0 } else { s });
 
         // Each axis currently contains both rotation and scale.
         //
@@ -191,17 +201,17 @@ impl Transform {
         // "world-X part of the local X axis, without X scale."
         let rotation_matrix = Matrix3::new(
             // Row 0: how local X, Y, and Z affect world X
-            m[(0, 0)] / scale[0],
-            m[(0, 1)] / scale[1],
-            m[(0, 2)] / scale[2],
+            m[(0, 0)] / divisor[0],
+            m[(0, 1)] / divisor[1],
+            m[(0, 2)] / divisor[2],
             // Row 1: how local X, Y, and Z affect world Y
-            m[(1, 0)] / scale[0],
-            m[(1, 1)] / scale[1],
-            m[(1, 2)] / scale[2],
+            m[(1, 0)] / divisor[0],
+            m[(1, 1)] / divisor[1],
+            m[(1, 2)] / divisor[2],
             // Row 2: how local X, Y, and Z affect world Z
-            m[(2, 0)] / scale[0],
-            m[(2, 1)] / scale[1],
-            m[(2, 2)] / scale[2],
+            m[(2, 0)] / divisor[0],
+            m[(2, 1)] / divisor[1],
+            m[(2, 2)] / divisor[2],
         );
 
         // Convert the rotation matrix back into:
@@ -217,5 +227,76 @@ impl Transform {
             rotation: [rotation.0, rotation.1, rotation.2],
             scale,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matrix(t: &Transform) -> Matrix4<f32> {
+        Matrix4::from(t.to_matrix())
+    }
+
+    fn close(a: Matrix4<f32>, b: Matrix4<f32>) -> bool {
+        (a - b).abs().max() < 1e-5
+    }
+
+    #[test]
+    fn transforms_compose_and_decompose_back_to_the_same_matrix() {
+        let cases = [
+            Transform::default(),
+            Transform::new([1.0, -2.0, 3.0]),
+            Transform::new([4.0, 5.0, 6.0])
+                .with_rotation(0.3, -1.1, 2.0)
+                .with_scale(2.0, 0.5, 3.0),
+            // Gimbal lock: the angles come back different, the matrix not.
+            Transform::default().with_rotation(
+                0.4,
+                std::f32::consts::FRAC_PI_2,
+                0.2,
+            ),
+            // Mirrored along one axis.
+            Transform::default()
+                .with_rotation(0.0, 0.7, 0.0)
+                .with_scale(-1.0, 2.0, 1.0),
+        ];
+        for case in cases {
+            let back = Transform::from_matrix(matrix(&case));
+            assert!(
+                close(matrix(&back), matrix(&case)),
+                "{case:?} -> {back:?}"
+            );
+            assert!(back.scale[1] > 0.0 && back.scale[2] > 0.0, "{back:?}");
+        }
+        let plain =
+            Transform::new([1.0, 2.0, 3.0]).with_rotation(0.1, 0.2, 0.3);
+        let back = Transform::from_matrix(matrix(&plain));
+        for (a, b) in back.rotation.iter().zip(plain.rotation) {
+            assert!((a - b).abs() < 1e-5, "{back:?}");
+        }
+
+        // A flattened object keeps finite numbers.
+        let flat = Transform::default()
+            .with_rotation(0.0, 0.5, 0.0)
+            .with_scale(1.0, 0.0, 1.0);
+        let back = Transform::from_matrix(matrix(&flat));
+        assert!(back.rotation.iter().all(|a| a.is_finite()), "{back:?}");
+        assert_eq!(back.scale[1], 0.0);
+
+        // Parent times child: scale, then rotate, then move, child first.
+        let parent = Transform::new([10.0, 0.0, 0.0])
+            .with_rotation(0.0, std::f32::consts::FRAC_PI_2, 0.0)
+            .with_scale(2.0, 2.0, 2.0);
+        let child = Transform::new([1.0, 0.0, 0.0]);
+        let world = matrix(&parent) * matrix(&child);
+        let origin = world.transform_point(&nalgebra::Point3::origin());
+        // The child's +X offset of 1 is doubled and turned to -Z.
+        assert!(
+            (origin - nalgebra::Point3::new(10.0, 0.0, -2.0)).norm() < 1e-5,
+            "{origin}"
+        );
+        let composed = Transform::from_matrix(world);
+        assert!(close(matrix(&composed), world));
     }
 }
