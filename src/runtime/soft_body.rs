@@ -1802,4 +1802,142 @@ mod tests {
         assert!(middle < 0.95, "sheet middle at {middle}");
         assert!(middle > 0.3, "sheet middle at {middle}");
     }
+
+    /// Water, sand, a jelly, a pinned sheet with a ball on it and a hinged
+    /// arm with a ball paddle, all in one 1.2 m tank. Returns every particle
+    /// and body position after `ticks` (over 60), the paddle's highest point
+    /// after its first second, and the jelly's lowest point.
+    fn mixed_scene(water: bool, ticks: u32) -> (Vec<[f32; 3]>, f32, f32) {
+        use crate::runtime::{
+            Articulation, Collider, ColliderShape, Joint, JointKind,
+            PhysicsBody, RigidBody, RigidBodyKind,
+        };
+        use crate::Transform;
+        let mut app = App::new();
+        let world = app.world_mut();
+        let tank = ([-0.6, 0.0, -0.6], [0.6, 3.0, 0.6]);
+        if water {
+            let settings = FluidSettings {
+                bounds: tank,
+                ..FluidSettings::default()
+            };
+            let pool = Fluid::block([-0.55, 0.0, -0.55], [12, 3, 12], 0.1);
+            world.spawn(FluidVolume::new(settings, pool));
+        }
+        let settings = FluidSettings {
+            bounds: tank,
+            particle_mass: 3.0,
+            solver: FluidSolver::Granular,
+            ..FluidSettings::default()
+        };
+        let sand = Fluid::block([-0.5, 0.6, 0.2], [3, 2, 3], 0.1);
+        world.spawn(FluidVolume::new(settings, sand));
+        let body =
+            SoftBody::block([-0.1, 0.6, -0.5], [3; 3], 0.1, 300.0).unwrap();
+        let jelly = world
+            .spawn(SoftBodyVolume::new(SoftBodySettings::default(), body))
+            .id();
+        let mut cloth = Cloth::grid(
+            [0.1, 1.0, 0.1],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [4, 4],
+            0.1,
+            10.0,
+        )
+        .unwrap();
+        for (index, mass) in cloth.inverse_masses.iter_mut().enumerate() {
+            if index % 5 == 0 || index % 5 == 4 {
+                *mass = 0.0;
+            }
+        }
+        world.spawn(ClothVolume::new(ClothSettings::default(), cloth));
+        let body = |world: &mut bevy_ecs::world::World, at, radius, kind| {
+            world
+                .spawn((
+                    Transform::new(at),
+                    PhysicsBody::default(),
+                    RigidBody {
+                        kind,
+                        ..RigidBody::default()
+                    },
+                    Collider {
+                        shape: ColliderShape::Sphere { radius },
+                        ..Collider::default()
+                    },
+                ))
+                .id()
+        };
+        // The arm swings down from level through the pool.
+        let base = body(world, [0.0, 0.55, -0.3], 0.05, RigidBodyKind::Fixed);
+        world.entity_mut(base).insert(Articulation {});
+        let paddle =
+            body(world, [0.45, 0.55, -0.3], 0.12, RigidBodyKind::Dynamic);
+        world.entity_mut(paddle).insert(Joint {
+            frame: [0.0, -std::f32::consts::FRAC_PI_2, 0.0],
+            target_frame: [0.0, -std::f32::consts::FRAC_PI_2, 0.0],
+            ..Joint::new(
+                JointKind::Hinge {
+                    limit: None,
+                    spring: None,
+                    motor: None,
+                },
+                base,
+                [-0.45, 0.0, 0.0],
+                [0.0; 3],
+            )
+        });
+        // A ball dropped on the sheet.
+        let ball = body(world, [0.3, 1.6, 0.3], 0.08, RigidBodyKind::Dynamic);
+        // How high the paddle swings back after its first pass.
+        run_app(&mut app, 60);
+        let mut swing = f32::MIN;
+        for _ in 60..ticks {
+            run_app(&mut app, 1);
+            swing = swing
+                .max(app.world().get::<Transform>(paddle).unwrap().position[1]);
+        }
+        let world = app.world_mut();
+        let mut points = Vec::new();
+        for volume in world.query::<&FluidVolume>().iter(world) {
+            points.extend(&volume.fluid.positions);
+        }
+        for volume in world.query::<&SoftBodyVolume>().iter(world) {
+            points.extend(&volume.body.positions);
+        }
+        for volume in world.query::<&ClothVolume>().iter(world) {
+            points.extend(&volume.cloth.positions);
+        }
+        for entity in [paddle, ball] {
+            points.push(world.get::<Transform>(entity).unwrap().position);
+        }
+        let bottom = world
+            .get::<SoftBodyVolume>(jelly)
+            .unwrap()
+            .body
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min);
+        (points, swing, bottom)
+    }
+
+    #[test]
+    fn every_kind_of_body_shares_one_tank_and_runs_the_same_twice() {
+        let (points, swing, bottom) = mixed_scene(true, 240);
+        let (_, dry_swing, dry_bottom) = mixed_scene(false, 240);
+        assert!(points.iter().flatten().all(|x| x.is_finite()));
+        // The water and the floating jelly stop the arm; dry, it swings on.
+        assert!(swing < 0.4, "wet paddle swung to {swing}");
+        assert!(dry_swing > 0.45, "dry paddle swung to {dry_swing}");
+        assert!(bottom > 0.04, "jelly bottom at {bottom}");
+        assert!(dry_bottom < 0.01, "dry jelly bottom at {dry_bottom}");
+        // The ball rests on the sheet.
+        let ball = points[points.len() - 1];
+        assert!(ball[1] > 0.9, "ball at {ball:?}");
+        assert!(
+            points == mixed_scene(true, 240).0,
+            "the scene ran differently"
+        );
+    }
 }

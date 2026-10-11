@@ -259,7 +259,16 @@ pub(super) fn build(
                 .map_or(1.0, |rigid| rigid.gravity_scale);
         }
         tree.read(bodies);
+        let given: Vec<_> = tree
+            .links
+            .iter()
+            .map(|link| {
+                let body = &bodies[link.body];
+                (body.angular_velocity, body.velocity)
+            })
+            .collect();
         tree.place(bodies);
+        tree.absorb(bodies, &given);
         articulations.trees.push(tree);
     }
     (articulations, taken)
@@ -513,17 +522,8 @@ impl Tree {
         force
     }
 
-    /// Inverts `H` and moves the joint speeds by gravity and the
-    /// velocity-product forces over `dt`, taken at the midpoint speeds so
-    /// fast chains do not gain energy.
-    // ponytail: dense H and its inverse, O(n²) per row and O(n³) per step;
-    // move to the articulated-body algorithm when trees pass ~30 links.
-    fn free_motion(
-        &mut self,
-        bodies: &mut [Body],
-        gravity: Vector3<f32>,
-        dt: f32,
-    ) {
+    /// The joint-space mass matrix `H`, with [`ARMATURE`] on its diagonal.
+    fn mass_matrix(&self, bodies: &[Body]) -> DMatrix<f32> {
         let dofs = self.velocity.len();
         let mut mass = DMatrix::<f32>::identity(dofs, dofs) * ARMATURE;
         for link in &self.links[usize::from(!self.floating)..] {
@@ -541,7 +541,64 @@ impl Tree {
                 }
             }
         }
-        self.inverse = mass.cholesky().map_or_else(
+        mass
+    }
+
+    /// Takes link velocities that something outside the tree changed
+    /// (fluids and deformables push link bodies between steps) into the
+    /// joint speeds. `given` holds each link's (angular, linear) velocity
+    /// before [`Self::place`] rebuilt them from the joint speeds that
+    /// [`Self::read`] found, which see only the links' spin. The difference
+    /// is an impulse; `H⁻¹ Jᵀ` of its momentum keeps the tree's momentum
+    /// and leaves velocities the tree made itself unchanged.
+    fn absorb(
+        &mut self,
+        bodies: &mut [Body],
+        given: &[(Vector3<f32>, Vector3<f32>)],
+    ) {
+        let mut impulse = vec![0.0; self.velocity.len()];
+        let mut any = false;
+        for (link, &(angular, linear)) in self.links.iter().zip(given) {
+            let body = &bodies[link.body];
+            let (spin, push) =
+                (angular - body.angular_velocity, linear - body.velocity);
+            if spin.norm() + push.norm() < 1e-6 {
+                continue;
+            }
+            any = true;
+            let (link_mass, inertia) = Self::inertia(body);
+            let (spin, push) = (inertia * spin, push * link_mass);
+            for (k, column_angular, column_linear) in &link.columns {
+                impulse[*k] +=
+                    column_angular.dot(&spin) + column_linear.dot(&push);
+            }
+        }
+        if !any {
+            return;
+        }
+        let Some(cholesky) = self.mass_matrix(bodies).cholesky() else {
+            return;
+        };
+        let change = cholesky.solve(&nalgebra::DVector::from_vec(impulse));
+        for (speed, change) in self.velocity.iter_mut().zip(change.iter()) {
+            *speed += change;
+        }
+        self.refresh(bodies);
+    }
+
+    /// Inverts `H` and moves the joint speeds by gravity and the
+    /// velocity-product forces over `dt`, taken at the midpoint speeds so
+    /// fast chains do not gain energy.
+    // ponytail: dense H and its inverse, O(n²) per row and O(n³) per step;
+    // move to the articulated-body algorithm when trees pass ~30 links.
+    fn free_motion(
+        &mut self,
+        bodies: &mut [Body],
+        gravity: Vector3<f32>,
+        dt: f32,
+    ) {
+        let dofs = self.velocity.len();
+        self.inverse = self.mass_matrix(bodies).cholesky().map_or_else(
             || DMatrix::zeros(dofs, dofs),
             |cholesky| cholesky.inverse(),
         );
@@ -817,5 +874,80 @@ impl Articulations {
             tree.change_speed(&force, impulse);
             tree.refresh(bodies);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::runtime::{
+        App, Articulation, Collider, ColliderShape, CollisionLayers, Joint,
+        JointKind, PhysicsBody, RigidBody, RigidBodyKind,
+    };
+    use crate::Transform;
+
+    #[test]
+    fn a_push_from_outside_moves_a_hanging_link_and_keeps_its_joint() {
+        let mut app = App::new();
+        let world = app.world_mut();
+        let body = |world: &mut bevy_ecs::world::World, at, kind| {
+            world
+                .spawn((
+                    Transform::new(at),
+                    PhysicsBody::default(),
+                    RigidBody {
+                        kind,
+                        ..RigidBody::default()
+                    },
+                    Collider {
+                        shape: ColliderShape::Sphere { radius: 0.1 },
+                        ..Collider::default()
+                    },
+                    CollisionLayers {
+                        memberships: 0,
+                        filters: 0,
+                    },
+                ))
+                .id()
+        };
+        let base = body(world, [0.0, 3.0, 0.0], RigidBodyKind::Fixed);
+        world.entity_mut(base).insert(Articulation {});
+        // Hangs straight down, hinged about z.
+        let bob = body(world, [0.0, 2.5, 0.0], RigidBodyKind::Dynamic);
+        world.entity_mut(bob).insert(Joint {
+            frame: [0.0, -std::f32::consts::FRAC_PI_2, 0.0],
+            target_frame: [0.0, -std::f32::consts::FRAC_PI_2, 0.0],
+            ..Joint::new(
+                JointKind::Hinge {
+                    limit: None,
+                    spring: None,
+                    motor: None,
+                },
+                base,
+                [0.0, 0.5, 0.0],
+                [0.0; 3],
+            )
+        });
+        let step = |app: &mut App| {
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+        };
+        step(&mut app);
+        // What a fluid or a soft body does between steps: a sideways push
+        // on the link body alone, and one along the rod the joint takes.
+        app.world_mut()
+            .get_mut::<RigidBody>(bob)
+            .unwrap()
+            .linear_velocity = [1.0, 5.0, 0.0];
+        let mut highest = f32::MIN;
+        for _ in 0..30 {
+            step(&mut app);
+            let at = app.world().get::<Transform>(bob).unwrap().position;
+            let rod = ((at[0]).powi(2) + (at[1] - 3.0).powi(2)).sqrt();
+            assert!((rod - 0.5).abs() < 1e-3, "rod stretched to {rod}");
+            highest = highest.max(at[1]);
+        }
+        // 1 m/s swings it up about v²/2g = 5 cm; the rod takes the rest.
+        assert!(highest > 2.53, "rose to {highest}");
+        assert!(highest < 2.6, "rose to {highest}");
     }
 }
