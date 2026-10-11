@@ -8376,3 +8376,62 @@ fn a_streaming_budget_keeps_the_nearest_gpu_bodies_and_saves_the_rest() {
             .collect();
     assert_eq!(resident, [(far, [12.0, 0.0, 0.0])]);
 }
+
+#[test]
+fn cpu_physics_matches_bit_for_bit_whatever_the_render_frame_rate() {
+    // Frame deltas of a steady 60 Hz, a 144 Hz display, a 30 Hz one, and a
+    // stuttering one that sometimes runs several steps in one frame.
+    let rates: [&[f64]; 4] = [
+        &[1.0 / 60.0],
+        &[1.0 / 144.0],
+        &[1.0 / 30.0],
+        &[0.004, 0.021, 0.0, 0.05, 0.009, 0.033],
+    ];
+    const TICKS: u64 = 240;
+    let runs = rates.map(|deltas| {
+        let mut app = App::new();
+        let world = app.world_mut();
+        cpu_ground(world);
+        let tilted =
+            cpu_body(world, [0.0, 1.5, 0.0], UNIT_BOX, RigidBodyKind::Dynamic);
+        world.get_mut::<Transform>(tilted).unwrap().rotation = [0.3, 0.0, 0.2];
+        let ball = cpu_body(
+            world,
+            [2.0, 3.0, 0.0],
+            ColliderShape::Sphere { radius: 0.25 },
+            RigidBodyKind::Dynamic,
+        );
+        world.get_mut::<Collider>(ball).unwrap().restitution = 0.8;
+        let mut frames = 0;
+        for delta in deltas.iter().cycle() {
+            let ticks = app.world().resource::<FrameTime>().fixed_tick;
+            if ticks >= TICKS {
+                break;
+            }
+            // Never overshoot, so every run stops on the same tick.
+            let left = (TICKS - ticks) as f64 / 60.0;
+            app.update(Duration::from_secs_f64(delta.min(left)))
+                .unwrap();
+            frames += 1;
+        }
+        let world = app.world();
+        assert_eq!(world.resource::<FrameTime>().fixed_tick, TICKS);
+        let state = |entity| {
+            let body = world.get::<RigidBody>(entity).unwrap();
+            (
+                *world.get::<Transform>(entity).unwrap(),
+                body.linear_velocity,
+                body.angular_velocity,
+            )
+        };
+        (frames, state(tilted), state(ball))
+    });
+    let frames = runs.map(|run| run.0);
+    assert!(
+        frames[1] > 2 * frames[0] && frames[2] < frames[0],
+        "{frames:?}"
+    );
+    for run in &runs[1..] {
+        assert_eq!((run.1, run.2), (runs[0].1, runs[0].2));
+    }
+}
