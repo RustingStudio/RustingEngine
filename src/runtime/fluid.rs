@@ -892,6 +892,12 @@ fn trade(
 /// Bodies and volumes are visited in `SpawnOrder` (entity order for those
 /// without one), and each body reads the particles as the previous body left
 /// them.
+///
+/// A GPU body takes part when it reads its state back (a [`super::GpuStateMirror`]
+/// at most [`MAX_COUPLED_STATE_AGE`] ticks old): the fluid meets it at the
+/// mirrored pose carried forward by its velocity over the state's age, and
+/// what the fluid does to its velocity goes back as an impulse that applies
+/// before the next GPU tick (see [`super::GpuPhysicsCommands`]).
 /// ponytail: sphere, box and capsule colliders only (a box at a rest pose has no
 /// torque from the fluid), and every body checks every particle.
 /// Add other shapes and use the solver's grid when this shows in profiles.
@@ -899,6 +905,7 @@ fn trade(
 pub(super) fn couple_fluids(
     time: bevy_ecs::prelude::Res<super::FrameTime>,
     physics: bevy_ecs::prelude::Res<super::PhysicsSettings>,
+    gpu_commands: Option<bevy_ecs::prelude::ResMut<super::GpuPhysicsCommands>>,
     mut volumes: bevy_ecs::prelude::Query<(
         bevy_ecs::prelude::Entity,
         Option<&super::SpawnOrder>,
@@ -913,19 +920,62 @@ pub(super) fn couple_fluids(
             &mut super::RigidBody,
             &super::Collider,
             Option<&super::PhysicsBody>,
+            Option<&super::PhysicsId>,
+            Option<&super::GpuStateMirror>,
         ),
         bevy_ecs::prelude::Without<super::Parent>,
     >,
 ) {
-    use super::{ColliderShape, RigidBodyKind};
+    use super::{ColliderShape, RigidBodyKind, SimulationClass};
     let dt = time.fixed_delta.as_secs_f32();
     let gravity = physics.gravity;
     let gravity_size = dot(gravity).sqrt();
     if volumes.is_empty() {
         return;
     }
-    let mut bodies: Vec<_> = bodies.iter_mut().collect();
-    bodies.sort_by_key(|(entity, order, ..)| visit_key(*order, *entity));
+    // Copies of the coupled bodies, with the velocity they started at and
+    // the GPU id of a GPU body.
+    let mut coupled = Vec::new();
+    for (entity, order, transform, body, collider, physics, id, mirror) in
+        &bodies
+    {
+        if body.kind != RigidBodyKind::Dynamic || body.mass <= 0.0 {
+            continue;
+        }
+        match (physics.map(|p| p.simulation), id, mirror) {
+            (Some(SimulationClass::Cpu), ..) => coupled.push((
+                visit_key(order, entity),
+                *transform,
+                *body,
+                *collider,
+                body.linear_velocity,
+                None,
+            )),
+            (Some(SimulationClass::Gpu), Some(id), Some(mirror))
+                if gpu_commands.is_some()
+                    && mirror.age_ticks(time.fixed_tick)
+                        <= MAX_COUPLED_STATE_AGE =>
+            {
+                let age = mirror.age_ticks(time.fixed_tick) as f32 * dt;
+                let mut pose = mirror.transform;
+                for axis in 0..3 {
+                    pose.position[axis] += mirror.linear_velocity[axis] * age;
+                }
+                let mut body = *body;
+                body.linear_velocity = mirror.linear_velocity;
+                coupled.push((
+                    visit_key(order, entity),
+                    pose,
+                    body,
+                    *collider,
+                    mirror.linear_velocity,
+                    Some(*id),
+                ));
+            }
+            _ => {}
+        }
+    }
+    coupled.sort_by_key(|(key, ..)| *key);
     let mut volumes: Vec<_> = volumes.iter_mut().collect();
     volumes.sort_by_key(|(entity, order, _)| visit_key(*order, *entity));
     for (_, _, volume) in &mut volumes {
@@ -933,16 +983,7 @@ pub(super) fn couple_fluids(
             settings, fluid, ..
         } = &mut **volume;
         let particle_volume = settings.spacing.powi(3);
-        for (_, _, transform, body, collider, physics) in &mut bodies {
-            // The GPU solver never reads back CPU velocities.
-            if body.kind != RigidBodyKind::Dynamic
-                || body.mass <= 0.0
-                || !physics.is_some_and(|p| {
-                    p.simulation == super::SimulationClass::Cpu
-                })
-            {
-                continue;
-            }
+        for (_, transform, body, collider, ..) in &mut coupled {
             let center = transform.position;
             // Particles never leave `bounds`, so a body clear of that box
             // touches none of them.
@@ -1113,7 +1154,33 @@ pub(super) fn couple_fluids(
             }
         }
     }
+    let mut gpu_commands = gpu_commands;
+    for ((_, _, entity), _, body, _, start, id) in coupled {
+        if body.linear_velocity == start {
+            continue;
+        }
+        match (id, gpu_commands.as_mut()) {
+            (Some(id), Some(commands)) => commands.push(
+                id,
+                super::GpuBodyCommand::Impulse(std::array::from_fn(|axis| {
+                    body.mass * (body.linear_velocity[axis] - start[axis])
+                })),
+            ),
+            _ => {
+                if let Ok((.., mut rigid, _, _, _, _)) = bodies.get_mut(entity)
+                {
+                    rigid.linear_velocity = body.linear_velocity;
+                }
+            }
+        }
+    }
 }
+
+/// Oldest read-back GPU state, in fixed ticks, that fluids still couple
+/// with. Readback normally runs one to three frames behind; a body whose
+/// state is older (paused readback, a stalled GPU) is left out rather than
+/// pushed from a pose that may be far from where it is.
+pub const MAX_COUPLED_STATE_AGE: u64 = 8;
 
 /// Per fixed step, after [`step_fluids`]: keeps one entity and one mesh per
 /// volume with a `surface` and rebuilds the mesh from the particles. A
@@ -1296,6 +1363,88 @@ mod tests {
             app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
                 .unwrap();
         }
+    }
+
+    /// Impulses one tick of a water block sends a 1 kg GPU ball whose
+    /// read-back state is `age` ticks old, at `position` moving at
+    /// `velocity`.
+    fn gpu_ball_impulses(
+        position: [f32; 3],
+        velocity: [f32; 3],
+        age: u64,
+    ) -> Vec<[f32; 3]> {
+        use crate::runtime::{
+            Collider, ColliderShape, FrameTime, GpuBodyCommand,
+            GpuPhysicsCommands, GpuStateMirror, PhysicsBody, PhysicsId,
+            RigidBody, SimulationClass,
+        };
+        let mut app = crate::runtime::App::new();
+        app.world_mut()
+            .insert_resource(GpuPhysicsCommands::default());
+        app.world_mut().resource_mut::<FrameTime>().fixed_tick = 20;
+        let settings = FluidSettings {
+            bounds: ([-0.4, 0.0, -0.4], [0.4, 1.0, 0.4]),
+            ..FluidSettings::default()
+        };
+        let water = Fluid::block([-0.3, 0.0, -0.3], [7, 4, 7], 0.1);
+        app.world_mut().spawn(FluidVolume::new(settings, water));
+        let transform = crate::Transform {
+            position,
+            ..crate::Transform::default()
+        };
+        let id = PhysicsId {
+            slot: 7,
+            generation: 1,
+        };
+        app.world_mut().spawn((
+            transform,
+            RigidBody {
+                mass: 1.0,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::Sphere { radius: 0.12 },
+                ..Collider::default()
+            },
+            PhysicsBody {
+                simulation: SimulationClass::Gpu,
+                ..PhysicsBody::default()
+            },
+            id,
+            GpuStateMirror {
+                tick: 20 - age,
+                transform,
+                linear_velocity: velocity,
+                angular_velocity: [0.0; 3],
+                custom_values: None,
+            },
+        ));
+        run_app(&mut app, 1);
+        app.world()
+            .resource::<GpuPhysicsCommands>()
+            .commands
+            .iter()
+            .map(|&(body, command)| match (body == id, command) {
+                (true, GpuBodyCommand::Impulse(impulse)) => impulse,
+                other => panic!("unexpected command {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn water_pushes_a_gpu_body_through_impulses_from_its_read_back_state() {
+        // Under water with fresh state: one impulse, up (buoyancy).
+        let fresh = gpu_ball_impulses([0.0, 0.15, 0.0], [0.0; 3], 0);
+        assert_eq!(fresh.len(), 1);
+        assert!(fresh[0][1] > 0.0, "{fresh:?}");
+        // Out of the water two ticks ago, but moving into it: met where it
+        // is now.
+        let late = gpu_ball_impulses([-0.6, 0.15, 0.0], [18.0, 0.0, 0.0], 2);
+        assert_eq!(late.len(), 1);
+        assert!(late[0][1] > 0.0 && late[0][0] < 0.0, "{late:?}");
+        // State older than the limit is not trusted.
+        let stale = MAX_COUPLED_STATE_AGE + 1;
+        assert!(gpu_ball_impulses([0.0, 0.15, 0.0], [0.0; 3], stale).is_empty());
     }
 
     type Block = ([f32; 3], [u32; 3], f32, FluidSolver, [f32; 3]);

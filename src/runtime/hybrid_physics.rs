@@ -12,6 +12,14 @@
 //! [`GpuStateMirror::tick`] record that tick. Gameplay that needs an answer
 //! in the same tick (a jump check, a hit-scan) must use
 //! [`SimulationClass::Cpu`](super::SimulationClass) bodies instead.
+//!
+//! A GPU body couples with CPU fluids and granular media through the same
+//! path: they meet it at its [`GpuStateMirror`] pose carried forward by its
+//! velocity over the state's age, and send what they do to it back as a
+//! [`GpuBodyCommand::Impulse`] that applies before the next GPU tick. The
+//! body feels the fluid one tick later and the fluid sees the body as old
+//! as its read-back state, up to `MAX_COUPLED_STATE_AGE` ticks; older state
+//! is not coupled.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
