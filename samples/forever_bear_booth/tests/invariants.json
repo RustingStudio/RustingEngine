@@ -1,0 +1,26 @@
+{
+ "name": "Random moves keep the player finite and below the ceiling",
+ "ticks": 600,
+ "fuzz": {
+  "actions": [
+   "player.forward",
+   "player.back",
+   "player.left",
+   "player.right",
+   "player.jump"
+  ]
+ },
+ "invariants": [
+  {
+   "entity": "Player",
+   "path": "/transform/position",
+   "finite": true
+  },
+  {
+   "entity": "Player",
+   "path": "/transform/position/1",
+   "less_than": 50.0
+  }
+ ],
+ "steps": []
+}

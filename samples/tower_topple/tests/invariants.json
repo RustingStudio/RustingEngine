@@ -1,0 +1,30 @@
+{
+ "name": "Random moves and throws keep the player and blocks finite and the counters in range",
+ "ticks": 600,
+ "fuzz": {"actions": ["throw", "player.forward", "player.back", "player.left", "player.right", "player.jump"]},
+ "invariants": [
+  {"entity": "Player", "path": "/transform/position", "finite": true},
+  {"entity": "Player", "path": "/transform/position/1", "greater_than": -5.0},
+  {"entity": "Block 1", "path": "/transform/position", "finite": true},
+  {"entity": "Block 2", "path": "/transform/position", "finite": true},
+  {"entity": "Block 3", "path": "/transform/position", "finite": true},
+  {"entity": "Block 4", "path": "/transform/position", "finite": true},
+  {"entity": "Block 5", "path": "/transform/position", "finite": true},
+  {"entity": "Block 6", "path": "/transform/position", "finite": true},
+  {"entity": "Block 7", "path": "/transform/position", "finite": true},
+  {"entity": "Block 8", "path": "/transform/position", "finite": true},
+  {"entity": "Block 9", "path": "/transform/position", "finite": true},
+  {"entity": "Block 10", "path": "/transform/position", "finite": true},
+  {"entity": "Block 11", "path": "/transform/position", "finite": true},
+  {"entity": "Block 12", "path": "/transform/position", "finite": true},
+  {"entity": "Block 13", "path": "/transform/position", "finite": true},
+  {"entity": "Block 14", "path": "/transform/position", "finite": true},
+  {"entity": "Toppled", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Toppled", "path": "/components/rusting.counter/value", "less_than": 15},
+  {"entity": "Balls", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Balls", "path": "/components/rusting.counter/value", "less_than": 11},
+  {"entity": "Out", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Out", "path": "/components/rusting.counter/value", "less_than": 2}
+ ],
+ "steps": []
+}

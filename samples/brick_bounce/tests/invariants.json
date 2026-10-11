@@ -1,0 +1,17 @@
+{
+ "name": "Random paddle moves, launches and restarts keep the ball and paddle finite and the counters in range",
+ "ticks": 600,
+ "fuzz": {"actions": ["launch", "restart", "player.left", "player.right"]},
+ "invariants": [
+  {"entity": "Ball", "path": "/transform/position", "finite": true},
+  {"entity": "Paddle", "path": "/transform/position", "finite": true},
+  {"entity": "Paddle", "path": "/transform/position/1", "greater_than": -5.0},
+  {"entity": "Score", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Score", "path": "/components/rusting.counter/value", "less_than": 33},
+  {"entity": "Lives", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Lives", "path": "/components/rusting.counter/value", "less_than": 4},
+  {"entity": "Lost", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Lost", "path": "/components/rusting.counter/value", "less_than": 4}
+ ],
+ "steps": []
+}

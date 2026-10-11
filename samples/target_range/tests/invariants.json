@@ -1,0 +1,13 @@
+{
+ "name": "Random moves and shots keep the player finite and the counters in range",
+ "ticks": 600,
+ "fuzz": {"actions": ["fire", "player.forward", "player.back", "player.left", "player.right", "player.jump"]},
+ "invariants": [
+  {"entity": "Player", "path": "/transform/position", "finite": true},
+  {"entity": "Player", "path": "/transform/position/1", "greater_than": -5.0},
+  {"entity": "Hits", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Hits", "path": "/components/rusting.counter/value", "less_than": 7},
+  {"entity": "Shots", "path": "/components/rusting.counter/value", "greater_than": -1}
+ ],
+ "steps": []
+}

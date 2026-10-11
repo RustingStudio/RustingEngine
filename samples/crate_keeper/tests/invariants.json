@@ -1,0 +1,12 @@
+{
+ "name": "Random pushes and restarts keep the player finite and the counters in range",
+ "ticks": 600,
+ "fuzz": {"actions": ["restart", "player.forward", "player.back", "player.left", "player.right"]},
+ "invariants": [
+  {"entity": "Player", "path": "/transform/position", "finite": true},
+  {"entity": "Moves", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Placed", "path": "/components/rusting.counter/value", "greater_than": -1},
+  {"entity": "Placed", "path": "/components/rusting.counter/value", "less_than": 4}
+ ],
+ "steps": []
+}

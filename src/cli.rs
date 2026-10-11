@@ -5299,7 +5299,11 @@ pub fn fuzz_game_project(
     let mut tried = 0;
     for seed in seeds {
         let mut run = base.clone();
-        run["fuzz"] = json!({"seed": seed, "actions": actions});
+        // The scenario's own `fuzz` actions and rate stay unless named.
+        run["fuzz"]["seed"] = json!(seed);
+        if !actions.is_empty() {
+            run["fuzz"]["actions"] = json!(actions);
+        }
         if let Err(error) = std::fs::write(&run_file, run.to_string()) {
             return CliResult::failure(
                 "IO_ERROR",

@@ -568,7 +568,8 @@ in the project. The export must be built for the machine that runs the test.
 To find input that breaks a game, give a scenario `invariants` and fuzz it:
 `rusting fuzz <project> tests/invariants.json --seeds 50`. Each seed runs the
 scenario with seeded random presses and releases of the scene's actions (or
-the `--action` names; name actions that game code binds this way), each
+the `--action` names, or the scenario's own `fuzz` actions; name actions that
+game code binds this way), each
 flipping with chance 0.1 per tick. The first seed that fails a step or an
 invariant, or crashes the game, is written to `build/fuzz/seed-N.json` with
 the presses as ordinary steps up to the failing tick, so `rusting test`

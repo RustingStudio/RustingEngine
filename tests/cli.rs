@@ -1907,3 +1907,103 @@ fn agent_guide_games_build() {
     assert!(built >= 2, "only {built} games");
     let _ = std::fs::remove_dir_all(&parent);
 }
+
+/// Per sample: a scenario and the component whose removal must fail it.
+/// `forever_bear_booth` has none: game code alone drives what its scenario
+/// checks, so no scene component can be left out.
+const SAMPLE_STRENGTH: [(&str, Option<(&str, &str)>); 13] = [
+    ("brick_bounce", Some(("first_hit.json", "collider"))),
+    ("core_defense", Some(("aimed_shot.json", "collider"))),
+    ("crate_keeper", Some(("solve.json", "rusting.tile_map"))),
+    ("ember_arena", Some(("ember_burns.json", "collider"))),
+    ("forever_bear_booth", None),
+    ("hammer_run", Some(("first_gem.json", "rusting.pickup"))),
+    ("lantern_grid", Some(("solve.json", "collider"))),
+    ("night_vault", Some(("heist.json", "rusting.pickup"))),
+    ("putt_course", Some(("sink.json", "rigid_body"))),
+    ("sky_hop", Some(("first_coin.json", "rusting.pickup"))),
+    ("snake_trail", Some(("crash.json", "rusting.tile_map"))),
+    ("target_range", Some(("first_shot.json", "collider"))),
+    ("tower_topple", Some(("topple_pyramid.json", "rigid_body"))),
+];
+
+/// Every sample game has a fuzzable `tests/invariants.json` whose
+/// invariants name entities of its scene, and a strength check.
+#[test]
+fn every_sample_has_invariants_to_fuzz() {
+    let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+    let mut games: Vec<String> = std::fs::read_dir(&samples)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.join("tests").is_dir())
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    games.sort();
+    let named: Vec<_> = SAMPLE_STRENGTH.iter().map(|row| row.0).collect();
+    assert_eq!(games, named);
+    for (game, strength) in SAMPLE_STRENGTH {
+        let root = samples.join(game);
+        if let Some((scenario, _)) = strength {
+            assert!(root.join("tests").join(scenario).is_file(), "{game}");
+        }
+        let text = std::fs::read_to_string(root.join("tests/invariants.json"))
+            .unwrap();
+        let parsed: rusting_engine::scenario::Scenario =
+            serde_json::from_str(&text).unwrap();
+        assert!(parsed.fuzz.is_some_and(|fuzz| !fuzz.actions.is_empty()));
+        let scene =
+            std::fs::read_to_string(root.join("scenes/main.rscene")).unwrap();
+        let invariants: Value = serde_json::from_str(&text).unwrap();
+        let invariants = invariants["invariants"].as_array().unwrap();
+        assert!(invariants.len() >= 2, "{game}");
+        for invariant in invariants {
+            let entity = invariant["entity"].as_str().unwrap();
+            assert!(
+                scene.contains(&format!("\"name\": \"{entity}\"")),
+                "{game} has no entity {entity}"
+            );
+        }
+    }
+}
+
+/// Every sample passes `rusting lint`, all its scenarios, 100 fuzz seeds of
+/// its invariants, and fails its strength scenario without the component.
+#[test]
+#[ignore = "builds and runs every sample game for many minutes"]
+fn samples_pass_lint_scenarios_fuzz_and_strength_check() {
+    let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/samples");
+    for (game, strength) in SAMPLE_STRENGTH {
+        let root = samples.join(game);
+        let mut runs = vec![
+            vec!["lint".to_owned(), ".".to_owned()],
+            vec!["test".to_owned(), ".".to_owned()],
+            ["fuzz", ".", "tests/invariants.json", "--seeds", "100"]
+                .map(str::to_owned)
+                .to_vec(),
+        ];
+        if let Some((scenario, component)) = strength {
+            runs.push(vec![
+                "test".to_owned(),
+                ".".to_owned(),
+                format!("tests/{scenario}"),
+                "--without".to_owned(),
+                component.to_owned(),
+            ]);
+        }
+        for args in runs {
+            let output = Command::new(env!("CARGO_BIN_EXE_rusting"))
+                .args(&args)
+                .arg("--json")
+                .current_dir(&root)
+                .env("CARGO_TARGET_DIR", &target)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{game} {args:?}\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+}
