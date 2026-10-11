@@ -1048,4 +1048,66 @@ mod tests {
         let red = capture.rgba()[(4 * 8 + 4) * 4];
         assert!(red.abs_diff(100) <= 2, "{red}");
     }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gpu_events_past_the_buffer_are_counted_and_reported_to_the_world() {
+        use crate::rendering::scene_renderer::RenderCapacityDiagnostics;
+        use crate::runtime::{
+            EventQueue, GpuConditionShader, GpuConditionShaders,
+            GpuPhysicsEvent, GpuPhysicsEventsLost, HybridPhysicsPlugin,
+            PhysicsBody, SimulationClass,
+        };
+
+        let mut app = App::new();
+        app.add_plugin(AssetPlugin).unwrap();
+        app.add_plugin(HybridPhysicsPlugin).unwrap();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        const BODIES: usize = 100;
+        for index in 0..BODIES {
+            app.spawn((
+                Transform::new([index as f32 * 2.0, 0.0, 0.0]),
+                PhysicsBody {
+                    simulation: SimulationClass::Gpu,
+                    ..PhysicsBody::default()
+                },
+            ));
+        }
+        // The shader promises one event per body and tick but sends two,
+        // so the buffer holds half of them.
+        app.world_mut().resource_mut::<GpuConditionShaders>().0 =
+            vec![GpuConditionShader {
+                events: vec!["ping".into()],
+                glsl: "void condition(inout PhysicsState body) {\n\
+                       emit_event(body, EVENTS[0], 0u, vec4(0.0));\n\
+                       emit_event(body, EVENTS[0], 0u, vec4(0.0));\n\
+                       }"
+                .into(),
+                events_per_body: 1,
+                ..Default::default()
+            }];
+        let mut capture = HeadlessCapture::new([16, 16]).unwrap();
+        let (mut delivered, mut lost) = (0, 0);
+        for _ in 0..8 {
+            capture.frame(&mut app, Duration::from_millis(16)).unwrap();
+            let world = app.world();
+            delivered += world.resource::<EventQueue<GpuPhysicsEvent>>().len();
+            lost += world
+                .resource::<EventQueue<GpuPhysicsEventsLost>>()
+                .iter()
+                .map(|event| event.count)
+                .sum::<u64>();
+        }
+        assert!(delivered >= 2 * BODIES, "{delivered}");
+        assert_eq!(lost, delivered as u64);
+        // The diagnostics keep the running total for the profiler.
+        let dropped = app
+            .world()
+            .resource::<RenderCapacityDiagnostics>()
+            .physics_events_dropped;
+        assert_eq!(dropped, lost);
+    }
 }
