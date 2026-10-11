@@ -982,6 +982,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"stiffness": 400.0, "damping": 14.0}),
     },
     ComponentSection {
+        key: "rusting.material_override",
+        summary: "Per-object material values on an object with a mesh_renderer: base_color (linear RGBA, multiplied into the base color texture), emissive (linear RGB glow), metallic, roughness, uv_scale and uv_offset each replace its material's value; null keeps the material's. Objects sharing a material still draw in one instanced batch, so a hundred crates in a hundred colors cost one material. Applies to the object only, not its children.",
+        gpu: "none: the values ride in the per-instance data the renderer already uploads",
+        example: || json!({"base_color": [1.0, 0.25, 0.25, 1.0], "emissive": null, "metallic": null, "roughness": 0.25, "uv_scale": null, "uv_offset": null}),
+    },
+    ComponentSection {
         key: "rusting.flash",
         summary: "Hit flash. Game code calls flash(name) on a hit or pickup; the object and its children draw tinted toward color (linear RGB, also used as glow), fading back over duration seconds. Only the drawn colors change, not the shared material, so other objects using it stay as they are.",
         gpu: NO_GPU,

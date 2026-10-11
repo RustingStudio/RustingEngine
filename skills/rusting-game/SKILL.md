@@ -256,6 +256,7 @@ each one's fields, defaults and an example:
 - `rusting.camera_shake`: Trauma shake on a camera.
 - `rusting.spawn_grid`: Bulk spawn.
 - `rusting.squash`: Squash and stretch spring.
+- `rusting.material_override`: Per-object material values on an object with a mesh_renderer: base_color (linear RGBA, multiplied into the base color texture), emissive (linear RGB glow), metallic, roughness, uv_scale and uv_offset each replace its material's value; null keeps the material's.
 - `rusting.flash`: Hit flash.
 - `rusting.sound_cue`: Sends a SoundEvent when the body starts touching something or game code calls trigger().
 - `rusting.slide_sound`: Loops clip on this body while it slides or rolls against another collider, louder the faster it moves across the contact (full volume at full_volume_speed m/s, silent under min_speed).

@@ -1017,6 +1017,8 @@ struct PreparedRenderInstances {
     /// Mesh-space bounds for each instance that `bounds` culls.
     local_bounds: Vec<Option<RenderBounds>>,
     flashes: Vec<(bevy_ecs::entity::Entity, [f32; 4])>,
+    material_overrides:
+        Vec<(bevy_ecs::entity::Entity, crate::runtime::MaterialOverride)>,
     /// `RenderWorld::lightmaps` the slots in `physics.w` were packed for.
     lightmaps: Vec<(bevy_ecs::entity::Entity, crate::runtime::Lightmap)>,
     physics_revision: u64,
@@ -6442,6 +6444,8 @@ impl SceneRenderer {
         screens.sort_unstable();
         let unchanged = |prepared: &PreparedRenderInstances| {
             prepared.flashes == render_world.flashes
+                && prepared.material_overrides
+                    == render_world.material_overrides
                 && prepared.lightmaps == render_world.lightmaps
                 && prepared.lod_signature == lod_signature
                 && prepared.screens == screens
@@ -6581,7 +6585,7 @@ impl SceneRenderer {
             let material = assets.materials.get(renderable.material);
             let mut color = material
                 .map_or([1.0, 0.0, 1.0, 1.0], |material| material.base_color);
-            let (mut emissive, surface) =
+            let (mut emissive, mut surface) =
                 material.map_or(([0.0, 0.0, 0.0, 1.0], [0.0; 4]), |material| {
                     let unlit = material.model == MaterialModel::Unlit;
                     (
@@ -6601,6 +6605,30 @@ impl SceneRenderer {
                         ],
                     )
                 });
+            let mut uv_transform =
+                material.map_or([1.0, 1.0, 0.0, 0.0], |material| {
+                    let [x, y] = material.uv_scale;
+                    let [u, v] = material.uv_offset;
+                    [x, y, u, v]
+                });
+            if let Ok(found) = render_world
+                .material_overrides
+                .binary_search_by_key(&renderable.entity, |(entity, _)| *entity)
+            {
+                let values = &render_world.material_overrides[found].1;
+                color = values.base_color.unwrap_or(color);
+                if let Some([r, g, b]) = values.emissive {
+                    emissive[..3].copy_from_slice(&[r, g, b]);
+                }
+                surface[0] = values.metallic.unwrap_or(surface[0]);
+                surface[1] = values.roughness.unwrap_or(surface[1]);
+                if let Some([x, y]) = values.uv_scale {
+                    uv_transform[..2].copy_from_slice(&[x, y]);
+                }
+                if let Some([u, v]) = values.uv_offset {
+                    uv_transform[2..].copy_from_slice(&[u, v]);
+                }
+            }
             if let Ok(found) = render_world
                 .flashes
                 .binary_search_by_key(&renderable.entity, |(entity, _)| *entity)
@@ -6646,14 +6674,7 @@ impl SceneRenderer {
                         f32::from(u8::from(material.splat)),
                     ]
                 }),
-                uv_transform: material.map_or(
-                    [1.0, 1.0, 0.0, 0.0],
-                    |material| {
-                        let [x, y] = material.uv_scale;
-                        let [u, v] = material.uv_offset;
-                        [x, y, u, v]
-                    },
-                ),
+                uv_transform,
             });
         }
         // ponytail: GPU-physics bodies sort by their last CPU transform;
@@ -6799,6 +6820,7 @@ impl SceneRenderer {
             sources,
             local_bounds,
             flashes: render_world.flashes.clone(),
+            material_overrides: render_world.material_overrides.clone(),
             lightmaps: render_world.lightmaps.clone(),
             physics_revision: render_world.gpu_physics_revision,
             material_revisions,
@@ -20729,6 +20751,88 @@ mod tests {
                 "{culling:?}: old shape gone"
             );
         }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn material_overrides_recolor_one_object_inside_the_shared_batch() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        use crate::runtime::{
+            ExtractedRenderable, GlobalTransform, MaterialOverride,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Two 0.5 m quads at x = -0.5 and 0.5 share one grey unlit
+        // material; the right one gets its own color.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mesh = scene.assets.meshes.insert(MeshAsset {
+            vertices: [
+                [-0.25, -0.25],
+                [0.25, -0.25],
+                [0.25, 0.25],
+                [-0.25, 0.25],
+            ]
+            .map(|[x, y]| MeshVertex {
+                position: [x, y, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                ..MeshVertex::default()
+            })
+            .to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        let material = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            ..MaterialAsset::default()
+        });
+        let entity = |id| bevy_ecs::entity::Entity::from_raw_u32(id).unwrap();
+        scene.render_world.renderables = [(1, -0.5), (2, 0.5)]
+            .map(|(id, x)| ExtractedRenderable {
+                entity: entity(id),
+                transform: GlobalTransform {
+                    matrix: Matrix4::new_translation(&Vector3::new(
+                        x, 0.0, 0.0,
+                    ))
+                    .into(),
+                },
+                mesh,
+                material,
+                cast_shadows: false,
+                receive_shadows: false,
+                bounds: None,
+            })
+            .to_vec();
+        scene.render_world.renderables_revision += 1;
+        // Pixels are 1/16 m: x = -0.5 is pixel 8, x = 0.5 pixel 24.
+        let frame = |scene: &mut SlabScene| {
+            let left = render_pixel(scene, [8, 16]);
+            let right = render_pixel(scene, [24, 16]);
+            (left, right, scene.renderer.render_counters().draws)
+        };
+        let (left, right, shared) = frame(&mut scene);
+        assert_eq!(left, right, "both grey");
+        let red = |color: [f32; 4]| MaterialOverride {
+            base_color: Some(color),
+            ..MaterialOverride::default()
+        };
+        scene.render_world.material_overrides =
+            vec![(entity(2), red([1.0, 0.0, 0.0, 1.0]))];
+        let (grey, right, draws) = frame(&mut scene);
+        assert_eq!(grey, left, "the other object keeps the material");
+        assert!(right[0] > 200 && right[1] < 40, "overridden: {right:?}");
+        assert_eq!(draws, shared, "still one batch");
+        // A changed override redraws without a renderables change.
+        scene.render_world.material_overrides =
+            vec![(entity(2), red([0.0, 0.0, 1.0, 1.0]))];
+        let (_, right, _) = frame(&mut scene);
+        assert!(right[2] > 200 && right[0] < 40, "changed: {right:?}");
+        scene.render_world.material_overrides.clear();
+        assert_eq!(frame(&mut scene).1, left, "removed");
     }
 
     #[test]

@@ -3015,7 +3015,16 @@ Depends on: Milestones 3 and 4.
 - [ ] A versioned engine shader language (GLSL-based with engine includes) for surface, unlit, sky, particle, fog, and post-process shaders, with stable uniforms/built-ins.
 - [ ] A visual shader graph that compiles to the same language.
 - [ ] Shader hot reload with error reporting in the editor.
-- [ ] Material instancing with per-instance parameter overrides.
+- [x] Material instancing with per-instance parameter overrides.
+  Evidence: `rusting.material_override` (base_color, emissive, metallic,
+  roughness, uv_scale, uv_offset; null keeps the material's value) is
+  extracted into `RenderWorld::material_overrides` and written into the
+  per-instance upload, so overridden objects stay in their material's batch.
+  GPU test `material_overrides_recolor_one_object_inside_the_shared_batch`:
+  two quads share one grey material; overriding one red keeps the other grey
+  at the same draw count, switching to blue redraws it, clearing restores
+  grey. Removing the override from the instance-cache comparison fails it
+  ("overridden: [188, 188, 188]"). Applies to the object only, not children.
 
 ### Frame structure
 

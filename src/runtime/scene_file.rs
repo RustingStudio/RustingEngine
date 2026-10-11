@@ -1127,6 +1127,7 @@ pub const SPAWN_GRID_COMPONENT: &str = "rusting.spawn_grid";
 pub const SQUASH_COMPONENT: &str = "rusting.squash";
 /// Registry name of the built-in hit flash.
 pub const FLASH_COMPONENT: &str = "rusting.flash";
+pub const MATERIAL_OVERRIDE_COMPONENT: &str = "rusting.material_override";
 /// Registry name of the built-in camera trauma shake.
 pub const CAMERA_SHAKE_COMPONENT: &str = "rusting.camera_shake";
 /// Registry name of the built-in event-triggered sound cue.
@@ -1280,6 +1281,9 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::Flash>(FLASH_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::MaterialOverride>(MATERIAL_OVERRIDE_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::SpawnGrid>(SPAWN_GRID_COMPONENT)

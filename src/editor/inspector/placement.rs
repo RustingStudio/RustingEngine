@@ -41,7 +41,8 @@ use crate::runtime::{
 use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
     COLOR_LUT_COMPONENT, DEPTH_OF_FIELD_COMPONENT, FLASH_COMPONENT,
-    MOTION_BLUR_COMPONENT, SPAWN_GRID_COMPONENT, SQUASH_COMPONENT,
+    MATERIAL_OVERRIDE_COMPONENT, MOTION_BLUR_COMPONENT, SPAWN_GRID_COMPONENT,
+    SQUASH_COMPONENT,
 };
 
 /// Components that together make a World Environment object.
@@ -204,6 +205,10 @@ pub(in crate::editor) fn component_help(
         SPAWN_GRID_COMPONENT => (
             "Copies this object onto a grid when the game runs.",
             "Ball pits, crowds, rows of crates; one object instead of thousands.",
+        ),
+        MATERIAL_OVERRIDE_COMPONENT => (
+            "Replaces some of its material's values for this object only.",
+            "A red and a blue crate from one material, still one batch.",
         ),
         FLASH_COMPONENT => (
             "Tints the object and its children for a moment.",

@@ -18,15 +18,15 @@ use crate::runtime::{
     FluidBlock, Fog, FogVolume, Foliage, ForceField, GravityVolume,
     GroundSurface, Health, Heightfield, HudAnchor, HudElement, InputAction,
     Joint, JointAxis, JointKind, JointMotor, JointSpring, LightCookie,
-    LightProbeGrid, Lightmap, LootEntry, LootTable, MeshSurfaces, MotionBlur,
-    ObjectState, PhysicsMaterial, PhysicsSettings, PhysicsSyncMode, Pickup,
-    PlatformerController, PlayerController, Polygon2d, PostVolume,
-    ProceduralSky, QualityProfile, RandomSeed, ReflectionProbe, RenderBounds,
-    RenderSettings, ReverbZone, SceneBackground, SceneInstance, ShadowQuality,
-    SkyLight, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, Terrain, TerrainLayer, TileKind, TileMap,
-    ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle,
-    WaterBody, Wheel,
+    LightProbeGrid, Lightmap, LootEntry, LootTable, MaterialOverride,
+    MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial, PhysicsSettings,
+    PhysicsSyncMode, Pickup, PlatformerController, PlayerController, Polygon2d,
+    PostVolume, ProceduralSky, QualityProfile, RandomSeed, ReflectionProbe,
+    RenderBounds, RenderSettings, ReverbZone, SceneBackground, SceneInstance,
+    ShadowQuality, SkyLight, SlideSound, SoftBlock, SoundCue, SoundId,
+    SpawnGrid, Squash, StateAction, StateTransition, Terrain, TerrainLayer,
+    TileKind, TileMap, ToneMapper, ToneMapping, Tween, TweenProperty,
+    TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -325,6 +325,17 @@ crate::reflect! {
     struct SpawnGrid {
         count: [u32; 3] { unit: "cells", doc: "along X, Y and Z, original included" },
         spacing: [f32; 3] { unit: "m" },
+    }
+}
+
+crate::reflect! {
+    struct MaterialOverride {
+        base_color: Option<[f32; 4]> { unit: "linear RGBA", doc: "null keeps the material's" },
+        emissive: Option<[f32; 3]> { unit: "linear RGB", doc: "glow; null keeps the material's" },
+        metallic: Option<f32> { min: 0.0, max: 1.0, doc: "null keeps the material's" },
+        roughness: Option<f32> { min: 0.0, max: 1.0, doc: "null keeps the material's" },
+        uv_scale: Option<[f32; 2]> { doc: "texture repeats; null keeps the material's" },
+        uv_offset: Option<[f32; 2]> { doc: "texture shift; null keeps the material's" },
     }
 }
 

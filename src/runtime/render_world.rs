@@ -236,6 +236,8 @@ pub struct RenderWorld {
     /// Drawn tint of each flashing renderable, sorted by entity: rgb from
     /// its own or an ancestor's [`super::Flash`], a the strength.
     pub flashes: Vec<(Entity, [f32; 4])>,
+    /// Each renderable's [`super::MaterialOverride`], sorted by entity.
+    pub material_overrides: Vec<(Entity, super::MaterialOverride)>,
     /// Index of each entity in `renderables`.
     index: HashMap<Entity, usize>,
     /// Each `Foliage` copy: its place in `renderables`, its unleaned
@@ -507,6 +509,12 @@ pub fn extract_render_world(world: &mut World) {
     );
 
     let flashes = collect_flashes(world);
+    let mut material_overrides = world
+        .query_filtered::<(Entity, &super::MaterialOverride), With<MeshRenderer>>()
+        .iter(world)
+        .map(|(entity, values)| (entity, *values))
+        .collect::<Vec<_>>();
+    material_overrides.sort_by_key(|(entity, _)| *entity);
     let new_foliage = renderables
         .as_ref()
         .map(|renderables| collect_foliage(world, renderables));
@@ -516,6 +524,7 @@ pub fn extract_render_world(world: &mut World) {
     };
     let mut render_world = world.resource_mut::<RenderWorld>();
     render_world.flashes = flashes;
+    render_world.material_overrides = material_overrides;
     match renderables {
         None => {
             // Moving objects keep their place in the sorted list, since the
