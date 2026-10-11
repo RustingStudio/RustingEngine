@@ -227,6 +227,40 @@ Rust target installed. The folder is named after the system, such as
 `my_game_windows_export`. A cross-target export cannot run here, so it is
 not checked and export warns `EXPORT_NOT_VERIFIED`.
 
+### Export presets
+
+To keep the settings of each kind of build, name them in `project.json`
+under `export_presets`:
+
+```json
+"export_presets": {
+  "windows": {"target": "x86_64-pc-windows-gnu", "features": ["steam"]},
+  "demo": {"features": ["demo"], "exclude": ["assets/source/**", "**/*.psd", "scenes/test_*"]}
+}
+```
+
+Then export with one of them:
+
+```bash
+rusting export my_game ~/exports --preset demo
+```
+
+- `target` is the Rust target to build for. Leave it out to build for
+  this machine.
+- `features` turns on Cargo features of the game's own crate. Declare
+  them under `[features]` in its `Cargo.toml`, and use
+  `#[cfg(feature = "demo")]` in game code.
+- `exclude` leaves files out of `assets/` and `scenes/`. Patterns are
+  relative to the project folder: `*` matches within one name, `**` any
+  number of folders. The executable, the cooked main scene and
+  `project.json` are always copied.
+
+The export's JSON lists the `features` and the `excluded` files. A native
+export is still run headless, so leaving out a file the game loads fails
+with `EXPORT_VERIFY_FAILED`. An unknown preset name fails with
+`EXPORT_PRESET_UNKNOWN`, which lists the presets the project has.
+Packed data is not encrypted yet.
+
 ### Crash reports
 
 When game code or the engine panics, the game writes a crash report

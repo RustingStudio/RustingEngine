@@ -392,8 +392,8 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "export",
-        usage: "export <project-root> <parent-directory> [--target TRIPLE] [--json]",
-        summary: "Cook, build a release, and package the game into a new folder under the parent. A native export is verified by running a copy for 60 headless ticks from a fresh temporary folder.",
+        usage: "export <project-root> <parent-directory> [--target TRIPLE | --preset NAME] [--json]",
+        summary: "Cook, build a release, and package the game into a new folder under the parent. --preset uses a named entry of project.json `export_presets`: its target, Cargo features, and asset exclude patterns. A native export is verified by running a copy for 60 headless ticks from a fresh temporary folder.",
         gpu: NO_GPU,
         defaults: &[("--target", "host")],
         example: "export my_game exports --json",
@@ -1557,6 +1557,17 @@ pub fn json_schemas() -> Value {
                     "description": "[width, height] in pixels the HUD is laid out for; it scales uniformly to fit the window, keeping its aspect ratio. Unset: drawn at the desktop's DPI scale."},
                 "window_title": {"type": "string",
                     "description": "Window title when the game opens from the project folder."},
+                "export_presets": {"type": "object",
+                    "description": "Named export settings for `rusting export --preset <name>`.",
+                    "additionalProperties": {"type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "target": {"type": "string",
+                                "description": "Rust target triple; unset builds for this machine."},
+                            "features": {"type": "array", "items": {"type": "string"},
+                                "description": "Cargo features of the game crate to turn on."},
+                            "exclude": {"type": "array", "items": {"type": "string"},
+                                "description": "Files under assets/ and scenes/ to leave out, relative to the project: * within one name, ** any folders."}}}},
             },
             "required": ["name", "main_scene", "cooked_scene"],
         },
@@ -1823,6 +1834,7 @@ mod tests {
             window: None,
             ui_base_size: None,
             window_title: None,
+            export_presets: Default::default(),
         };
         let mut keys = written_keys(&project);
         keys.extend(
@@ -1832,6 +1844,7 @@ mod tests {
                 "window",
                 "ui_base_size",
                 "window_title",
+                "export_presets",
             ]
             .map(String::from),
         );

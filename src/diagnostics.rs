@@ -205,6 +205,12 @@ pub const CODES: &[CodeInfo] = &[
         "rusting export . ../dist --target x86_64-pc-windows-gnu",
     ),
     code(
+        "EXPORT_PRESET_UNKNOWN",
+        "project.json has no export preset with the name given to --preset.",
+        "Use one of the names the message lists, or add the preset under export_presets in project.json.",
+        "rusting export . ../dist --preset demo --json",
+    ),
+    code(
         "EXPORT_VERIFY_FAILED",
         "The exported game did not start cleanly from its own folder, so a file it needs was not packaged.",
         "Make sure every file the game loads is under assets/ or scenes/, then export again.",
