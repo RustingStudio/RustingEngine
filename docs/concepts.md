@@ -511,7 +511,8 @@ state. The engine binds `player.forward`, `player.back`, `player.left`,
 `player.right` (WASD and arrows), `player.jump` (Space), and
 `player.sprint` (Shift), and `player.crouch` (C or left Ctrl; the
 controller crouches only with `crouch_height` above 0). Scenario tests press and release actions by name,
-so a game that uses actions is testable without a keyboard.
+so a game that uses actions is testable without a keyboard. See
+[Input](input.md) for gamepads, rebinding and raw input.
 
 ## Tests you can run without a screen
 
