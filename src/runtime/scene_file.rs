@@ -3681,6 +3681,88 @@ mod tests {
     }
 
     #[test]
+    fn every_registered_component_round_trips_through_source_and_cooked_scenes()
+    {
+        // Moves every number and flips every flag, so a field that does not
+        // save comes back as its default and shows up.
+        fn nudge(value: &mut Value) {
+            match value {
+                Value::Bool(flag) => *flag = !*flag,
+                Value::Number(number) => {
+                    *value = match number.as_u64() {
+                        // Flipping the low bit keeps `u32::MAX` in range.
+                        Some(n) => (n ^ 1).into(),
+                        None => (number.as_f64().unwrap() + 0.25).into(),
+                    };
+                }
+                Value::Array(items) => items.iter_mut().for_each(nudge),
+                Value::Object(fields) => fields.values_mut().for_each(nudge),
+                Value::Null | Value::String(_) => {}
+            }
+        }
+
+        let mut app = scene_app();
+        let names = registered_component_names(app.world());
+        assert!(names.len() > 30, "{names:?}");
+        for name in &names {
+            let entity = app.spawn(Name(name.clone()));
+            let world = app.world_mut();
+            add_registered_component(world, entity, name).unwrap();
+            let (_, text) = registered_component_values(world, entity)
+                .unwrap()
+                .into_iter()
+                .find(|(saved, _)| saved == name)
+                .unwrap_or_else(|| panic!("{name} does not save"));
+            let default: Value = serde_json::from_str(&text).unwrap();
+            let mut value = default.clone();
+            nudge(&mut value);
+            set_registered_component(world, entity, name, &value.to_string())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let (_, text) = registered_component_values(world, entity)
+                .unwrap()
+                .into_iter()
+                .find(|(saved, _)| saved == name)
+                .unwrap();
+            let stored: Value = serde_json::from_str(&text).unwrap();
+            assert!(value == default || stored != default, "{name} ignored");
+        }
+        let document = scene_document(app.world_mut(), "Every").unwrap();
+        let saved = |document: &SceneDocument, name: &str| {
+            document
+                .entities
+                .iter()
+                .find(|entity| entity.name.as_deref() == Some(name))
+                .and_then(|entity| entity.components.get(name))
+                .cloned()
+        };
+        for name in &names {
+            assert!(saved(&document, name).is_some(), "{name} not saved");
+        }
+
+        let source = serde_json::to_vec(&document).unwrap();
+        let mut cooked = COMPILED_MAGIC.to_vec();
+        cooked.extend(bincode::serialize(&document).unwrap());
+        for bytes in [source, cooked] {
+            let decoded = decode_scene(&bytes).unwrap();
+            let mut loaded = scene_app();
+            load_scene_document(
+                loaded.world_mut(),
+                &decoded,
+                SceneLoadMode::Replace,
+            )
+            .unwrap();
+            let again = scene_document(loaded.world_mut(), "Every").unwrap();
+            for name in &names {
+                assert_eq!(
+                    saved(&again, name),
+                    saved(&document, name),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn source_and_compiled_scene_decode_to_same_document() {
         let mut app = scene_app();
         app.spawn((

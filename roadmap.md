@@ -4098,7 +4098,7 @@ Depends on: Milestones 3, 4, and 21.
 
 ### Engine feature tests
 
-- [ ] Reflection round trip for every registered component and data asset.
+- [x] Reflection round trip for every registered component and data asset. Done 2026-10-11: new unit test `runtime::scene_file::tests::every_registered_component_round_trips_through_source_and_cooked_scenes` adds every component in the default `SceneComponentRegistry` (64) to its own object, changes every number and flag from its default (an ignored change fails), saves the scene, and checks each component's saved value is identical after loading both the JSON source and the cooked bincode form into a fresh app. `project_runner::tests::every_registered_component_round_trips_through_an_object_save` covers the same registry through object saves. The engine registers no built-in data asset type; `assets::data::tests::data_assets_load_share_save_and_reload_through_handles` round-trips a game-registered one through `.rdata` files, and materials (the reflected asset type in `TypeRegistry`) round-trip in `material_alpha_mode_survives_scene_round_trip` and `gltf_materials_survive_save_and_fresh_load_unless_overridden`. Full check: fmt, clippy (default, no-default-features, gpu-tests), rustdoc, tests (lib 891, 1008 with gpu-tests) green.
 - [ ] Prefab override propagation, nesting, variants, and cycle rejection.
 - [ ] Observers and scene-file event connections fire the registered handlers.
 - [ ] Animation sampling, blending, IK, and ragdoll handoff are deterministic.
