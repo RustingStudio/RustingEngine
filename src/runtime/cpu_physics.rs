@@ -1737,7 +1737,11 @@ fn substep(
     let (mut articulations, taken) =
         articulation::build(world, &mut bodies, &links);
     let mut contacts = find_contacts(&bodies);
-    contacts.retain(|(a, b, _)| !joints::excluded(&links, *a, *b));
+    // GPU bodies already collide with each other on the GPU.
+    contacts.retain(|(a, b, _)| {
+        let both_proxies = bodies[*a].proxy && bodies[*b].proxy;
+        !joints::excluded(&links, *a, *b) && !both_proxies
+    });
     for (a, b, contact) in &mut contacts {
         let closing = bodies[*a].velocity - bodies[*b].velocity;
         contact.speed = closing.dot(&Vector3::from(contact.normal)).max(0.0);
@@ -2152,24 +2156,35 @@ fn gather_bodies(world: &mut World, meshes: &mut MeshCache) -> Vec<Body> {
         Option<&GpuProxyOf>,
         Option<&SpawnOrder>,
         Has<super::PlayerController>,
-        Option<&PhysicsMaterial>,
-        Option<&AxisLock>,
+        (
+            Option<&PhysicsMaterial>,
+            Option<&AxisLock>,
+            Option<&super::GpuStateMirror>,
+        ),
     )>();
+    let time = world.resource::<FrameTime>();
+    let (tick, dt) = (time.fixed_tick, time.fixed_delta.as_secs_f32());
     let assets = world.get_resource::<AssetServer>();
     let mut used = MeshCache::new();
     let mut bodies = query
         .iter(world)
-        .filter(|(_, _, _, physics, rigid, ..)| {
+        .filter(|(_, _, _, physics, rigid, .., (_, _, mirror))| {
             // A fixed GPU body never moves, so CPU queries and the player
-            // can stand on it as a static collider.
+            // can stand on it as a static collider. A dynamic one with fresh
+            // read-back state is met where that state puts it.
             match physics.simulation {
                 SimulationClass::Cpu | SimulationClass::Static => true,
                 SimulationClass::Gpu => {
                     matches!(
                         physics.solver,
                         PhysicsSolver::Full | PhysicsSolver::Simplified
-                    ) && rigid
-                        .is_some_and(|rigid| rigid.kind == RigidBodyKind::Fixed)
+                    ) && rigid.is_some_and(|rigid| match rigid.kind {
+                        RigidBodyKind::Fixed => true,
+                        RigidBodyKind::Dynamic => mirror.is_some_and(|m| {
+                            super::coupled_gpu_state(m, tick, dt).is_some()
+                        }),
+                        _ => false,
+                    })
                 }
                 _ => false,
             }
@@ -2189,8 +2204,7 @@ fn gather_bodies(world: &mut World, meshes: &mut MeshCache) -> Vec<Body> {
                 proxy,
                 order,
                 player,
-                material,
-                locks,
+                (material, locks, mirror),
             )| {
                 let movable = parent.is_none();
                 // ponytail: children read the pose propagated last frame, and
@@ -2201,14 +2215,36 @@ fn gather_bodies(world: &mut World, meshes: &mut MeshCache) -> Vec<Body> {
                     }
                     _ => *transform,
                 };
-                let rigid = rigid.copied().unwrap_or(RigidBody {
+                let mut rigid = rigid.copied().unwrap_or(RigidBody {
                     kind: RigidBodyKind::Fixed,
                     ..RigidBody::default()
                 });
-                let kind = if physics.simulation != SimulationClass::Cpu {
-                    RigidBodyKind::Fixed
-                } else {
-                    rigid.kind
+                // A dynamic GPU body moves CPU bodies like a kinematic one
+                // and is never written back; the GPU feels them through
+                // `gpu_colliders`.
+                // ponytail: each side answers the other's last known state,
+                // so momentum is not exactly kept between CPU and GPU, and
+                // with substeps the GPU pose does not advance between them.
+                let gpu_state = mirror
+                    .filter(|_| {
+                        physics.simulation == SimulationClass::Gpu
+                            && rigid.kind == RigidBodyKind::Dynamic
+                    })
+                    .and_then(|mirror| {
+                        super::coupled_gpu_state(mirror, tick, dt)
+                    });
+                let pose = match gpu_state {
+                    Some((pose, velocity)) => {
+                        rigid.linear_velocity = velocity;
+                        rigid.angular_velocity = mirror?.angular_velocity;
+                        pose
+                    }
+                    None => pose,
+                };
+                let kind = match (physics.simulation, gpu_state) {
+                    (SimulationClass::Cpu, _) => rigid.kind,
+                    (_, Some(_)) => RigidBodyKind::Kinematic,
+                    _ => RigidBodyKind::Fixed,
                 };
                 let shape = match Shape::scaled(collider.shape, pose.scale) {
                     Some(shape) => shape,
@@ -3351,10 +3387,10 @@ fn correct_positions(
 }
 
 fn write_back(world: &mut World, bodies: &[Body]) {
-    for body in bodies
-        .iter()
-        .filter(|body| body.movable && body.kind != RigidBodyKind::Fixed)
-    {
+    // A proxy stands in for a body another solver owns.
+    for body in bodies.iter().filter(|body| {
+        body.movable && body.kind != RigidBodyKind::Fixed && !body.proxy
+    }) {
         let position: [f32; 3] = body.position.into();
         let (x, y, z) = sim_math::euler_from_rotation(&body.rotation);
         let mut entity = world.entity_mut(body.entity);
@@ -4950,5 +4986,76 @@ mod tests {
         }
         assert!(poses[0].0.position[1] < 0.75, "hips lowered");
         assert_eq!(poses[0], poses[2], "no pile-up across ticks");
+    }
+
+    /// A CPU ball at rest after one zero-gravity tick next to a GPU ball
+    /// whose read-back state, `age` ticks old, has it moving into the CPU
+    /// ball: the CPU ball's velocity, and whether the GPU ball's authored
+    /// pose and velocity stayed.
+    fn hit_by_gpu_ball(age: u64) -> ([f32; 3], bool) {
+        use crate::runtime::{App, GpuStateMirror, PhysicsId};
+        let mut app = App::new();
+        app.world_mut().resource_mut::<PhysicsSettings>().gravity = [0.0; 3];
+        app.world_mut().resource_mut::<FrameTime>().fixed_tick = 20;
+        let ball = |position: [f32; 3], simulation| {
+            (
+                Transform {
+                    position,
+                    ..Transform::default()
+                },
+                Collider {
+                    shape: ColliderShape::Sphere { radius: 0.5 },
+                    ..Collider::default()
+                },
+                RigidBody::default(),
+                PhysicsBody {
+                    simulation,
+                    ..PhysicsBody::default()
+                },
+            )
+        };
+        let cpu = app
+            .world_mut()
+            .spawn(ball([0.0; 3], SimulationClass::Cpu))
+            .id();
+        // Authored far off; the GPU has since moved it against the CPU ball.
+        let authored = ball([-5.0, 0.0, 0.0], SimulationClass::Gpu);
+        let gpu = app
+            .world_mut()
+            .spawn((
+                authored.clone(),
+                PhysicsId {
+                    slot: 1,
+                    generation: 1,
+                },
+                GpuStateMirror {
+                    tick: 20 - age,
+                    transform: Transform {
+                        position: [-0.95, 0.0, 0.0],
+                        ..Transform::default()
+                    },
+                    linear_velocity: [3.0, 0.0, 0.0],
+                    angular_velocity: [0.0; 3],
+                    custom_values: None,
+                },
+            ))
+            .id();
+        app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+            .unwrap();
+        let world = app.world();
+        let kept = world.get::<Transform>(gpu) == Some(&authored.0)
+            && world.get::<RigidBody>(gpu) == Some(&authored.2);
+        (world.get::<RigidBody>(cpu).unwrap().linear_velocity, kept)
+    }
+
+    #[test]
+    fn a_cpu_body_is_pushed_by_a_gpu_body_at_its_read_back_state() {
+        let (pushed, kept) = hit_by_gpu_ball(1);
+        assert!(kept, "the GPU body's authored state was overwritten");
+        assert!(pushed[0] > 0.5, "{pushed:?}");
+        let stale = crate::runtime::MAX_COUPLED_STATE_AGE + 1;
+        let (still, kept) = hit_by_gpu_ball(stale);
+        assert!(kept);
+        assert_eq!(still, [0.0; 3]);
     }
 }

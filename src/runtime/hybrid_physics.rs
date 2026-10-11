@@ -13,13 +13,15 @@
 //! in the same tick (a jump check, a hit-scan) must use
 //! [`SimulationClass::Cpu`](super::SimulationClass) bodies instead.
 //!
-//! A GPU body couples with CPU fluids and granular media through its
-//! read-back state: they meet it at its [`GpuStateMirror`] pose carried forward by its
-//! velocity over the state's age, and send what they do to it back as a
-//! [`GpuBodyCommand::Impulse`] that applies before the next GPU tick. The
-//! body feels the fluid one tick later and the fluid sees the body as old
-//! as its read-back state, up to [`MAX_COUPLED_STATE_AGE`] ticks; older
-//! state is not coupled. Water buoyancy works the same way.
+//! A dynamic GPU body that reads its state back couples with CPU
+//! simulation through that state. CPU solvers meet it at its
+//! [`GpuStateMirror`] pose carried forward by its velocity over the state's
+//! age, up to [`MAX_COUPLED_STATE_AGE`] ticks; older state is not coupled.
+//! Fluids, granular media, water, soft bodies and cloth send what they do
+//! to it back as a [`GpuBodyCommand::Impulse`] that applies before the next
+//! GPU tick, so the body feels them one tick later. CPU rigid bodies meet it
+//! as a kinematic body, and the GPU meets them as colliders from the last
+//! CPU step, so each side answers the other's last known state.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
