@@ -1574,6 +1574,9 @@ crate::reflect! {
         splat: bool {
             doc: "Terrain paint: blend the base-color atlas's four quadrants by the vertex color.",
         },
+        shader: String {
+            doc: "Surface shader GLSL starting with `#rusting surface 1`; empty for the built-in surface.",
+        },
         base_color_texture: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
         normal_texture: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
         metallic_roughness_texture: Option<crate::assets::Handle<crate::assets::TextureAsset>>,

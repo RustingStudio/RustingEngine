@@ -3013,6 +3013,28 @@ Depends on: Milestones 3 and 4.
 ### Programmable shading
 
 - [ ] A versioned engine shader language (GLSL-based with engine includes) for surface, unlit, sky, particle, fog, and post-process shaders, with stable uniforms/built-ins.
+  Partial: surface and unlit. `MaterialAsset::shader` takes GLSL headed
+  `#rusting surface 1` that defines `void surface(SurfaceInput i, inout
+  Surface s)`; the built-ins (uv, world_position, view_direction,
+  vertex_color, time; base_color, normal, metallic, roughness, emissive)
+  live in `src/shaders/surface.glsl`, and the scene fragment shader moved to
+  `src/shaders/fragment/scene.frag` with the hook. The renderer splices the
+  hook in, compiles it with `glslc` once per source and sample count, and
+  draws those materials with their own opaque, blended and overlay
+  pipelines; batches split by shader. Unknown headers and compile errors
+  draw the built-in surface and land in
+  `SceneRenderer::surface_shader_errors` with the user's line numbers.
+  Unit test `surface_shaders_need_the_versioned_header`; GPU test
+  `surface_shaders_color_their_material_per_pixel` (a uv gradient beside a
+  built-in grey quad, `i.time` following the clock, version 2 and a typo
+  falling back with errors naming version and `:3:`). Dropping the hook's
+  base_color fails it; so did batching without the shader in the group key.
+  Guide `rusting docs show guide/surface-shaders`. Full check: fmt,
+  clippy x3, `cargo test --workspace` (lib 888) and the gpu-tests run
+  (lib 1025) pass.
+  Not done: sky, particle, fog and post-process kinds; scene files saving
+  `shader` (needs a cooked format version); the depth prepass and shadows
+  ignore the shader.
 - [ ] A visual shader graph that compiles to the same language.
 - [ ] Shader hot reload with error reporting in the editor.
 - [x] Material instancing with per-instance parameter overrides.

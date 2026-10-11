@@ -1273,6 +1273,14 @@ pub struct MaterialAsset {
     /// Terrain paint: the base-color texture is a 2x2 atlas of four layers
     /// blended by the vertex color's RGBA weights. Set by terrain.
     pub splat: bool,
+    /// Surface shader: GLSL starting with `#rusting surface 1` that defines
+    /// `void surface(SurfaceInput i, inout Surface s)` to change the color,
+    /// normal, metallic, roughness or glow per pixel before lighting. Empty
+    /// uses the built-in surface. The renderer compiles it at runtime with
+    /// `glslc`; one that fails draws the built-in surface and reports why
+    /// in `SceneRenderer::surface_shader_errors`. See
+    /// `rusting docs show guide/surface-shaders`.
+    pub shader: String,
     pub base_color_texture: Option<Handle<TextureAsset>>,
     pub normal_texture: Option<Handle<TextureAsset>>,
     pub metallic_roughness_texture: Option<Handle<TextureAsset>>,
@@ -1297,6 +1305,7 @@ impl Default for MaterialAsset {
             uv_offset: [0.0; 2],
             flat_shading: false,
             splat: false,
+            shader: String::new(),
             base_color_texture: None,
             normal_texture: None,
             metallic_roughness_texture: None,

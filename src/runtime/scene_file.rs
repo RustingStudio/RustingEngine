@@ -3144,6 +3144,9 @@ fn runtime_material(
         uv_offset: material.uv_offset,
         flat_shading: material.flat_shading,
         splat: false,
+        // ponytail: scene files do not save surface shaders yet; that
+        // needs a cooked format version.
+        shader: String::new(),
         base_color_texture: texture(assets, &material.base_color_texture)?,
         normal_texture: texture(assets, &material.normal_texture)?,
         metallic_roughness_texture: texture(
