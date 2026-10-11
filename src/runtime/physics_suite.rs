@@ -11,8 +11,8 @@ use bevy_ecs::entity::Entity;
 
 use super::{
     Cloth, ClothSettings, Collider, ColliderShape, Debris, Fluid,
-    FluidSettings, Fracture, Joint, JointKind, MeshRenderer, PhysicsBody,
-    RigidBody, RigidBodyKind, Vehicle,
+    FluidSettings, Fracture, Joint, JointKind, MeshRenderer, Name, PhysicsBody,
+    Ragdoll, RagdollBone, RagdollState, RigidBody, RigidBodyKind, Vehicle,
 };
 use crate::{App, Transform};
 
@@ -47,6 +47,10 @@ pub enum SuiteScene {
     /// not resting above the floor's top at the end (sunk, or never
     /// broken off).
     FractureDrop,
+    /// `size` seven-bone ragdolls, 2 m apart, dropped limp from standing
+    /// onto a floor; the error is the widest gap between joined anchors
+    /// in any step, in metres.
+    RagdollPile,
 }
 
 /// What one run of a [`SuiteScene`] measured.
@@ -62,7 +66,7 @@ pub struct SuiteScore {
 const DT: f64 = 1.0 / 60.0;
 
 impl SuiteScene {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::StackingStability,
         Self::JointChain,
         Self::CcdBullets,
@@ -70,6 +74,7 @@ impl SuiteScene {
         Self::FluidDrop,
         Self::VehicleStress,
         Self::FractureDrop,
+        Self::RagdollPile,
     ];
 
     #[must_use]
@@ -82,6 +87,7 @@ impl SuiteScene {
             Self::FluidDrop => "fluid_drop",
             Self::VehicleStress => "vehicle_stress",
             Self::FractureDrop => "fracture_drop",
+            Self::RagdollPile => "ragdoll_pile",
         }
     }
 
@@ -96,6 +102,7 @@ impl SuiteScene {
             Self::FluidDrop => "height loss",
             Self::VehicleStress => "max tilt (rad)",
             Self::FractureDrop => "missing share",
+            Self::RagdollPile => "max joint gap (m)",
         }
     }
 
@@ -380,6 +387,51 @@ impl SuiteScene {
                     .count();
                 1.0 - above as f32 / (6 * size).max(1) as f32
             }
+            Self::RagdollPile => {
+                let side = (size as f32).sqrt().ceil().max(1.0) as usize;
+                let half = side as f32 + 5.0;
+                body(
+                    &mut app,
+                    [0.0, -0.5, 0.0],
+                    ColliderShape::Box {
+                        half_extents: [half, 0.5, half],
+                    },
+                    RigidBodyKind::Fixed,
+                );
+                let heroes: Vec<_> = (0..size)
+                    .map(|index| {
+                        let x = 2.0 * (index % side) as f32 - side as f32;
+                        let z = 2.0 * (index / side) as f32 - side as f32;
+                        ragdoll(&mut app, [x, 0.9, z])
+                    })
+                    .collect();
+                let mut widest = 0.0_f32;
+                for _ in 0..steps {
+                    step(&mut app, &mut elapsed);
+                    let mut joints = 0;
+                    for &hero in &heroes {
+                        let world = app.world();
+                        let parts =
+                            &world.get::<RagdollState>(hero).unwrap().parts;
+                        for &part in parts {
+                            let Some(joint) = world.get::<Joint>(part) else {
+                                continue;
+                            };
+                            joints += 1;
+                            let at = point(&app, part, joint.anchor);
+                            let target =
+                                point(&app, joint.target, joint.target_anchor);
+                            widest = widest.max(distance(at, target));
+                        }
+                    }
+                    // Every bone but the hips hangs from a joint; a missing
+                    // one is a ragdoll that came apart or never went limp.
+                    if joints != 6 * size {
+                        widest = f32::INFINITY;
+                    }
+                }
+                widest
+            }
         };
         SuiteScore {
             scene: self,
@@ -409,6 +461,66 @@ fn body(
             ..Collider::default()
         },
     ))
+}
+
+/// A standing character with a limp seven-bone ragdoll (hips, spine,
+/// head, two arms, two legs) whose hips are at `at`.
+fn ragdoll(app: &mut App, at: [f32; 3]) -> Entity {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    // (path, local position, roll about Z, length, radius, mass)
+    let bones = [
+        ("Hips", [0.0, 0.0, 0.0], 0.0, 0.2, 0.12, 10.0),
+        ("Hips/Spine", [0.0, 0.2, 0.0], 0.0, 0.4, 0.12, 12.0),
+        ("Hips/Spine/Head", [0.0, 0.4, 0.0], 0.0, 0.25, 0.1, 4.0),
+        (
+            "Hips/Spine/ArmL",
+            [0.15, 0.35, 0.0],
+            -FRAC_PI_2,
+            0.5,
+            0.05,
+            3.0,
+        ),
+        (
+            "Hips/Spine/ArmR",
+            [-0.15, 0.35, 0.0],
+            FRAC_PI_2,
+            0.5,
+            0.05,
+            3.0,
+        ),
+        ("Hips/LegL", [0.1, 0.0, 0.0], PI, 0.8, 0.07, 8.0),
+        ("Hips/LegR", [-0.1, 0.0, 0.0], PI, 0.8, 0.07, 8.0),
+    ];
+    let hero = app.spawn((
+        Transform::new(at),
+        Ragdoll {
+            bones: bones
+                .iter()
+                .map(|&(path, _, _, length, radius, mass)| RagdollBone {
+                    path: path.into(),
+                    length,
+                    radius,
+                    mass,
+                    ..RagdollBone::default()
+                })
+                .collect(),
+            command: Some(true),
+            ..Ragdoll::default()
+        },
+    ));
+    for (path, position, roll, ..) in bones {
+        let (parent_path, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let mut transform = Transform::new(position);
+        transform.rotation = [0.0, 0.0, roll];
+        let bone = app.spawn((Name(name.into()), transform));
+        let parent = if parent_path.is_empty() {
+            hero
+        } else {
+            super::find_target(app.world(), hero, parent_path).unwrap()
+        };
+        app.set_parent(bone, parent).unwrap();
+    }
+    hero
 }
 
 fn position(app: &App, entity: Entity) -> [f32; 3] {
@@ -458,5 +570,7 @@ mod tests {
         assert!(cars.error < 0.2, "{cars:?}");
         let crates = SuiteScene::FractureDrop.run(4, 90);
         assert_eq!(crates.error, 0.0, "{crates:?}");
+        let ragdolls = SuiteScene::RagdollPile.run(4, 120);
+        assert!(ragdolls.error < 0.05, "{ragdolls:?}");
     }
 }

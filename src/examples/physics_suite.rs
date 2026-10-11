@@ -18,6 +18,7 @@ fn main() {
         (SuiteScene::FluidDrop, 1000, 300),
         (SuiteScene::VehicleStress, 25, 600),
         (SuiteScene::FractureDrop, 50, 300),
+        (SuiteScene::RagdollPile, 100, 300),
     ] {
         let score = scene.run(size, steps);
         println!(
