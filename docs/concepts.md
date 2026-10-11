@@ -198,6 +198,9 @@ each other. `rusting export` finds the binary in the shared directory.
 
 ## Data assets
 
+Images, models and sounds are imported files, not data assets; see
+[Assets](assets.md).
+
 A data asset is a file of typed values that several objects share, like a
 Godot `Resource` saved as `.tres`. Enemy stats, loot tables and dialogue
 settings are typical. Describe the type with `reflect!`, give it a name, and

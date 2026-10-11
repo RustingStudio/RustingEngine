@@ -38,6 +38,7 @@ const PAGES: &[(&str, &str, &str)] = &[
         include_str!("../docs/physics.md"),
     ),
     ("manual/input", "manual", include_str!("../docs/input.md")),
+    ("manual/assets", "manual", include_str!("../docs/assets.md")),
     (
         "manual/dev-environment",
         "manual",
@@ -73,6 +74,17 @@ const PAGES: &[(&str, &str, &str)] = &[
         "tutorial",
         include_str!("../docs/tutorials/06-multiplayer-physics.md"),
     ),
+    // The agent guides come first, so `rusting docs --brief` lists them.
+    (
+        "guide/agent-skill",
+        "guide",
+        include_str!("../skills/rusting-game/SKILL.md"),
+    ),
+    (
+        "guide/project-agents",
+        "guide",
+        include_str!("project_agents.md"),
+    ),
     (
         "guide/gpu-condition-shaders",
         "guide",
@@ -89,16 +101,6 @@ const PAGES: &[(&str, &str, &str)] = &[
         "guide/menus-and-ui",
         "guide",
         include_str!("../docs/menus-and-ui.md"),
-    ),
-    (
-        "guide/agent-skill",
-        "guide",
-        include_str!("../skills/rusting-game/SKILL.md"),
-    ),
-    (
-        "guide/project-agents",
-        "guide",
-        include_str!("project_agents.md"),
     ),
     ("guide/effects", "guide", include_str!("../docs/effects.md")),
     (

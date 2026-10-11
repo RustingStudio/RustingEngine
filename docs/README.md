@@ -47,6 +47,8 @@ were run against this version of the engine.
   catalog, and `rusting docs show api/GameScene` indexes the gameplay
   methods. For the Rust crates, `cargo doc --workspace --no-deps --open`
   builds the full reference; CI fails on a broken link in it.
+- [Assets](assets.md): importing images, models and sounds with their
+  license record, generating assets, and exporting the game.
 - [Input](input.md): actions bound to keys, mouse and gamepad, reading
   them per frame or per tick, rebinding, and pressing them in tests.
 - [Physics guide](physics.md): CPU or GPU ownership, how state and events
