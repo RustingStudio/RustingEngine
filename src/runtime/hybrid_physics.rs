@@ -13,13 +13,13 @@
 //! in the same tick (a jump check, a hit-scan) must use
 //! [`SimulationClass::Cpu`](super::SimulationClass) bodies instead.
 //!
-//! A GPU body couples with CPU fluids and granular media through the same
-//! path: they meet it at its [`GpuStateMirror`] pose carried forward by its
+//! A GPU body couples with CPU fluids and granular media through its
+//! read-back state: they meet it at its [`GpuStateMirror`] pose carried forward by its
 //! velocity over the state's age, and send what they do to it back as a
 //! [`GpuBodyCommand::Impulse`] that applies before the next GPU tick. The
 //! body feels the fluid one tick later and the fluid sees the body as old
-//! as its read-back state, up to `MAX_COUPLED_STATE_AGE` ticks; older state
-//! is not coupled.
+//! as its read-back state, up to [`MAX_COUPLED_STATE_AGE`] ticks; older
+//! state is not coupled. Water buoyancy works the same way.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -1026,6 +1026,31 @@ impl GpuStateMirror {
     pub fn age_ticks(&self, current_tick: u64) -> u64 {
         current_tick.saturating_sub(self.tick)
     }
+}
+
+/// Oldest read-back GPU state, in fixed ticks, that CPU fluids and water
+/// still couple with. Readback normally runs one to three frames behind; a
+/// body whose state is older (paused readback, a stalled GPU) is left out
+/// rather than pushed from a pose that may be far from where it is.
+pub const MAX_COUPLED_STATE_AGE: u64 = 8;
+
+/// Pose and linear velocity CPU coupling uses for a GPU body during the
+/// tick after `fixed_tick`: the read-back pose carried forward by its
+/// velocity over the state's age. `None` past [`MAX_COUPLED_STATE_AGE`].
+pub(crate) fn coupled_gpu_state(
+    mirror: &GpuStateMirror,
+    fixed_tick: u64,
+    dt: f32,
+) -> Option<(Transform, [f32; 3])> {
+    let age = mirror.age_ticks(fixed_tick);
+    if age > MAX_COUPLED_STATE_AGE {
+        return None;
+    }
+    let mut pose = mirror.transform;
+    for axis in 0..3 {
+        pose.position[axis] += mirror.linear_velocity[axis] * age as f32 * dt;
+    }
+    Some((pose, mirror.linear_velocity))
 }
 
 /// Lets the engine choose CPU or GPU simulation for this body.

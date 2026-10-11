@@ -894,7 +894,7 @@ fn trade(
 /// them.
 ///
 /// A GPU body takes part when it reads its state back (a [`super::GpuStateMirror`]
-/// at most [`MAX_COUPLED_STATE_AGE`] ticks old): the fluid meets it at the
+/// at most [`super::MAX_COUPLED_STATE_AGE`] ticks old): the fluid meets it at the
 /// mirrored pose carried forward by its velocity over the state's age, and
 /// what the fluid does to its velocity goes back as an impulse that applies
 /// before the next GPU tick (see [`super::GpuPhysicsCommands`]).
@@ -952,23 +952,21 @@ pub(super) fn couple_fluids(
                 None,
             )),
             (Some(SimulationClass::Gpu), Some(id), Some(mirror))
-                if gpu_commands.is_some()
-                    && mirror.age_ticks(time.fixed_tick)
-                        <= MAX_COUPLED_STATE_AGE =>
+                if gpu_commands.is_some() =>
             {
-                let age = mirror.age_ticks(time.fixed_tick) as f32 * dt;
-                let mut pose = mirror.transform;
-                for axis in 0..3 {
-                    pose.position[axis] += mirror.linear_velocity[axis] * age;
-                }
+                let Some((pose, velocity)) =
+                    super::coupled_gpu_state(mirror, time.fixed_tick, dt)
+                else {
+                    continue;
+                };
                 let mut body = *body;
-                body.linear_velocity = mirror.linear_velocity;
+                body.linear_velocity = velocity;
                 coupled.push((
                     visit_key(order, entity),
                     pose,
                     body,
                     *collider,
-                    mirror.linear_velocity,
+                    velocity,
                     Some(*id),
                 ));
             }
@@ -1175,12 +1173,6 @@ pub(super) fn couple_fluids(
         }
     }
 }
-
-/// Oldest read-back GPU state, in fixed ticks, that fluids still couple
-/// with. Readback normally runs one to three frames behind; a body whose
-/// state is older (paused readback, a stalled GPU) is left out rather than
-/// pushed from a pose that may be far from where it is.
-pub const MAX_COUPLED_STATE_AGE: u64 = 8;
 
 /// Per fixed step, after [`step_fluids`]: keeps one entity and one mesh per
 /// volume with a `surface` and rebuilds the mesh from the particles. A
@@ -1443,7 +1435,7 @@ mod tests {
         assert_eq!(late.len(), 1);
         assert!(late[0][1] > 0.0 && late[0][0] < 0.0, "{late:?}");
         // State older than the limit is not trusted.
-        let stale = MAX_COUPLED_STATE_AGE + 1;
+        let stale = crate::runtime::MAX_COUPLED_STATE_AGE + 1;
         assert!(gpu_ball_impulses([0.0, 0.15, 0.0], [0.0; 3], stale).is_empty());
     }
 

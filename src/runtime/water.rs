@@ -261,7 +261,8 @@ pub(super) fn sync_water(
 /// colliders. Lift grows with the share of the body under the surface, drag
 /// slows it, and the current pulls it along. Each body reads only its own
 /// state and the waters in `SpawnOrder`, so the result does not depend on
-/// body order.
+/// body order. A GPU body with fresh read-back state floats the same way,
+/// through impulses (see the `hybrid_physics` module docs on latency).
 /// ponytail: the body is treated as a column of its vertical extent with
 /// its volume spread evenly over it; no torque, so boxes do not tilt with
 /// the waves.
@@ -269,6 +270,7 @@ pub(super) fn sync_water(
 pub(super) fn float_in_water(
     time: Res<FrameTime>,
     physics: Res<super::PhysicsSettings>,
+    gpu_commands: Option<bevy_ecs::prelude::ResMut<super::GpuPhysicsCommands>>,
     waters: Query<(
         Entity,
         Option<&super::SpawnOrder>,
@@ -280,10 +282,14 @@ pub(super) fn float_in_water(
     // A child body is placed by its parent, so buoyancy skips it.
     mut bodies: Query<
         (
+            Entity,
+            Option<&super::SpawnOrder>,
             &crate::Transform,
             &mut super::RigidBody,
             &super::Collider,
             Option<&super::PhysicsBody>,
+            Option<&super::PhysicsId>,
+            Option<&super::GpuStateMirror>,
         ),
         Without<super::Parent>,
     >,
@@ -300,15 +306,31 @@ pub(super) fn float_in_water(
     waters.sort_by_key(|(entity, order, ..)| {
         (order.is_none(), order.map_or(0, |order| order.0), *entity)
     });
-    for (transform, mut body, collider, physics) in &mut bodies {
-        // The GPU solver never reads back CPU velocities.
-        if body.kind != RigidBodyKind::Dynamic
-            || body.mass <= 0.0
-            || !physics
-                .is_some_and(|p| p.simulation == super::SimulationClass::Cpu)
-        {
+    let mut impulses = Vec::new();
+    for (entity, order, transform, mut body, collider, physics, id, mirror) in
+        &mut bodies
+    {
+        if body.kind != RigidBodyKind::Dynamic || body.mass <= 0.0 {
             continue;
         }
+        let (transform, start, gpu) =
+            match (physics.map(|p| p.simulation), id, mirror) {
+                (Some(super::SimulationClass::Cpu), ..) => {
+                    (*transform, body.linear_velocity, None)
+                }
+                (Some(super::SimulationClass::Gpu), Some(id), Some(mirror))
+                    if gpu_commands.is_some() =>
+                {
+                    let Some((pose, velocity)) =
+                        super::coupled_gpu_state(mirror, time.fixed_tick, dt)
+                    else {
+                        continue;
+                    };
+                    (pose, velocity, Some(*id))
+                }
+                _ => continue,
+            };
+        let mut velocity = start;
         let rotation = super::sim_math::rotation_from_euler(
             transform.rotation[0],
             transform.rotation[1],
@@ -369,18 +391,36 @@ pub(super) fn float_in_water(
                 let lift =
                     1000.0 * submerged * volume * gravity_size / body.mass;
                 for axis in 0..3 {
-                    body.linear_velocity[axis] -=
-                        gravity[axis] / gravity_size * lift * dt;
+                    velocity[axis] -= gravity[axis] / gravity_size * lift * dt;
                 }
             }
             let current = water.current();
             for axis in 0..3 {
                 // Drag pulls the body toward the current, which is still
                 // water (zero) for a lake.
-                body.linear_velocity[axis] += (current[axis]
-                    - body.linear_velocity[axis])
+                velocity[axis] += (current[axis] - velocity[axis])
                     * (2.0 * submerged * dt).min(1.0);
             }
+        }
+        if velocity == start {
+            continue;
+        }
+        match gpu {
+            Some(id) => impulses.push((
+                super::fluid::visit_key(order, entity),
+                id,
+                std::array::from_fn(|axis| {
+                    body.mass * (velocity[axis] - start[axis])
+                }),
+            )),
+            None => body.linear_velocity = velocity,
+        }
+    }
+    // Same command order whatever order the query visits bodies in.
+    impulses.sort_by_key(|(key, ..)| *key);
+    if let Some(mut commands) = gpu_commands {
+        for (_, id, impulse) in impulses {
+            commands.push(id, super::GpuBodyCommand::Impulse(impulse));
         }
     }
 }
@@ -388,6 +428,88 @@ pub(super) fn float_in_water(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Impulses one tick of still water sends a 10 kg GPU ball whose
+    /// read-back state is `age` ticks old, at `position` moving at
+    /// `velocity`.
+    fn gpu_ball_impulses(
+        position: [f32; 3],
+        velocity: [f32; 3],
+        age: u64,
+    ) -> Vec<[f32; 3]> {
+        use crate::runtime::{
+            App, Collider, GpuBodyCommand, GpuPhysicsCommands, GpuStateMirror,
+            PhysicsBody, PhysicsId, RigidBody, SimulationClass,
+        };
+        let mut app = App::new();
+        app.world_mut()
+            .insert_resource(GpuPhysicsCommands::default());
+        app.world_mut().resource_mut::<FrameTime>().fixed_tick = 20;
+        app.world_mut().spawn((
+            WaterBody {
+                size: [4.0, 4.0],
+                wave_height: 0.0,
+                ..WaterBody::default()
+            },
+            crate::Transform::default(),
+        ));
+        let transform = crate::Transform {
+            position,
+            ..crate::Transform::default()
+        };
+        let id = PhysicsId {
+            slot: 3,
+            generation: 1,
+        };
+        app.world_mut().spawn((
+            transform,
+            RigidBody {
+                mass: 10.0,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::Sphere { radius: 0.5 },
+                ..Collider::default()
+            },
+            PhysicsBody {
+                simulation: SimulationClass::Gpu,
+                ..PhysicsBody::default()
+            },
+            id,
+            GpuStateMirror {
+                tick: 20 - age,
+                transform,
+                linear_velocity: velocity,
+                angular_velocity: [0.0; 3],
+                custom_values: None,
+            },
+        ));
+        app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+            .unwrap();
+        app.world()
+            .resource::<GpuPhysicsCommands>()
+            .commands
+            .iter()
+            .map(|&(body, command)| match (body == id, command) {
+                (true, GpuBodyCommand::Impulse(impulse)) => impulse,
+                other => panic!("unexpected command {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn water_floats_a_gpu_body_through_impulses_from_its_read_back_state() {
+        let fresh = gpu_ball_impulses([0.0; 3], [0.0; 3], 0);
+        assert_eq!(fresh.len(), 1);
+        assert!(fresh[0][1] > 0.0, "{fresh:?}");
+        // Off the water three ticks ago, moving back over it: floated
+        // and dragged where it is now.
+        let late = gpu_ball_impulses([3.0, 0.0, 0.0], [-60.0, 0.0, 0.0], 3);
+        assert_eq!(late.len(), 1);
+        assert!(late[0][1] > 0.0 && late[0][0] > 0.0, "{late:?}");
+        let stale = crate::runtime::MAX_COUPLED_STATE_AGE + 1;
+        assert!(gpu_ball_impulses([0.0; 3], [0.0; 3], stale).is_empty());
+    }
 
     #[test]
     fn waves_are_reproducible_and_bounded() {
