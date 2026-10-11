@@ -4142,7 +4142,7 @@ Depends on: Milestones 3, 4, and 21.
 
 ### Agent-surface tests
 
-- [ ] Every diagnostic code is unique, registered, and has an `explain` entry with a tested example.
+- [x] Every diagnostic code is unique, registered, and has an `explain` entry with a tested example. Done 2026-10-11: new `diagnostics::tests::command_examples_name_a_real_command_and_its_flags` checks that every `rusting ...` example (each `&&` part) names a command from `schema::OPERATIONS` and only uses flags in that command's usage or the global ones; a `--bogus` flag fails it. Evidence: `codes_are_sorted_unique_and_fully_documented` (strict sort means unique; summary, fix and example present), `every_emitted_code_is_registered_and_every_registered_code_is_emitted`, `json_patch_examples_parse_as_patches`, and `explain_describes_a_code_and_suggests_similar_ones_for_a_typo` (explain lists every code). Full check: fmt, clippy (default, no-default-features, gpu-tests), rustdoc, tests (lib 893, 1010 with gpu-tests) green.
 - [ ] Every example in the schema catalog, API index, skill file, and generated `AGENTS.md` runs and passes.
 - [ ] The generated skill file and `AGENTS.md` match the current schema and API index.
 - [ ] JSON Schema files validate every scene, patch, and scenario in the repository.

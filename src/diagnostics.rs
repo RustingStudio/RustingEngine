@@ -727,4 +727,45 @@ mod tests {
             .unwrap_or_else(|error| panic!("{}: {error}", info.code));
         }
     }
+
+    #[test]
+    fn command_examples_name_a_real_command_and_its_flags() {
+        let mut commands = 0;
+        for info in CODES {
+            for command in info.example.split("&&").map(str::trim) {
+                let Some(args) = command.strip_prefix("rusting ") else {
+                    continue;
+                };
+                commands += 1;
+                let words: Vec<_> = args.split_whitespace().collect();
+                let named: Vec<_> = words
+                    .iter()
+                    .filter(|word| !word.starts_with('-'))
+                    .copied()
+                    .collect();
+                // The longest operation name the leading words spell.
+                let operation = crate::schema::OPERATIONS
+                    .iter()
+                    .filter(|op| {
+                        let name: Vec<_> = op.name.split(' ').collect();
+                        named.starts_with(&name)
+                    })
+                    .max_by_key(|op| op.name.len())
+                    .unwrap_or_else(|| {
+                        panic!("{}: no command `{command}`", info.code)
+                    });
+                for flag in words.iter().filter(|word| word.starts_with("--")) {
+                    let global =
+                        ["--json", "--read-only", "--confine", "--help"];
+                    assert!(
+                        global.contains(flag) || operation.usage.contains(flag),
+                        "{}: `{}` takes no {flag}",
+                        info.code,
+                        operation.name
+                    );
+                }
+            }
+        }
+        assert!(commands > 80, "only {commands} command examples");
+    }
 }
