@@ -159,6 +159,50 @@ The definitions live in `src/shaders/sky_shader.glsl`. A sky shader that
 fails leaves the built-in background, prints the error once, and
 `SceneRenderer::sky_shader_error` keeps it.
 
+## Particle shaders
+
+A `ParticleShader` component next to a `ParticleEmitter` changes how that
+emitter's particles look. Each emitter has its own; scene files save it.
+
+```rust
+use rusting_engine::runtime::{App, ParticleEmitter, ParticleShader};
+
+const RINGS: &str = r#"#rusting particle 1
+void particle(ParticleInput i, inout vec4 color) {
+    float r = length(i.corner);
+    color.a *= step(0.6, r) * step(r, 1.0);
+}
+"#;
+
+fn build(app: &mut App) {
+    app.spawn((
+        ParticleEmitter::default(),
+        ParticleShader { source: RINGS.into() },
+    ));
+}
+```
+
+The header is `#rusting particle 1` and the hook is
+
+```glsl
+void particle(ParticleInput i, inout vec4 color);
+```
+
+`color` is linear RGB and alpha. It arrives as the particle's color with
+its alpha already shaped by the sprite; alpha 0 draws nothing. Additive
+emitters add `color.rgb` times the alpha.
+
+| `ParticleInput i` | |
+| --- | --- |
+| `vec2 corner` | position on the quad, -1..1 on each axis, (0, 0) at the center |
+| `vec4 particle_color` | the particle's RGBA from the emitter's colors and fades |
+| `uint sprite` | the emitter's sprite: 0 soft, 1 disc, 2 square |
+| `float time` | seconds since the game started |
+
+The definitions live in `src/shaders/particle_shader.glsl`. A particle
+shader that fails leaves the built-in look, prints the error once, and
+`SceneRenderer::particle_shader_errors` keeps it.
+
 ## Not yet
 
 - Scene files do not save a material's `shader`, so surface shaders come
@@ -168,4 +212,4 @@ fails leaves the built-in background, prints the error once, and
 - Post shaders cannot read depth.
 - Reflections, the environment lighting and reflection probes do not see
   the sky shader.
-- Particle and fog shader kinds.
+- A fog shader kind.

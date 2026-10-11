@@ -186,6 +186,8 @@ pub struct RenderWorld {
     pub particles: Vec<super::ParticleBatch>,
     /// Visible GPU-simulated emitters, in entity order.
     pub gpu_particles: Vec<super::GpuParticleBatch>,
+    /// Source of each emitter's [`ParticleShader`](super::ParticleShader).
+    pub particle_shaders: HashMap<Entity, String>,
     pub lights_revision: u64,
     pub report: ExtractionReport,
     /// Bodies whose newest runtime transforms will be owned by GPU compute.
@@ -445,6 +447,11 @@ pub fn extract_render_world(world: &mut World) {
     let ambient_occlusion = collect_first::<super::AmbientOcclusion>(world);
     let particles = collect_particles(world);
     let gpu_particles = collect_gpu_particles(world);
+    let particle_shaders = world
+        .query_filtered::<(Entity, &super::ParticleShader), With<super::ParticleEmitter>>()
+        .iter(world)
+        .map(|(entity, shader)| (entity, shader.source.clone()))
+        .collect();
     let has_gpu_physics_resources = world
         .contains_resource::<super::PhysicsIdRegistry>()
         && world.contains_resource::<super::GpuEventRegistry>()
@@ -631,6 +638,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.ambient_occlusion = ambient_occlusion;
     render_world.particles = particles;
     render_world.gpu_particles = gpu_particles;
+    render_world.particle_shaders = particle_shaders;
     render_world.environment = environment;
     render_world.reflection_probes = reflection_probes;
     render_world.light_probe_grid = light_probe_grid;
@@ -1702,6 +1710,22 @@ mod tests {
         let corner = nalgebra::Matrix4::from(decals[0].0)
             * nalgebra::Vector4::new(1.0, 1.0, 1.0, 1.0);
         assert_eq!(corner, nalgebra::Vector4::new(3.0, 1.0, 0.5, 1.0));
+    }
+
+    #[test]
+    fn particle_shaders_reach_the_renderer_only_on_emitters() {
+        use crate::runtime::{ParticleEmitter, ParticleShader};
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let shader = || ParticleShader {
+            source: "#rusting particle 1".into(),
+        };
+        let emitter = app.spawn((ParticleEmitter::default(), shader()));
+        app.spawn(shader());
+        app.update(Duration::ZERO).unwrap();
+        let shaders = &app.world().resource::<RenderWorld>().particle_shaders;
+        assert_eq!(shaders.len(), 1, "{shaders:?}");
+        assert_eq!(shaders[&emitter], shader().source);
     }
 
     #[test]

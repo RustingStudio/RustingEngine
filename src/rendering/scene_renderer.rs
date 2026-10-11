@@ -1860,6 +1860,8 @@ pub struct SceneRenderer {
     /// Opaque, blended and overlay pipelines of each material surface shader
     /// by source and sample count, or why it failed to build.
     surface_pipelines: SurfacePipelines,
+    /// Alpha and additive particle pipelines per particle shader.
+    particle_shaders: ParticlePipelines,
     /// Source, sample count and tone-map pipeline of the last post shader.
     post_shader: ShaderPipeline,
     /// The same for the sky shader.
@@ -2245,6 +2247,7 @@ impl SceneRenderer {
             queued_read_all: false,
             condition_shaders: HashMap::new(),
             surface_pipelines: HashMap::new(),
+            particle_shaders: HashMap::new(),
             post_shader: None,
             sky_shader: None,
             last_physics_tick: 0,
@@ -2833,6 +2836,13 @@ impl SceneRenderer {
             self.post_pipeline(&active, samples, &render_world.post_shader);
         let sky_shader =
             self.sky_pipeline(&active, samples, &render_world.sky_shader);
+        let particle_shaders = particle_pipelines(
+            &mut self.particle_shaders,
+            &self.queue,
+            &active,
+            samples,
+            &render_world.particle_shaders,
+        );
         // Resolve attachments are neither cleared nor loaded.
         let clears = |hdr: Option<vulkano::format::ClearValue>, depth| {
             let mut values = vec![None, hdr, depth];
@@ -4894,9 +4904,12 @@ impl SceneRenderer {
                 .map_err(|error| SceneRenderError(error.to_string()))?
                 .bind_vertex_buffers(0, upload)
                 .map_err(|error| SceneRenderError(error.to_string()))?;
-            for (additive, sprite, first, count) in draws {
-                let pipeline =
-                    active.particle_pipelines[usize::from(additive)].clone();
+            for (additive, sprite, first, count, entity) in draws {
+                let pipeline = entity
+                    .and_then(|entity| particle_shaders.get(&entity))
+                    .unwrap_or(&active.particle_pipelines)
+                    [usize::from(additive)]
+                .clone();
                 commands
                     .bind_pipeline_graphics(pipeline.clone())
                     .map_err(|error| SceneRenderError(error.to_string()))?
@@ -4913,7 +4926,12 @@ impl SceneRenderer {
                                 0.0,
                             ],
                             up: [camera_up[0], camera_up[1], camera_up[2], 0.0],
-                            params: [sprite, 0, 0, 0],
+                            params: [
+                                sprite,
+                                render_world.elapsed_seconds.to_bits(),
+                                0,
+                                0,
+                            ],
                         },
                     )
                     .map_err(|error| SceneRenderError(error.to_string()))?;
@@ -4937,8 +4955,10 @@ impl SceneRenderer {
             let billboards = kept * (state.billboards.len() / slots.max(1));
             let additive =
                 batch.blend == crate::runtime::ParticleBlend::Additive;
-            let pipeline =
-                active.particle_pipelines[usize::from(additive)].clone();
+            let pipeline = particle_shaders
+                .get(&batch.entity)
+                .unwrap_or(&active.particle_pipelines)[usize::from(additive)]
+            .clone();
             commands
                 .set_viewport(0, [scene_viewport.clone()].into_iter().collect())
                 .map_err(|error| SceneRenderError(error.to_string()))?
@@ -4961,7 +4981,12 @@ impl SceneRenderer {
                             0.0,
                         ],
                         up: [camera_up[0], camera_up[1], camera_up[2], 0.0],
-                        params: [batch.sprite as u32, 0, 0, 0],
+                        params: [
+                            batch.sprite as u32,
+                            render_world.elapsed_seconds.to_bits(),
+                            0,
+                            0,
+                        ],
                     },
                 )
                 .map_err(|error| SceneRenderError(error.to_string()))?;
@@ -7077,6 +7102,16 @@ impl SceneRenderer {
             .collect()
     }
 
+    /// Compiler messages of particle shaders that failed to build. Their
+    /// emitters draw with the built-in particle look instead.
+    #[must_use]
+    pub fn particle_shader_errors(&self) -> Vec<&str> {
+        self.particle_shaders
+            .values()
+            .filter_map(|result| result.as_ref().err().map(String::as_str))
+            .collect()
+    }
+
     /// Compiler message of the scene's post shader if it failed to build;
     /// the image then shows without it.
     #[must_use]
@@ -8963,8 +8998,14 @@ fn create_main_passes(
     )?;
     Ok(MainPasses {
         particle_pipelines: [
-            create_particle_pipeline(queue, &render_pass, samples, false)?,
-            create_particle_pipeline(queue, &render_pass, samples, true)?,
+            create_particle_pipeline(
+                queue,
+                &render_pass,
+                samples,
+                false,
+                None,
+            )?,
+            create_particle_pipeline(queue, &render_pass, samples, true, None)?,
         ],
         debug_pipeline: create_debug_pipeline(
             queue.clone(),
@@ -9578,6 +9619,56 @@ fn surface_pipelines(
         .collect()
 }
 
+type ParticlePipelines =
+    HashMap<(String, u32), Result<[Arc<GraphicsPipeline>; 2], String>>;
+
+/// Alpha and additive particle pipelines per emitter of `shaders`, an
+/// emitter's particle shader source, built for `passes` at `samples`.
+/// Emitters whose shader fails to build are left out. Shaders no emitter
+/// uses any more leave the cache.
+fn particle_pipelines(
+    cache: &mut ParticlePipelines,
+    queue: &Arc<Queue>,
+    passes: &MainPasses,
+    samples: u32,
+    shaders: &HashMap<bevy_ecs::entity::Entity, String>,
+) -> HashMap<bevy_ecs::entity::Entity, [Arc<GraphicsPipeline>; 2]> {
+    cache.retain(|(source, _), _| shaders.values().any(|s| s == source));
+    shaders
+        .iter()
+        .filter_map(|(&entity, source)| {
+            cache
+                .entry((source.clone(), samples))
+                .or_insert_with(|| {
+                    let result = particle_fragment_glsl(source)
+                        .and_then(|glsl| {
+                            compile_glsl(queue.device(), "fragment", &glsl)
+                        })
+                        .and_then(|module| {
+                            let build = |additive| {
+                                create_particle_pipeline(
+                                    queue,
+                                    &passes.render_pass,
+                                    samples,
+                                    additive,
+                                    Some(module.clone()),
+                                )
+                                .map_err(|error| error.0)
+                            };
+                            Ok([build(false)?, build(true)?])
+                        });
+                    if let Err(error) = &result {
+                        eprintln!("particle shader skipped:\n{error}");
+                    }
+                    result
+                })
+                .as_ref()
+                .ok()
+                .map(|pipelines| (entity, pipelines.clone()))
+        })
+        .collect()
+}
+
 /// Pipeline, framebuffer, shadow map, and comparison sampler.
 type ShadowPass = (
     Arc<GraphicsPipeline>,
@@ -9727,6 +9818,7 @@ fn create_particle_pipeline(
     render_pass: &Arc<RenderPass>,
     samples: u32,
     additive: bool,
+    fragment: Option<Arc<vulkano::shader::ShaderModule>>,
 ) -> Result<Arc<GraphicsPipeline>, SceneRenderError> {
     let device = queue.device().clone();
     let vertex = particle_vertex_shader::load(device.clone())
@@ -9735,7 +9827,8 @@ fn create_particle_pipeline(
         .ok_or_else(|| {
             SceneRenderError("particle vertex entry point is missing".into())
         })?;
-    let fragment = particle_fragment_shader::load(device.clone())
+    let fragment = fragment
+        .map_or_else(|| particle_fragment_shader::load(device.clone()), Ok)
         .map_err(|error| SceneRenderError(error.to_string()))?
         .entry_point("main")
         .ok_or_else(|| {
@@ -9820,7 +9913,7 @@ type GpuParticleStep =
     (Arc<DescriptorSet>, super::gpu_particles::shader::Step, u32);
 
 /// One instanced particle draw: additive, sprite, first instance, count.
-type ParticleDraw = (bool, u32, u32, u32);
+type ParticleDraw = (bool, u32, u32, u32, Option<bevy_ecs::entity::Entity>);
 
 /// Particle instances of every batch, alpha batches far to near and each
 /// one's particles far to near, then additive batches. Returns the vertices
@@ -9878,7 +9971,13 @@ fn particle_draws(
             ParticleSprite::Disc => 1,
             ParticleSprite::Square => 2,
         };
-        draws.push((additive, sprite, first, instances.len() as u32));
+        draws.push((
+            additive,
+            sprite,
+            first,
+            instances.len() as u32,
+            batch.entity,
+        ));
     }
     (vertices, draws)
 }
@@ -10151,6 +10250,20 @@ fn sky_fragment_glsl(source: &str) -> Result<String, String> {
         (
             "sky_shader.glsl",
             include_str!("../shaders/sky_shader.glsl"),
+        ),
+    )
+}
+
+/// The particle fragment shader with `source`, a `#rusting particle 1`
+/// shader, as its `particle` hook.
+fn particle_fragment_glsl(source: &str) -> Result<String, String> {
+    hooked_glsl(
+        "particle",
+        source,
+        include_str!("../shaders/fragment/particle.frag"),
+        (
+            "particle_shader.glsl",
+            include_str!("../shaders/particle_shader.glsl"),
         ),
     )
 }
@@ -11057,6 +11170,7 @@ layout(location = 4) in float rotation;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_corner;
 layout(location = 2) flat out uint v_sprite;
+layout(location = 3) flat out float v_time;
 layout(push_constant) uniform Particles {
     mat4 view_projection;
     // w = 1: xyz is the camera position. w = 0: xyz points toward an
@@ -11064,6 +11178,7 @@ layout(push_constant) uniform Particles {
     vec4 eye;
     vec4 right;
     vec4 up;
+    // x: sprite, y: seconds since the game started as float bits.
     uvec4 params;
 } particles;
 const vec2 CORNERS[6] = vec2[](
@@ -11096,42 +11211,17 @@ void main() {
     v_color = color;
     v_corner = corner;
     v_sprite = particles.params.x;
+    v_time = uintBitsToFloat(particles.params.y);
 }
 "
     }
 }
 
-#[rustfmt::skip]
 mod particle_fragment_shader {
     vulkano_shaders::shader! {
         ty: "fragment",
-        src: r"
-#version 450
-layout(location = 0) in vec4 v_color;
-layout(location = 1) in vec2 v_corner;
-layout(location = 2) flat in uint v_sprite;
-layout(location = 0) out vec4 f_color;
-void main() {
-    float r = length(v_corner);
-    float shape;
-    if (v_sprite == 0u) {
-        // Soft: bright core, smooth fall to the edge.
-        float edge = clamp(1.0 - r, 0.0, 1.0);
-        shape = edge * edge * (3.0 - 2.0 * edge);
-    } else if (v_sprite == 1u) {
-        float width = max(fwidth(r), 1e-4);
-        shape = 1.0 - smoothstep(1.0 - width, 1.0, r);
-    } else {
-        shape = 1.0;
-    }
-    float alpha = clamp(v_color.a, 0.0, 1.0) * shape;
-    if (alpha <= 0.0) {
-        discard;
-    }
-    // Premultiplied. Additive pipelines ignore the alpha output.
-    f_color = vec4(v_color.rgb * alpha, alpha);
-}
-"
+        include: ["src/shaders"],
+        path: "src/shaders/fragment/particle.frag"
     }
 }
 
@@ -20260,6 +20350,15 @@ mod tests {
             glsl.contains("#define RUSTING_CUSTOM_SKY") && glsl.contains(sky)
         );
         assert!(!glsl.contains("#include"), "includes are inlined");
+        let particle = "void particle(ParticleInput i, inout vec4 color) {}";
+        let glsl = super::particle_fragment_glsl(&format!(
+            "#rusting particle 1\n{particle}"
+        ))
+        .unwrap();
+        assert!(
+            glsl.contains("#define RUSTING_CUSTOM_PARTICLE")
+                && glsl.contains(particle)
+        );
     }
 
     #[test]
@@ -20465,6 +20564,77 @@ mod tests {
         scene.render_world.sky_shader.clear();
         assert_eq!(render_pixel(&mut scene, [24, 16]), plain[1]);
         assert_eq!(scene.renderer.sky_shader_error(), None);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn particle_shaders_change_only_their_emitter() {
+        use crate::runtime::{
+            ParticleBatch, ParticleBlend, ParticleInstance, ParticleSprite,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let entity = |i| bevy_ecs::entity::Entity::from_raw_u32(i).unwrap();
+        // Two white square emitters, on pixels 4 to 11 and 20 to 27.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        scene.render_world.particles = [(1, -0.5), (2, 0.5)]
+            .map(|(i, x)| ParticleBatch {
+                entity: Some(entity(i)),
+                blend: ParticleBlend::Alpha,
+                sprite: ParticleSprite::Square,
+                instances: vec![ParticleInstance {
+                    position: [x, 0.0, 0.5],
+                    size: 0.5,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    ..ParticleInstance::default()
+                }],
+            })
+            .to_vec();
+        let plain = render_pixel(&mut scene, [8, 16]);
+        let back = render_pixel(&mut scene, [16, 16]);
+        assert!(plain[1] > back[1] + 60, "{plain:?} {back:?}");
+        let shade = |scene: &mut SlabScene, body: &str| {
+            scene.render_world.particle_shaders = HashMap::from([(
+                entity(1),
+                format!(
+                    "#rusting particle 1\n\
+                     void particle(ParticleInput i, inout vec4 color) \
+                     {{\n{body}\n}}"
+                ),
+            )]);
+        };
+        shade(&mut scene, "color.rgb = vec3(1.0, 0.0, 0.0);");
+        let red = render_pixel(&mut scene, [8, 16]);
+        assert_eq!(scene.renderer.particle_shader_errors(), Vec::<&str>::new());
+        assert!(red[0] > 100 && red[1] < 10, "{red:?} {plain:?}");
+        assert_eq!(render_pixel(&mut scene, [24, 16]), plain, "other emitter");
+        // Alpha 0 draws nothing; `corner` runs -1..1 across the quad.
+        shade(&mut scene, "color.a *= step(0.0, i.corner.x);");
+        assert_eq!(render_pixel(&mut scene, [5, 16]), back);
+        assert_eq!(render_pixel(&mut scene, [10, 16]), plain);
+        // `i.time` is the render world's clock.
+        shade(&mut scene, "color.rgb = vec3(i.time);");
+        scene.render_world.elapsed_seconds = 0.1;
+        let early = render_pixel(&mut scene, [8, 16]);
+        scene.render_world.elapsed_seconds = 0.9;
+        let late = render_pixel(&mut scene, [8, 16]);
+        assert!(late[0] > early[0] + 60, "{early:?} {late:?}");
+        // Broken shaders leave the built-in look and say why.
+        shade(&mut scene, "color = oops;");
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain);
+        let errors = scene.renderer.particle_shader_errors();
+        assert!(
+            errors.len() == 1 && errors[0].contains("oops"),
+            "{errors:?}"
+        );
+        scene.render_world.particle_shaders.clear();
+        assert_eq!(render_pixel(&mut scene, [8, 16]), plain);
+        assert_eq!(scene.renderer.particle_shader_errors(), Vec::<&str>::new());
     }
 
     #[test]

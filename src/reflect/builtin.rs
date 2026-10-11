@@ -36,8 +36,8 @@ use crate::runtime::{
 };
 use crate::runtime::{
     ColorKey, CurveKey, EmitterShape, ParticleBlend, ParticleBurst,
-    ParticleEmitter, ParticleFacing, ParticleSimulation, ParticleSpace,
-    ParticleSprite,
+    ParticleEmitter, ParticleFacing, ParticleShader, ParticleSimulation,
+    ParticleSpace, ParticleSprite,
 };
 
 crate::reflect! {
@@ -1078,6 +1078,14 @@ crate::reflect! {
         intensity: f32 { unit: "factor", min: 0.0 },
         background: bool { doc: "also draw the image behind the scene" },
         #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+    }
+}
+
+crate::reflect! {
+    struct ParticleShader {
+        source: String {
+            doc: "GLSL starting with `#rusting particle 1`; see docs/surface-shaders.md",
+        },
     }
 }
 

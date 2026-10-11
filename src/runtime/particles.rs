@@ -1043,6 +1043,19 @@ pub struct ParticleInstance {
     pub rotation: f32,
 }
 
+/// A `#rusting particle 1` shader that changes how this object's
+/// [`ParticleEmitter`] particles look, pixel by pixel. See
+/// `docs/surface-shaders.md`. A shader that fails to compile leaves the
+/// built-in look; the error is in `SceneRenderer::particle_shader_errors`.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct ParticleShader {
+    /// GLSL source starting with `#rusting particle 1`.
+    pub source: String,
+}
+
 /// The particles of one emitter, drawn by one instanced draw.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParticleBatch {

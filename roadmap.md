@@ -3059,7 +3059,23 @@ Depends on: Milestones 3 and 4.
   naming version and `:3:`); dropping the hook call fails it. Full check:
   fmt, clippy x3, `cargo test --workspace` (lib 888) and the gpu-tests run
   (lib 1027) pass.
-  Not done: particle and fog kinds; reflections and environment lighting
+  Particle: a `ParticleShader` component (`rusting.particle_shader`) next
+  to a `ParticleEmitter` holds GLSL headed `#rusting particle 1` defining
+  `void particle(ParticleInput i, inout vec4 color)` (corner, particle
+  color, sprite, time); the particle fragment shader moved to
+  `src/shaders/fragment/particle.frag` with the hook, each emitter's CPU and
+  GPU draws pick alpha and additive pipelines built from its shader
+  (cached per source), and errors keep the built-in look and land in
+  `SceneRenderer::particle_shader_errors`. GPU test
+  `particle_shaders_change_only_their_emitter` (the shaded emitter turns
+  red while the other stays white, alpha 0 by corner leaves background,
+  time follows the clock, a typo keeps the built-in look with the error);
+  dropping the hook call fails it. Unit test
+  `particle_shaders_reach_the_renderer_only_on_emitters`. The GPU-simulated
+  draw path is wired the same way but not covered by its own test. Full
+  check: fmt, clippy x3, `cargo test --workspace` (lib 889) and the
+  gpu-tests run (lib 1029) pass.
+  Not done: the fog kind; reflections and environment lighting
   ignore the sky shader; scene files saving a material's
   `shader` (needs a cooked format version); the depth prepass and shadows
   ignore the surface shader; post shaders cannot read depth.
