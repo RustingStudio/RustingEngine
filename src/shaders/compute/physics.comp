@@ -351,6 +351,13 @@ void main() {
             body.model[3].xyz = settled_position;
             body.velocity.xyz = vec3(0.0);
             body.angular_velocity.xyz = vec3(0.0);
+            // The settled position is from before the colliders: without
+            // pushing it out again, the weight of a pile presses its
+            // sleeping bottom layer into the ground a little every tick.
+            if (own.shape.x < 2.5 && from_solver.x > 0.5) {
+                collide_with_colliders(body, own);
+                body.velocity.xyz = vec3(0.0);
+            }
         }
     }
     bodies.data[body_index] = body;

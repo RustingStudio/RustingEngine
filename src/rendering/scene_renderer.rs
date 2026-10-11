@@ -18988,7 +18988,7 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
-    fn a_100k_pile_lands_on_the_gpu_and_scores_how_deep_it_sinks() {
+    fn a_100k_pile_lands_on_the_gpu_without_sinking() {
         use crate::runtime::{
             Collider, CollisionLayers, ExtractedGpuPhysicsBody, GpuCollider,
             PhysicsBenchmark, PhysicsId,
@@ -19075,9 +19075,8 @@ mod tests {
              deeper than 5 cm, {} grid overflow",
             diagnostics.physics_grid_overflow
         );
-        // Baseline, not a goal: the 47-layer clump presses 86 cubes more
-        // than 5 cm into the ground, the deepest 0.41 m (Milestone 10
-        // follow-up in the roadmap).
-        assert!(sunk <= 150 && deepest < 0.5, "{diagnostics:?}");
+        // Sleeping cubes at the bottom are pushed out of the ground too;
+        // before that the pile pressed 86 of them up to 0.41 m in.
+        assert!(sunk == 0 && deepest < 0.01, "{deepest} {diagnostics:?}");
     }
 }
