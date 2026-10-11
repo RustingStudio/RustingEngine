@@ -1900,6 +1900,20 @@ pub struct ColorLut {
     pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
 }
 
+/// A `#rusting post 1` shader run on every pixel of the finished image,
+/// after tone mapping, [`ColorGrading`] and [`ColorLut`]. See
+/// `docs/surface-shaders.md`. A shader that fails to compile leaves the
+/// image as is; the error is in `SceneRenderer::post_shader_error`. The one
+/// on the entity with the lowest ID is used.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct PostShader {
+    /// GLSL source starting with `#rusting post 1`.
+    pub source: String,
+}
+
 impl Default for ColorLut {
     fn default() -> Self {
         Self {

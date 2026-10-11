@@ -231,6 +231,7 @@ each one's fields, defaults and an example:
 - `rusting.camera_screen`: On an object with a mesh: shows what the camera entity named camera sees, at size [w, h] pixels, in place of the material's base color and emissive maps.
 - `rusting.environment_map`: Equirectangular (2:1) sky image under assets/ that surfaces reflect and are lit by, replacing the sky_light hemisphere.
 - `rusting.color_lut`: Color lookup table under assets/, applied after tone mapping and rusting.color_grading: an image strip of N squares of N x N pixels side by side (256 x 16 or 1024 x 32).
+- `rusting.post_shader`: GLSL run on every pixel of the finished image, after tone mapping, rusting.color_grading and rusting.color_lut.
 - `rusting.light_cookie`: On an object with a spot_light: projects an image under assets/ through the light's outer cone, like a slide in a projector (window frames, leaves, a logo).
 - `rusting.reflection_probe`: Box of half size extents around the object's position.
 - `rusting.light_probe_grid`: Grid of resolution light probes spread through a world-aligned box of half size extents around the object.

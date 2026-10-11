@@ -1192,6 +1192,7 @@ pub const AUTO_EXPOSURE_COMPONENT: &str = "rusting.auto_exposure";
 pub const COLOR_GRADING_COMPONENT: &str = "rusting.color_grading";
 /// Registry name of the built-in color lookup table.
 pub const COLOR_LUT_COMPONENT: &str = "rusting.color_lut";
+pub const POST_SHADER_COMPONENT: &str = "rusting.post_shader";
 /// Registry name of the built-in lens blur.
 pub const DEPTH_OF_FIELD_COMPONENT: &str = "rusting.depth_of_field";
 /// Registry name of the built-in camera motion blur.
@@ -1389,6 +1390,9 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::ColorLut>(COLOR_LUT_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::PostShader>(POST_SHADER_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::DepthOfField>(DEPTH_OF_FIELD_COMPONENT)

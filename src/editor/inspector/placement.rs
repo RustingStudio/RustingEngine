@@ -41,8 +41,8 @@ use crate::runtime::{
 use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
     COLOR_LUT_COMPONENT, DEPTH_OF_FIELD_COMPONENT, FLASH_COMPONENT,
-    MATERIAL_OVERRIDE_COMPONENT, MOTION_BLUR_COMPONENT, SPAWN_GRID_COMPONENT,
-    SQUASH_COMPONENT,
+    MATERIAL_OVERRIDE_COMPONENT, MOTION_BLUR_COMPONENT, POST_SHADER_COMPONENT,
+    SPAWN_GRID_COMPONENT, SQUASH_COMPONENT,
 };
 
 /// Components that together make a World Environment object.
@@ -72,6 +72,7 @@ fn kind(name: &str) -> Kind {
         | AUTO_EXPOSURE_COMPONENT
         | COLOR_GRADING_COMPONENT
         | COLOR_LUT_COMPONENT
+        | POST_SHADER_COMPONENT
         | DEPTH_OF_FIELD_COMPONENT
         | MOTION_BLUR_COMPONENT
         | POST_VOLUME_COMPONENT
@@ -144,6 +145,9 @@ pub(in crate::editor) fn placement(
             first_with::<crate::runtime::ColorGrading>(world)
         }
         COLOR_LUT_COMPONENT => first_with::<crate::runtime::ColorLut>(world),
+        POST_SHADER_COMPONENT => {
+            first_with::<crate::runtime::PostShader>(world)
+        }
         DEPTH_OF_FIELD_COMPONENT => {
             first_with::<crate::runtime::DepthOfField>(world)
         }
@@ -397,6 +401,10 @@ pub(in crate::editor) fn component_help(
         COLOR_LUT_COMPONENT => (
             "Recolors the final image through a lookup table image.",
             "A film look graded in an image editor.",
+        ),
+        POST_SHADER_COMPONENT => (
+            "Runs your own GLSL on every pixel of the final image.",
+            "Outlines, pixelation, a night-vision or heat-haze look.",
         ),
         LIGHT_COOKIE_COMPONENT => (
             "Projects an image through this object's spot light.",

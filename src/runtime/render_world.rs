@@ -172,6 +172,9 @@ pub struct RenderWorld {
     /// [`ColorLut`](super::ColorLut).
     pub color_lut:
         Option<(crate::assets::Handle<crate::assets::TextureAsset>, f32)>,
+    /// Source of the first [`PostShader`](super::PostShader) in entity
+    /// order; empty when there is none.
+    pub post_shader: String,
     /// Meshes that show a camera's image, in entity order.
     pub screens: Vec<ExtractedScreen>,
     pub ambient_occlusion: Option<super::AmbientOcclusion>,
@@ -431,6 +434,14 @@ pub fn extract_render_world(world: &mut World) {
             .min_by_key(|(entity, ..)| *entity)
             .map(|(_, handle, intensity)| (handle, intensity))
     };
+    let post_shader = {
+        let mut query = world.query::<(Entity, &super::PostShader)>();
+        query
+            .iter(world)
+            .min_by_key(|(entity, _)| entity.index())
+            .map(|(_, shader)| shader.source.clone())
+            .unwrap_or_default()
+    };
     let screens = collect_screens(world);
     let ambient_occlusion = collect_first::<super::AmbientOcclusion>(world);
     let particles = collect_particles(world);
@@ -615,6 +626,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.motion_blur = motion_blur;
     render_world.color_grading = color_grading;
     render_world.color_lut = color_lut;
+    render_world.post_shader = post_shader;
     render_world.screens = screens;
     render_world.ambient_occlusion = ambient_occlusion;
     render_world.particles = particles;

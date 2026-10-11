@@ -76,9 +76,54 @@ material's built-in surface instead, prints the error once, and
 Materials that share a surface shader and textures still share one batch.
 `Unlit` materials run the shader too and draw its `base_color`.
 
+## Post shaders
+
+A `PostShader` component runs GLSL on every pixel of the finished image,
+after tone mapping, `ColorGrading`, `ColorLut` and the film effects. The
+one on the entity with the lowest ID is used, and scene files save it.
+
+```rust
+use rusting_engine::runtime::{App, PostShader};
+
+const SEPIA: &str = r#"#rusting post 1
+void post(PostInput i, inout vec3 color) {
+    float l = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(color, l * vec3(1.1, 0.95, 0.7), 0.8);
+}
+"#;
+
+fn build(app: &mut App) {
+    app.spawn(PostShader { source: SEPIA.into() });
+}
+```
+
+The header is `#rusting post 1` and the hook is
+
+```glsl
+void post(PostInput i, inout vec3 color);
+```
+
+`color` arrives as the display color, about 0..1, and is clamped after the
+shader.
+
+| `PostInput i` | |
+| --- | --- |
+| `vec2 uv` | 0..1 across the image, (0, 0) at the top left |
+| `vec2 pixel` | pixel center in pixels |
+| `vec2 texel` | one over the image size: the uv step to the next pixel |
+| `float time` | game seconds from the fixed tick, the same in a replay |
+
+`vec3 scene_at(vec2 uv)` reads the linear HDR image at any uv, bloom
+added, before exposure and tone mapping, and black outside the image; use
+it for outlines, blurs or warps. The definitions live in
+`src/shaders/post.glsl`. A post shader that fails leaves the image as is,
+prints the error once, and `SceneRenderer::post_shader_error` keeps it.
+
 ## Not yet
 
-- Scene files do not save `shader`, so surface shaders come from game code.
-- The depth prepass and shadows ignore the shader, so `discard` and alpha
-  changes do not cut holes in shadows.
-- Sky, particle, fog and post-process shader kinds.
+- Scene files do not save a material's `shader`, so surface shaders come
+  from game code.
+- The depth prepass and shadows ignore the surface shader, so `discard`
+  and alpha changes do not cut holes in shadows.
+- Post shaders cannot read depth.
+- Sky, particle and fog shader kinds.

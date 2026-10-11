@@ -3032,9 +3032,23 @@ Depends on: Milestones 3 and 4.
   Guide `rusting docs show guide/surface-shaders`. Full check: fmt,
   clippy x3, `cargo test --workspace` (lib 888) and the gpu-tests run
   (lib 1025) pass.
-  Not done: sky, particle, fog and post-process kinds; scene files saving
+  Post-process: a `PostShader` component (`rusting.post_shader`, saved in
+  scene files) holds GLSL headed `#rusting post 1` that defines `void
+  post(PostInput i, inout vec3 color)` (uv, pixel, texel, time from the
+  fixed tick; `scene_at(uv)` reads the HDR image). The tone-map shader
+  moved to `src/shaders/fragment/tonemap.frag` with the hook after
+  grading, LUT and film effects; the renderer builds one tone-map pipeline
+  per source and sample count and forces the HDR copy on while it runs.
+  Errors leave the image as is and land in `SceneRenderer::post_shader_error`.
+  GPU test `post_shaders_rework_the_finished_image` (uv gradient,
+  `scene_at` shifting the quad half an image, time following the tick,
+  version 2 and a typo leaving the image unchanged with errors naming
+  version and `:3:`, clearing it restores the built-in); binding the
+  built-in pipeline instead fails it. Full check: fmt, clippy x3,
+  `cargo test --workspace` (lib 888) and the gpu-tests run (lib 1026) pass.
+  Not done: sky, particle and fog kinds; scene files saving a material's
   `shader` (needs a cooked format version); the depth prepass and shadows
-  ignore the shader.
+  ignore the surface shader; post shaders cannot read depth.
 - [ ] A visual shader graph that compiles to the same language.
 - [ ] Shader hot reload with error reporting in the editor.
 - [x] Material instancing with per-instance parameter overrides.

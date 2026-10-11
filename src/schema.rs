@@ -832,6 +832,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"texture": "grades/teal_orange.png", "intensity": 1.0}),
     },
     ComponentSection {
+        key: "rusting.post_shader",
+        summary: "GLSL run on every pixel of the finished image, after tone mapping, rusting.color_grading and rusting.color_lut. source starts with `#rusting post 1` and defines `void post(PostInput i, inout vec3 color)`; i has uv, pixel, texel and time, and scene_at(uv) reads the HDR image. A shader that fails to compile leaves the image as is. See guide/surface-shaders. The first one found is used.",
+        gpu: "one extra full-screen copy of the HDR image, plus the shader's own cost per pixel",
+        example: || json!({"source": "#rusting post 1\nvoid post(PostInput i, inout vec3 color) { color = 1.0 - color; }"}),
+    },
+    ComponentSection {
         key: "rusting.light_cookie",
         summary: "On an object with a spot_light: projects an image under assets/ through the light's outer cone, like a slide in a projector (window frames, leaves, a logo). The light's color is multiplied by the image; its top points along the light's up (+Y). At most four cookie spot lights per frame, the first in entity order; others light without their image.",
         gpu: "one texture sample per lit pixel for each cookie light that reaches it",
