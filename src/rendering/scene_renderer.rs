@@ -19079,4 +19079,98 @@ mod tests {
         // before that the pile pressed 86 of them up to 0.41 m in.
         assert!(sunk == 0 && deepest < 0.01, "{deepest} {diagnostics:?}");
     }
+
+    /// Twenty unit cubes dropped 1 cm apart, each 2 cm off the one below in
+    /// turn along x and z, onto a GPU ground collider must settle into a
+    /// standing tower and sleep.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn a_twenty_cube_tower_stands_and_sleeps_on_the_gpu() {
+        use crate::runtime::{
+            Collider, ColliderShape, CollisionLayers, ExtractedGpuPhysicsBody,
+            GpuCollider, PhysicsId, PhysicsSolver,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        const LEVELS: u32 = 20;
+        const TICKS: u64 = 300;
+        let unit_box = Collider {
+            shape: ColliderShape::Box {
+                half_extents: [0.5; 3],
+            },
+            ..Collider::default()
+        };
+        let offset = |level: u32| {
+            let side = if level % 4 < 2 { 0.02 } else { -0.02 };
+            let (x, z) = if level.is_multiple_of(2) {
+                (side, 0.0)
+            } else {
+                (0.0, side)
+            };
+            [x, 0.5 + level as f32 * 1.01, z]
+        };
+        let mut scene = SlabScene::new(&[]);
+        let world = &mut scene.render_world;
+        world.gpu_physics = (0..LEVELS)
+            .map(|slot| ExtractedGpuPhysicsBody {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(4000 + slot)
+                    .unwrap(),
+                physics_id: PhysicsId {
+                    slot,
+                    generation: 0,
+                },
+                transform: crate::Transform::new(offset(slot)),
+                rigid_body: crate::runtime::RigidBody::default(),
+                solver: PhysicsSolver::Full,
+                collider: Some((unit_box, CollisionLayers::default())),
+                custom_shader: None,
+                rules: Vec::new(),
+                sync: Default::default(),
+            })
+            .collect();
+        world.gpu_colliders = vec![GpuCollider {
+            model: crate::Transform::new([0.0, -0.5, 0.0]).to_matrix(),
+            shape: [0.0, 10.0, 0.5, 10.0],
+            velocity: [0.0; 3],
+            friction: 0.5,
+            restitution: 0.0,
+            layers: CollisionLayers::default(),
+        }];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0, -9.81, 0.0];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        for tick in 1..=TICKS {
+            let world = &mut scene.render_world;
+            world.physics_tick = tick;
+            world.gpu_physics_read_all = tick == TICKS;
+            world.gpu_physics_commands_serial += u64::from(tick == TICKS);
+            let before = scene.now();
+            let _in_flight =
+                scene.render(before).then_signal_fence_and_flush().unwrap();
+            scene.renderer.block_until_physics_readbacks_complete();
+        }
+        let mut states = scene.renderer.take_completed_physics_states();
+        states.sort_by_key(|state| state.physics_id.slot);
+        assert_eq!(states.len(), LEVELS as usize);
+        for (level, state) in states.iter().enumerate() {
+            let [x, y, z] = state.transform.position;
+            let [x0, _, z0] = offset(level as u32);
+            let height = 0.5 + level as f32;
+            assert!(
+                (x - x0).hypot(z - z0) < 0.05 && (y - height).abs() < 0.03,
+                "cube {level}: {state:?}"
+            );
+            assert!(
+                state.transform.rotation.iter().all(|a| a.abs() < 0.02),
+                "cube {level} tilts: {state:?}"
+            );
+            assert_eq!(state.linear_velocity, [0.0; 3], "cube {level} sleeps");
+        }
+    }
 }
