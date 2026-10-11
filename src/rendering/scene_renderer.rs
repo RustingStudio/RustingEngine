@@ -13869,6 +13869,9 @@ mod tests {
         assert_eq!(auto(capabilities(true, 16)), QualityProfile::Eco);
         assert_eq!(auto(capabilities(false, 2)), QualityProfile::Balanced);
         assert_eq!(auto(capabilities(false, 12)), QualityProfile::High);
+        // The memory cut is at exactly 4 GiB.
+        assert_eq!(auto(capabilities(false, 3)), QualityProfile::Balanced);
+        assert_eq!(auto(capabilities(false, 4)), QualityProfile::High);
         assert_eq!(
             resolve_quality(QualityProfile::High, &capabilities(true, 1)),
             QualityProfile::High
