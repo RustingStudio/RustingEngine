@@ -381,9 +381,16 @@ its `until`, in metres. The default metric, `"ScreenSize"`, uses the
 fraction of the view height the object covers instead, so a level draws while
 it covers at least `until` (0.5 is half the screen); it keeps the same look
 when the field of view changes. A level without `until` draws at any range;
-give the last level an `until` to stop drawing the object past it. Make the
-coarser meshes with `rusting scene add-model` from a lower-poly glTF, or with
-your own generator. The scene does not change: the group loads with the mesh,
+give the last level an `until` to stop drawing the object past it.
+
+Importing a glTF writes this file for you: each static mesh of 512 triangles
+or more gets up to three coarser levels with about a half, a quarter and an
+eighth of its triangles (`bear.mesh-0-0.lod1.rmesh` and so on), handing over
+at screen sizes 0.3, 0.12 and 0.05. Skinned and morphing meshes are left
+alone. The generator merges nearby vertices, so it can round off hard edges;
+for hero assets, replace the coarser meshes with your own (from a lower-poly
+glTF through `rusting scene add-model`, or your own tool) and edit the
+`.rlod` to point at them. The scene does not change: the group loads with the mesh,
 and an exported game carries it in `assets/`. Edit the `.rlod` and reload the
 scene to retune it.
 

@@ -13,6 +13,8 @@ use bevy_ecs::prelude::{Local, Res, ResMut, Resource};
 use serde::{Deserialize, Serialize};
 
 mod radiance;
+mod simplify;
+pub use simplify::simplify_mesh;
 
 use crate::runtime::{
     App, AppError, Camera, DirectionalLight, MeshRenderer, Name, Plugin,
@@ -1432,6 +1434,41 @@ impl AssetServer {
         Ok(handle)
     }
 
+    /// Writes generated LOD meshes beside the imported `mesh_key` as
+    /// `.lodN.rmesh` files and an `.rlod` group of them starting at
+    /// `mesh_key`, then loads the group.
+    #[cfg(feature = "gltf")]
+    fn write_generated_lods(
+        &mut self,
+        mesh_key: &Path,
+        lods: Vec<MeshAsset>,
+    ) -> Result<Handle<LodGroupAsset>, AssetError> {
+        let name = |path: &Path| {
+            path.file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into())
+        };
+        let mut levels = vec![serde_json::json!({
+            "mesh": name(mesh_key),
+            "until": GENERATED_LOD_SCREEN_SIZES[0],
+        })];
+        let count = lods.len();
+        for (step, mesh) in (1..).zip(lods) {
+            let path = mesh_key.with_extension(format!("lod{step}.rmesh"));
+            write_cooked_bytes(&path, encode_mesh_file(&mesh))?;
+            self.meshes.insert_with_path(&path, mesh)?;
+            let mut level = serde_json::json!({ "mesh": name(&path) });
+            if step < count {
+                level["until"] = GENERATED_LOD_SCREEN_SIZES[step].into();
+            }
+            levels.push(level);
+        }
+        let group = mesh_key.with_extension("rlod");
+        let file =
+            serde_json::json!({ "metric": "ScreenSize", "levels": levels });
+        write_cooked_bytes(&group, Ok(file.to_string().into_bytes()))?;
+        self.load_lod_group(group)
+    }
+
     /// Loads a `.rlod` JSON file and the meshes it names, which are
     /// relative to the file.
     // ponytail: `.rlod` edits need a reload of the scene; add them to
@@ -1745,8 +1782,18 @@ impl AssetServer {
                 }
                 let mesh_asset = MeshAsset { vertices, indices };
                 write_cooked_bytes(&mesh_key, encode_mesh_file(&mesh_asset))?;
+                // Generated levels would drop skin weights and morph
+                // offsets, which index the original vertices.
+                let lods = if skin.is_none() && morph.positions.is_empty() {
+                    generated_lods(&mesh_asset)
+                } else {
+                    Vec::new()
+                };
                 let mesh_handle =
-                    self.meshes.insert_with_path(mesh_key, mesh_asset)?;
+                    self.meshes.insert_with_path(&mesh_key, mesh_asset)?;
+                if !lods.is_empty() {
+                    self.write_generated_lods(&mesh_key, lods)?;
+                }
                 let gltf_material = primitive.material();
                 let pbr = gltf_material.pbr_metallic_roughness();
                 let base_color_texture = pbr
@@ -2163,6 +2210,37 @@ fn write_cooked_asset(
     asset: &impl Serialize,
 ) -> Result<(), AssetError> {
     write_cooked_bytes(path, bincode::serialize(asset))
+}
+
+/// Imported meshes with fewer triangles get no generated LOD levels.
+#[cfg(feature = "gltf")]
+const LOD_MIN_TRIANGLES: usize = 512;
+/// Screen size each generated level draws down to, finest first; the
+/// coarsest generated level draws at any size.
+#[cfg(feature = "gltf")]
+const GENERATED_LOD_SCREEN_SIZES: [f32; MAX_LOD_LEVELS - 1] = [0.3, 0.12, 0.05];
+
+/// Coarser copies of an imported mesh with about a half, a quarter and an
+/// eighth of its triangles. A level that saves under a quarter of the
+/// previous one's triangles ends the list.
+#[cfg(feature = "gltf")]
+fn generated_lods(mesh: &MeshAsset) -> Vec<MeshAsset> {
+    let triangles = mesh.indices.len() / 3;
+    let mut previous = triangles;
+    let mut levels = Vec::new();
+    if triangles < LOD_MIN_TRIANGLES {
+        return levels;
+    }
+    for step in 1..MAX_LOD_LEVELS {
+        let level = simplify_mesh(mesh, triangles >> step);
+        let count = level.indices.len() / 3;
+        if count == 0 || count * 4 > previous * 3 {
+            break;
+        }
+        previous = count;
+        levels.push(level);
+    }
+    levels
 }
 
 #[cfg(feature = "gltf")]
@@ -3542,6 +3620,97 @@ mod tests {
             .vertices
             .push(vertex(5.0));
         assert_eq!(server.mesh_bounds(handle).unwrap().1, [5.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    #[cfg(feature = "gltf")]
+    fn gltf_import_generates_lod_levels_for_large_meshes() {
+        let folder = std::env::temp_dir()
+            .join(format!("rusting-gltf-lods-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        // A 24 x 24 cell grid with a bump: 1152 triangles, unindexed.
+        let height = |x: u32, z: u32| {
+            let [dx, dz] = [x as f32 - 12.0, z as f32 - 12.0];
+            4.0 * (-(dx * dx + dz * dz) / 32.0).exp()
+        };
+        let mut positions = Vec::new();
+        for z in 0..24 {
+            for x in 0..24 {
+                let corner =
+                    |x: u32, z: u32| [x as f32, height(x, z), z as f32];
+                positions.extend([
+                    corner(x, z),
+                    corner(x, z + 1),
+                    corner(x + 1, z),
+                    corner(x + 1, z),
+                    corner(x, z + 1),
+                    corner(x + 1, z + 1),
+                ]);
+            }
+        }
+        let bytes: Vec<u8> = positions
+            .iter()
+            .flatten()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        std::fs::write(folder.join("hill.bin"), &bytes).unwrap();
+        let path = folder.join("hill.gltf");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                  "asset": {{"version": "2.0"}},
+                  "buffers": [{{"uri": "hill.bin", "byteLength": {len}}}],
+                  "bufferViews": [{{"buffer": 0, "byteLength": {len}}}],
+                  "accessors": [{{"bufferView": 0, "componentType": 5126,
+                    "count": {count}, "type": "VEC3",
+                    "min": [0, 0, 0], "max": [24, 4, 24]}}],
+                  "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0}}}}]}}]
+                }}"#,
+                len = bytes.len(),
+                count = positions.len(),
+            ),
+        )
+        .unwrap();
+        let mut server = AssetServer::default();
+
+        let imported = server.import_gltf(&path).unwrap();
+
+        let mesh = imported[0].mesh;
+        let (_, group) = server
+            .lod_groups
+            .iter()
+            .find(|(_, group)| group.levels[0].mesh == mesh)
+            .expect("a generated LOD group starts at the imported mesh");
+        assert_eq!(group.metric, LodMetric::ScreenSize);
+        assert!(group.levels.len() >= 3, "{}", group.levels.len());
+        let triangles = group
+            .levels
+            .iter()
+            .map(|level| {
+                server.meshes.get(level.mesh).unwrap().indices.len() / 3
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(triangles[0], 1152);
+        assert!(
+            triangles.windows(2).all(|pair| pair[1] * 4 <= pair[0] * 3),
+            "{triangles:?}"
+        );
+        assert!(triangles[1] <= 576, "{triangles:?}");
+        assert_eq!(group.levels.last().unwrap().until, 0.0);
+
+        // The cooked files bring the group back without the glTF.
+        let cooked = folder.join("hill.mesh-0-0.rmesh");
+        assert!(folder.join("hill.mesh-0-0.rlod").is_file());
+        let mut fresh = AssetServer::default();
+        let mesh = fresh.load_mesh(&cooked).unwrap();
+        let (_, group) = fresh.lod_groups.iter().next().unwrap();
+        assert_eq!(group.levels[0].mesh, mesh);
+        assert_eq!(group.levels.len(), triangles.len());
+
+        // Small meshes stay single-level.
+        assert!(generated_lods(&MeshAsset::default()).is_empty());
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]

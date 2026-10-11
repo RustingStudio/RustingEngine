@@ -2933,7 +2933,22 @@ Depends on: Milestones 3 and 4.
   Mutations (splat branch off, LOD ranges infinite) fail them. Full check:
   fmt, clippy x3 clean; workspace lib 882 passed, gpu-tests run 1014
   passed (one transient doctest failure passed on rerun).
-- [ ] Automatic mesh LOD generation at import.
+- [x] Automatic mesh LOD generation at import.
+  glTF import (`import_gltf` in `src/assets/mod.rs`) gives each static mesh
+  (no skin, no morph targets) of 512 triangles or more up to three coarser
+  levels at about 1/2, 1/4 and 1/8 of its triangles, written next to the
+  cooked mesh as `<mesh>.lodN.rmesh`, plus a `<mesh>.rlod` with screen-size
+  hand-overs at 0.3, 0.12 and 0.05, which `load_mesh` picks up on later
+  loads. `simplify_mesh` (`src/assets/simplify.rs`) clusters vertices on a
+  uniform grid, binary-searching the finest grid that meets the target, and
+  keeps winding. Evidence: `simplified_meshes_meet_the_target_and_keep_their_shape`
+  (2048-triangle grid lands in 512..=1024 and 16..=64 triangles, faces still
+  point up, extent kept) and `gltf_import_generates_lod_levels_for_large_meshes`
+  (1152-triangle glTF gets 3+ levels each at least 25% smaller, last level
+  has no `until`, and a fresh server's `load_mesh` loads the group). A
+  mutation that skipped the grid search failed both. Full check: fmt,
+  clippy x3, `cargo test --workspace` (lib 885) and the gpu-tests run
+  (lib 1017) pass.
 - [ ] Rendering of deformables, fluid surfaces, and debris produced by Milestone 11.
 - [ ] Effect budget and quality-profile scaling for particles and decals.
 

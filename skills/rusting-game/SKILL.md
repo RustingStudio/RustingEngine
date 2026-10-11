@@ -648,7 +648,9 @@ add the `mod` line and call it reports to `src/main.rs` (`rusting recipe list`).
   colors, so give many props one texture set instead of many textured ones.
 - Level of detail: a `.rlod` file beside a `.rmesh` (same name) lists
   coarser meshes and the distance or screen size where each takes over;
-  every object drawing that mesh uses it (`guide/look-and-feel`).
+  every object drawing that mesh uses it (`guide/look-and-feel`). glTF
+  import writes one with generated levels for static meshes of 512+
+  triangles.
 - Materials rougher than 0.5 skip screen-space reflections. If no surface
   needs a mirror-like look, call `scene.set_reflections(false)` at startup:
   it removes the scene copy, mip chain and depth pyramid passes.
