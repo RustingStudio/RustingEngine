@@ -1090,10 +1090,16 @@ pub(super) type CoupledBodies<'w, 's> = bevy_ecs::prelude::Query<
         &'static mut crate::Transform,
         Option<&'static mut super::RigidBody>,
         Option<&'static super::Collider>,
-        bevy_ecs::prelude::Has<super::PhysicsBody>,
+        Option<&'static super::PhysicsBody>,
+        Option<&'static super::PhysicsId>,
+        Option<&'static super::GpuStateMirror>,
     ),
     bevy_ecs::prelude::Without<super::Parent>,
 >;
+
+/// Fixed tick and command queue for GPU bodies that soft bodies and cloth
+/// meet, when a GPU backend takes commands.
+type GpuLink<'a> = Option<(u64, &'a mut super::GpuPhysicsCommands)>;
 
 /// A collider soft bodies and cloth keep out of, with its visit key.
 type ColliderEntry = (
@@ -1113,12 +1119,21 @@ type ColliderEntry = (
 /// to. Particles of every [`super::FluidVolume`] (fluid or granular) near
 /// a volume join its step as small dynamic spheres (see [`grain_bodies`]),
 /// so the two push each other with their masses: a light jelly floats, a
-/// heavy one sinks, and a sheet holds water and sags under it.
+/// heavy one sinks, and a sheet holds water and sags under it. A dynamic
+/// GPU body takes part through its read-back state, and what the step does
+/// to its velocity goes back as an impulse (see the `hybrid_physics` module
+/// docs on latency); without fresh state it is left out.
+// ponytail: a GPU body gets no angular impulse back (the command queue has
+// none), so a deformable cannot spin it. Add a torque impulse command if
+// that matters.
 // ponytail: every collider is checked against every volume each tick (a
 // bounding-sphere test); use the broad phase if scenes get many of both.
 #[allow(clippy::type_complexity)]
 pub(super) fn step_soft_bodies(
     time: bevy_ecs::prelude::Res<super::FrameTime>,
+    mut gpu_commands: Option<
+        bevy_ecs::prelude::ResMut<super::GpuPhysicsCommands>,
+    >,
     mut volumes: bevy_ecs::prelude::Query<
         (
             bevy_ecs::prelude::Entity,
@@ -1153,9 +1168,9 @@ pub(super) fn step_soft_bodies(
         .collect();
     let mut colliders: Vec<ColliderEntry> = bodies
         .iter()
-        .filter_map(|(entity, order, transform, _, collider, physics)| {
+        .filter_map(|(entity, order, transform, _, collider, physics, ..)| {
             let shape = ObstacleShape::from_collider(
-                collider.filter(|_| physics)?.shape,
+                collider.filter(|_| physics.is_some())?.shape,
                 transform.scale,
             )?;
             Some((
@@ -1184,6 +1199,9 @@ pub(super) fn step_soft_bodies(
             &mut fluids,
             volume.body.min_rest_length() / 2.0,
             dt,
+            gpu_commands
+                .as_deref_mut()
+                .map(|commands| (time.fixed_tick, commands)),
             |held, anchors, obstacles| {
                 volume.body.step_coupled(
                     &volume.settings,
@@ -1212,6 +1230,9 @@ pub(super) fn step_soft_bodies(
             &mut fluids,
             cloth.cloth.min_rest_length() / 2.0,
             dt,
+            gpu_commands
+                .as_deref_mut()
+                .map(|commands| (time.fixed_tick, commands)),
             |held, anchors, obstacles| {
                 cloth.cloth.step_coupled(
                     &cloth.settings,
@@ -1238,17 +1259,43 @@ fn couple(
     fluids: &mut [&mut super::FluidVolume],
     radius: f32,
     dt: f32,
+    mut gpu: GpuLink,
     step: impl FnOnce(&mut [AnchorBody], &[Anchor], &[Obstacle]),
 ) {
+    // Entity and, for a GPU body, its id and starting velocity.
     let mut entities = Vec::new();
     let mut held = Vec::new();
+    let tick = gpu.as_ref().map(|(tick, _)| *tick);
     let mut slot = |entity| {
-        if let Some(index) = entities.iter().position(|&e| e == entity) {
+        if let Some(index) = entities.iter().position(|&(e, _)| e == entity) {
             return Some(index);
         }
-        let (_, _, transform, rigid, collider, _) = bodies.get(entity).ok()?;
-        entities.push(entity);
-        held.push(anchor_body(transform, rigid, collider, dt));
+        let (_, _, transform, rigid, collider, physics, id, mirror) =
+            bodies.get(entity).ok()?;
+        let dynamic_gpu = physics
+            .is_some_and(|p| p.simulation == super::SimulationClass::Gpu)
+            && rigid.is_some_and(|rigid| {
+                rigid.kind == super::RigidBodyKind::Dynamic
+            });
+        if !dynamic_gpu {
+            entities.push((entity, None));
+            held.push(anchor_body(transform, rigid, collider, dt));
+            return Some(held.len() - 1);
+        }
+        let (pose, velocity) = super::coupled_gpu_state(mirror?, tick?, dt)?;
+        let mirror = mirror?;
+        // `anchor_body` takes a pose at the end of the tick.
+        let mut pose = pose;
+        for axis in 0..3 {
+            pose.position[axis] += velocity[axis] * dt;
+        }
+        let rigid = super::RigidBody {
+            linear_velocity: velocity,
+            angular_velocity: mirror.angular_velocity,
+            ..*rigid?
+        };
+        entities.push((entity, Some((*id?, velocity))));
+        held.push(anchor_body(&pose, Some(&rigid), collider, dt));
         Some(held.len() - 1)
     };
     let mut anchors = Vec::new();
@@ -1298,8 +1345,22 @@ fn couple(
         fluid.velocities[grain] = state.velocity;
     }
     held.truncate(rigid);
-    for (entity, state) in entities.into_iter().zip(held) {
+    for ((entity, gpu_body), state) in entities.into_iter().zip(held) {
         if state.inverse_mass == 0.0 {
+            continue;
+        }
+        if let Some((id, start)) = gpu_body {
+            let mass = state.inverse_mass.recip();
+            if let Some((_, commands)) =
+                gpu.as_mut().filter(|_| state.velocity != start)
+            {
+                commands.push(
+                    id,
+                    super::GpuBodyCommand::Impulse(std::array::from_fn(
+                        |axis| mass * (state.velocity[axis] - start[axis]),
+                    )),
+                );
+            }
             continue;
         }
         let Ok((_, _, mut transform, Some(mut rigid), ..)) =
@@ -1753,6 +1814,107 @@ mod tests {
             );
         }
         assert!(jelly_rest(5000.0, FluidSolver::Particles) < 0.1);
+    }
+
+    /// One tick of a 1 kg GPU ball falling at 2 m/s onto a pinned sheet,
+    /// with read-back state `age` ticks old: the impulses sent back, the
+    /// sheet's middle height, and whether the ball's authored pose stayed.
+    fn gpu_ball_on_sheet(age: u64) -> (Vec<[f32; 3]>, f32, bool) {
+        use crate::runtime::{
+            Collider, ColliderShape, FrameTime, GpuBodyCommand,
+            GpuPhysicsCommands, GpuStateMirror, PhysicsBody, PhysicsId,
+            RigidBody, SimulationClass,
+        };
+        let mut app = App::new();
+        app.world_mut()
+            .insert_resource(GpuPhysicsCommands::default());
+        app.world_mut().resource_mut::<FrameTime>().fixed_tick = 20;
+        let mut cloth = Cloth::grid(
+            [-0.5, 1.0, -0.5],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [10, 10],
+            0.1,
+            10.0,
+        )
+        .unwrap();
+        for (index, mass) in cloth.inverse_masses.iter_mut().enumerate() {
+            let (x, z) = (index % 11, index / 11);
+            if x == 0 || x == 10 || z == 0 || z == 10 {
+                *mass = 0.0;
+            }
+        }
+        let sheet = app
+            .world_mut()
+            .spawn(ClothVolume::new(ClothSettings::default(), cloth))
+            .id();
+        // Writing a GPU body's `Transform` would restart it from there.
+        let authored = crate::Transform {
+            position: [0.0, 1.14, 0.0],
+            ..crate::Transform::default()
+        };
+        let id = PhysicsId {
+            slot: 5,
+            generation: 1,
+        };
+        let ball = app
+            .world_mut()
+            .spawn((
+                authored,
+                RigidBody {
+                    mass: 1.0,
+                    ..RigidBody::default()
+                },
+                Collider {
+                    shape: ColliderShape::Sphere { radius: 0.15 },
+                    ..Collider::default()
+                },
+                PhysicsBody {
+                    simulation: SimulationClass::Gpu,
+                    ..PhysicsBody::default()
+                },
+                id,
+                GpuStateMirror {
+                    tick: 20 - age,
+                    transform: authored,
+                    linear_velocity: [0.0, -2.0, 0.0],
+                    angular_velocity: [0.0; 3],
+                    custom_values: None,
+                },
+            ))
+            .id();
+        run_app(&mut app, 1);
+        let impulses = app
+            .world()
+            .resource::<GpuPhysicsCommands>()
+            .commands
+            .iter()
+            .map(|&(body, command)| match (body == id, command) {
+                (true, GpuBodyCommand::Impulse(impulse)) => impulse,
+                other => panic!("unexpected command {other:?}"),
+            })
+            .collect();
+        let middle = app
+            .world()
+            .get::<ClothVolume>(sheet)
+            .unwrap()
+            .cloth
+            .positions[5 * 11 + 5][1];
+        let kept =
+            *app.world().get::<crate::Transform>(ball).unwrap() == authored;
+        (impulses, middle, kept)
+    }
+
+    #[test]
+    fn a_gpu_ball_and_a_sheet_push_each_other_through_read_back_state() {
+        let (fresh, pressed, kept) = gpu_ball_on_sheet(0);
+        assert!(kept, "the GPU body's authored pose was overwritten");
+        assert_eq!(fresh.len(), 1);
+        assert!(fresh[0][1] > 0.0, "{fresh:?}");
+        let stale = crate::runtime::MAX_COUPLED_STATE_AGE + 1;
+        let (none, untouched, kept) = gpu_ball_on_sheet(stale);
+        assert!(kept && none.is_empty());
+        assert!(pressed < untouched - 0.005, "{pressed} vs {untouched}");
     }
 
     #[test]
