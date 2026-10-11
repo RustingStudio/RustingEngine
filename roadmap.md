@@ -4061,7 +4061,8 @@ Depends on: Milestones 3, 4, and 21.
 
 ### Physics tests
 
-- [ ] Triggers and collision events.
+- [x] Triggers and collision events.
+  Evidence (2026-10-11, lane physics): CPU: `runtime::tests::cpu_collision_events_follow_touching_pairs_and_stop_when_they_part` (new). A ball dropped 0.5 m sends its first non-sensor `CollisionEvent` with the ground on step 21, at most one per pair per step whatever the substeps, and none from the step after it falls asleep. A kinematic walker crossing a sensor at 3 m/s gets a sensor event on each of the 35 steps it overlaps and none outside, and is never pushed. Events show the frame after their step (`EventQueue` double-buffers). Also `cpu_restitution_bounces_and_sensors_only_report` and `cpu_collision_layers_filter_pairs_and_queries`. GPU: `raw_gpu_events_reach_the_live_ecs_entity`, `gpu_events_are_delivered_in_tick_and_body_order`, `physics_ids_reject_delayed_events_after_slot_reuse`, and in `scene_renderer` (gpu-tests) `physics_events_read_back_from_transient_arenas_every_tick`, `event_buffer_fits_every_step_and_reports_losses_past_budget`, `ten_thousand_gpu_bodies_report_condition_events_without_state_readback`. fmt, all three clippy configurations, `cargo test --workspace` (lib 903; the dedicated-server real-time test flaked once under load and passes alone) and the gpu-tests run (lib 1023) pass.
 - [ ] Raycasts and filtered queries.
 - [ ] Stable stacking.
 - [ ] Tunneling/CCD cases.

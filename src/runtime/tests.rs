@@ -1216,6 +1216,91 @@ fn cpu_restitution_bounces_and_sensors_only_report() {
 }
 
 #[test]
+fn cpu_collision_events_follow_touching_pairs_and_stop_when_they_part() {
+    let mut app = App::new();
+    let world = app.world_mut();
+    let ground = cpu_body(
+        world,
+        [0.0, -0.5, 0.0],
+        ColliderShape::Box {
+            half_extents: [10.0, 0.5, 10.0],
+        },
+        RigidBodyKind::Fixed,
+    );
+    let ball = cpu_body(
+        world,
+        [0.0, 1.0, 0.0],
+        ColliderShape::Sphere { radius: 0.5 },
+        RigidBodyKind::Dynamic,
+    );
+    let trigger =
+        cpu_body(world, [4.0, 3.0, 0.0], UNIT_BOX, RigidBodyKind::Fixed);
+    world.get_mut::<Collider>(trigger).unwrap().sensor = true;
+    let walker = cpu_body(
+        world,
+        [0.0, 3.0, 0.0],
+        ColliderShape::Sphere { radius: 0.4 },
+        RigidBodyKind::Kinematic,
+    );
+    world.get_mut::<RigidBody>(walker).unwrap().linear_velocity =
+        [3.0, 0.0, 0.0];
+
+    let pair = |event: &CollisionEvent, a, b| {
+        (event.a, event.b) == (a, b) || (event.a, event.b) == (b, a)
+    };
+    let mut landed = None;
+    let mut inside = Vec::new();
+    let mut slept = None;
+    for step in 1..=150 {
+        run_fixed_steps(&mut app, 1);
+        let world = app.world();
+        let events: Vec<_> = world
+            .resource::<EventQueue<CollisionEvent>>()
+            .iter()
+            .copied()
+            .collect();
+        // At most one event per pair per step, whatever the substeps.
+        let landings: Vec<_> =
+            events.iter().filter(|e| pair(e, ball, ground)).collect();
+        assert!(landings.len() <= 1, "{events:?}");
+        assert!(landings.iter().all(|event| !event.sensor));
+        if !landings.is_empty() {
+            landed.get_or_insert(step);
+        }
+        let triggers: Vec<_> =
+            events.iter().filter(|e| pair(e, walker, trigger)).collect();
+        assert!(triggers.len() <= 1, "{events:?}");
+        assert!(triggers.iter().all(|event| event.sensor));
+        if !triggers.is_empty() {
+            inside.push(world.get::<Transform>(walker).unwrap().position[0]);
+        }
+        // Events show the frame after their step. From the step after the
+        // ball falls asleep on the ground, the resting pair goes quiet.
+        if slept.is_some_and(|at| step > at + 1) {
+            assert!(landings.is_empty(), "step {step}: {events:?}");
+        }
+        if world.get::<Sleeping>(ball).is_some() {
+            slept.get_or_insert(step);
+        }
+    }
+    // The ball falls 0.5 m (about 19 steps) before its first event.
+    let landed = landed.expect("the ball never touched the ground");
+    assert!((19..=22).contains(&landed), "landed on step {landed}");
+    assert!(app.world().get::<Sleeping>(ball).is_some());
+    // The walker overlaps the trigger while |x - 4| < 0.9: about 36 steps,
+    // every one of them reported, and none outside. The walker is one step
+    // (5 cm) further on when an event shows.
+    assert!((34..=38).contains(&inside.len()), "{inside:?}");
+    assert!(
+        inside.iter().all(|x| (x - 0.05 - 4.0).abs() < 0.9 + 0.01),
+        "{inside:?}"
+    );
+    // The trigger never pushed the walker.
+    let walker_x = app.world().get::<Transform>(walker).unwrap().position[0];
+    assert!((walker_x - 3.0 * 2.5).abs() < 1e-3, "{walker_x}");
+}
+
+#[test]
 fn cpu_physics_is_deterministic_and_ignores_gpu_bodies() {
     let run = || {
         let mut app = App::new();
