@@ -1019,9 +1019,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.slide_sound",
-        summary: "Loops clip on this body while it slides or rolls against another collider, louder the faster it moves across the contact (full volume at full_volume_speed m/s, silent under min_speed). CPU bodies only. The loop follows the body like an attached sound.",
+        summary: "Loops clip on this body while it slides or rolls against another collider, louder the faster it moves across the contact (full volume at full_volume_speed m/s, silent under min_speed). CPU bodies only. The loop follows the body like an attached sound. by_material picks another clip while it slides on a collider whose physics_material (or heightfield or triangle surface) has that name; an empty clip there is silent. Crossing onto another material swaps the loop.",
         gpu: NO_GPU,
-        example: || json!({"clip": "sounds/scrape.ogg", "volume": 0.8, "full_volume_speed": 4.0, "min_speed": 0.2, "bus": "world"}),
+        example: || json!({"clip": "sounds/scrape.ogg", "volume": 0.8, "full_volume_speed": 4.0, "min_speed": 0.2, "bus": "world", "by_material": [{"material": "metal", "clip": "sounds/metal_scrape.ogg"}]}),
     },
     ComponentSection {
         key: "rusting.reverb_zone",

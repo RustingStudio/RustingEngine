@@ -2050,6 +2050,26 @@ pub(super) fn advance_tweens(
     }
 }
 
+/// The material name a contact touches on `other`: a heightfield cell's
+/// or tagged triangle's own surface where it has one, else the collider's
+/// [`super::PhysicsMaterial`].
+pub(super) fn surface_name<'a>(
+    surface: Option<u8>,
+    field: Option<&'a super::Heightfield>,
+    tagged: Option<&'a super::MeshSurfaces>,
+    material: Option<&'a super::PhysicsMaterial>,
+) -> Option<&'a str> {
+    surface
+        .and_then(|index| {
+            let surfaces = field
+                .map(|field| &field.surfaces)
+                .or(tagged.map(|tagged| &tagged.surfaces))?;
+            surfaces.get(usize::from(index))
+        })
+        .map(|surface| surface.name.as_str())
+        .or_else(|| material.map(|material| material.name.as_str()))
+}
+
 /// Per fixed step, after physics: marks cues and emitters whose body
 /// started touching something.
 pub(super) fn trigger_on_contact(
@@ -2071,20 +2091,12 @@ pub(super) fn trigger_on_contact(
         for (body, other) in [(contact.a, contact.b), (contact.b, contact.a)] {
             let speed = touching.entry(body).or_default();
             *speed = speed.max(contact.speed);
-            // A heightfield cell's or tagged triangle's own surface names
-            // the material there.
-            let name = contact
-                .surface
-                .and_then(|index| {
-                    let surfaces = fields
-                        .get(other)
-                        .map(|field| &field.surfaces)
-                        .or_else(|_| tagged.get(other).map(|t| &t.surfaces))
-                        .ok()?;
-                    surfaces.get(usize::from(index))
-                })
-                .map(|surface| surface.name.as_str())
-                .or_else(|| materials.get(other).ok().map(|m| m.name.as_str()));
+            let name = surface_name(
+                contact.surface,
+                fields.get(other).ok(),
+                tagged.get(other).ok(),
+                materials.get(other).ok(),
+            );
             if let Some(name) = name {
                 let speed = by_material.entry((body, name)).or_default();
                 *speed = speed.max(contact.speed);

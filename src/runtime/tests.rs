@@ -8690,3 +8690,67 @@ fn physics_ids_map_entities_both_ways_and_reject_every_released_body() {
     expected.sort_unstable();
     assert_eq!(delivered, expected);
 }
+
+#[test]
+fn a_slide_sound_picks_its_clip_by_the_floor_material_under_it() {
+    let mut app = App::new();
+    for (x, name) in [(-2.5, "wood"), (2.5, "metal")] {
+        let floor = cpu_body(
+            app.world_mut(),
+            [x, -0.5, 0.0],
+            ColliderShape::Box {
+                half_extents: [2.5, 0.5, 5.0],
+            },
+            RigidBodyKind::Fixed,
+        );
+        app.world_mut().entity_mut(floor).insert(PhysicsMaterial {
+            name: name.into(),
+            ..PhysicsMaterial::default()
+        });
+    }
+    let crate_body = cpu_body(
+        app.world_mut(),
+        [-2.0, 0.5, 0.0],
+        UNIT_BOX,
+        RigidBodyKind::Dynamic,
+    );
+    app.world_mut().entity_mut(crate_body).insert(SlideSound {
+        clip: "sounds/scrape.ogg".into(),
+        by_material: vec![SurfaceClip {
+            material: "metal".into(),
+            clip: "sounds/metal_scrape.ogg".into(),
+        }],
+        ..SlideSound::default()
+    });
+    run_fixed_steps(&mut app, 30);
+    app.world_mut()
+        .get_mut::<RigidBody>(crate_body)
+        .unwrap()
+        .linear_velocity = [6.0, 0.0, 0.0];
+    // Each loop started, and whether it was playing when the next began.
+    let mut clips = Vec::new();
+    let mut playing = 0;
+    for _ in 0..300 {
+        run_fixed_steps(&mut app, 1);
+        route_sound_events(app.world_mut());
+        let mut queue = app.world_mut().resource_mut::<AudioQueue>();
+        for command in queue.drain() {
+            match command {
+                AudioCommand::Play { clip, .. } => {
+                    assert_eq!(playing, 0, "two loops at once");
+                    playing += 1;
+                    clips.push(clip);
+                }
+                AudioCommand::Stop(_) => playing -= 1,
+                _ => {}
+            }
+        }
+    }
+    let x = app.world().get::<Transform>(crate_body).unwrap().position[0];
+    assert!(x > 1.0, "the crate stopped on the wood at x {x}");
+    // Wood has no entry, so it takes the plain clip; over the seam the
+    // loop changes once and stops when friction stops the crate.
+    assert_eq!(clips, ["sounds/scrape.ogg", "sounds/metal_scrape.ogg"]);
+    assert_eq!(playing, 0);
+    assert!(app.world().resource::<AudioQueue>().playing().is_empty());
+}

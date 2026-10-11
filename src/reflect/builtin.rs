@@ -25,9 +25,9 @@ use crate::runtime::{
     QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
     ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
     SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, Terrain, TerrainLayer, TileKind, TileMap,
-    ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle,
-    WaterBody, Wheel,
+    StateAction, StateTransition, SurfaceClip, Terrain, TerrainLayer, TileKind,
+    TileMap, ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat,
+    Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -297,8 +297,17 @@ crate::reflect! {
         full_volume_speed: f32 { unit: "m/s", min: 0.0, doc: "sliding this fast plays at full volume" },
         min_speed: f32 { unit: "m/s", min: 0.0, doc: "slower is silent" },
         bus: String { doc: "empty for the main output" },
+        by_material: Vec<SurfaceClip> { doc: "clips for sliding on a named physics_material or surface; others play clip" },
         #[skip] playing: Option<SoundId>,
+        #[skip] playing_clip: String,
         #[skip] level: f32,
+    }
+}
+
+crate::reflect! {
+    struct SurfaceClip {
+        material: String { doc: "physics_material or surface name" },
+        clip: String { unit: "asset path", doc: "empty is silent on it" },
     }
 }
 
