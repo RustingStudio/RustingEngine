@@ -2188,4 +2188,159 @@ mod tests {
         );
         assert_eq!(names(&mut client_world), names(&mut host_world));
     }
+
+    #[test]
+    fn a_lockstep_match_finishes_at_200_ms_and_2_percent_loss_in_sync() {
+        use input::InputBuffer;
+        use lobby::{Lobby, LobbyEvent, Rejoin};
+        use lockstep::CommandStream;
+        use std::collections::BTreeMap;
+
+        type State = BTreeMap<lobby::PlayerId, i64>;
+        type Commands = Vec<(lobby::PlayerId, i64)>;
+        const TICKS: u64 = 200;
+        const INPUT: &[u8] = b"\0inp";
+        let hash = |state: &State| {
+            state
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, (id, x)| {
+                    (hash ^ u64::from(*id) ^ (*x as u64).rotate_left(32))
+                        .wrapping_mul(0x100_0000_01b3)
+                })
+        };
+        let run = |state: &mut State, commands: &Commands| {
+            for (player, dx) in commands {
+                *state.entry(*player).or_default() += dx;
+            }
+        };
+        // 200 ms each way, and 2% of messages lost and resent.
+        let (host, clients) = NetSession::loopback(2);
+        for (seed, end) in
+            [&host, &clients[0], &clients[1]].into_iter().enumerate()
+        {
+            end.simulate(NetConditions {
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(10),
+                loss: 0.02,
+                seed: seed as u64,
+            });
+        }
+        host.poll();
+
+        // Lobby: both say hello, wait for their welcome, and get ready.
+        let mut lobby = Lobby::new(Duration::from_secs(5));
+        let mut welcomed: Vec<Option<Rejoin>> = vec![None; 2];
+        let mut ready = 0;
+        for client in &clients {
+            lobby::hello(client, None).unwrap();
+        }
+        let start = Instant::now();
+        while ready < 2 {
+            assert!(start.elapsed() < Duration::from_secs(5), "lobby stuck");
+            for event in host.poll() {
+                if let Some(Ok(LobbyEvent::Ready(_))) =
+                    lobby.handle(&host, &event)
+                {
+                    ready += 1;
+                }
+            }
+            for (client, welcome) in clients.iter().zip(&mut welcomed) {
+                for event in client.poll() {
+                    if let NetEvent::Message { from, bytes } = event {
+                        *welcome = lobby::welcome_from(from, &bytes);
+                        lobby::ready(client).unwrap();
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(lobby.start_match(), [1, 2]);
+
+        // The match: clients stamp inputs 60 ticks past the last tick they
+        // ran; the host runs a tick every 10 ms on whatever arrived and
+        // sends its commands, which every client runs, checking the
+        // host's hash first.
+        let mut inputs = InputBuffer::new(1);
+        let mut host_state = State::new();
+        let mut streams =
+            vec![CommandStream::<(lobby::PlayerId, i64)>::new(1); 2];
+        let mut states = vec![State::new(); 2];
+        let mut sent = [0_u64; 2];
+        let (mut fresh, mut late) = (0, 0);
+        let client_step =
+            |streams: &mut [CommandStream<(lobby::PlayerId, i64)>],
+             states: &mut [State],
+             sent: &mut [u64; 2]| {
+                for (index, client) in clients.iter().enumerate() {
+                    for event in client.poll() {
+                        if let NetEvent::Message { from, bytes } = event {
+                            streams[index]
+                                .accept(from, &bytes)
+                                .unwrap()
+                                .unwrap();
+                        }
+                    }
+                    while let Some(tick) = streams[index].ready() {
+                        assert_eq!(
+                            tick.hash,
+                            hash(&states[index]),
+                            "desync at {}",
+                            tick.tick
+                        );
+                        run(&mut states[index], &tick.commands);
+                    }
+                    // One input per tick, also for ticks a burst of
+                    // commands skipped past.
+                    let last = (streams[index].tick() + 60).min(TICKS);
+                    for stamp in sent[index] + 1..=last {
+                        let dx = (stamp + index as u64) % 3;
+                        let bytes =
+                            [INPUT, &stamp.to_le_bytes(), &dx.to_le_bytes()]
+                                .concat();
+                        client.send(HOST, &bytes).unwrap();
+                    }
+                    sent[index] = sent[index].max(last);
+                }
+            };
+        for _ in 1..=TICKS {
+            for event in host.poll() {
+                let NetEvent::Message { from, bytes } = event else {
+                    continue;
+                };
+                assert!(lobby.accepts_input(from));
+                let body = bytes.strip_prefix(INPUT).unwrap();
+                let stamp = u64::from_le_bytes(body[..8].try_into().unwrap());
+                let dx = u64::from_le_bytes(body[8..].try_into().unwrap())
+                    as i64
+                    - 1;
+                if inputs.push(from, stamp, dx).is_err() {
+                    late += 1;
+                }
+            }
+            let before = hash(&host_state);
+            let (tick, taken) = inputs.take();
+            fresh += taken.iter().filter(|input| input.fresh).count();
+            let commands: Commands = taken
+                .iter()
+                .map(|input| (lobby.player(input.peer).unwrap(), input.input))
+                .collect();
+            lockstep::send(&host, tick, before, &commands).unwrap();
+            run(&mut host_state, &commands);
+            client_step(&mut streams, &mut states, &mut sent);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let start = Instant::now();
+        while streams.iter().any(|stream| stream.tick() <= TICKS) {
+            assert!(start.elapsed() < Duration::from_secs(5), "match stuck");
+            client_step(&mut streams, &mut states, &mut sent);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(states, [host_state.clone(), host_state.clone()]);
+        assert_eq!(host_state.len(), 2, "both players moved");
+        assert!(welcomed.iter().all(Option::is_some));
+        // TCP holds every message behind a lost one for a round trip, so
+        // some inputs miss their tick; the host repeats that player's last
+        // input, and every peer runs the same repeat.
+        assert!(fresh > 0 && late > 0, "{fresh} fresh inputs, {late} late");
+    }
 }
