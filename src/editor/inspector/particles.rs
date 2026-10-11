@@ -126,6 +126,25 @@ pub(super) fn draw_particle_emitter(
         widgets::describe_next_row(ui, "restart on contact; CPU colliders");
         changed |=
             widgets::checkbox(ui, "On Collision", &mut emitter.on_collision);
+        widgets::describe_next_row(
+            ui,
+            "contacts this fast spawn particles; 0 off",
+        );
+        changed |= widgets::drag(
+            ui,
+            "Impact Speed",
+            DragValue::new(&mut emitter.impact_speed)
+                .range(0.0..=f32::MAX)
+                .speed(0.05)
+                .suffix(" m/s"),
+        );
+        changed |= widgets::drag(
+            ui,
+            "Impact Count",
+            DragValue::new(&mut emitter.impact_count).range(0..=10_000),
+        );
+        widgets::describe_next_row(ui, "puff when the body falls asleep");
+        changed |= widgets::checkbox(ui, "On Settle", &mut emitter.on_settle);
         changed |= bursts(ui, &mut emitter.bursts);
     });
     widgets::section(ui, "Shape", false, |ui| {

@@ -2715,6 +2715,77 @@ fn a_sliding_crate_loops_its_scrape_until_friction_stops_it() {
 }
 
 #[test]
+fn impacts_and_settling_spawn_particles_where_the_body_hits() {
+    let run = || {
+        let mut app = App::new();
+        cpu_ground(app.world_mut());
+        let crate_body = cpu_body(
+            app.world_mut(),
+            [0.0, 1.5, 0.0],
+            UNIT_BOX,
+            RigidBodyKind::Dynamic,
+        );
+        app.world_mut().entity_mut(crate_body).insert((
+            SceneId(uuid::Uuid::from_u128(9)),
+            ParticleEmitter {
+                autoplay: false,
+                rate: 0.0,
+                impact_speed: 1.0,
+                impact_count: 6,
+                on_settle: true,
+                spread: 0.0,
+                speed: [2.0, 2.0],
+                lifetime: [100.0, 100.0],
+                ..ParticleEmitter::default()
+            },
+        ));
+        // Particle counts each step, the first impact's particles, and
+        // the step the body fell asleep.
+        let mut counts = Vec::new();
+        let mut first = None;
+        let mut slept = None;
+        for step in 0..240 {
+            run_fixed_steps(&mut app, 1);
+            let system = app.world().get::<ParticleSystem>(crate_body);
+            let alive = system.map_or(0, ParticleSystem::alive);
+            if first.is_none() && alive > 0 {
+                first = Some(system.unwrap().particles.clone());
+            }
+            if slept.is_none()
+                && app.world().get::<Sleeping>(crate_body).is_some()
+            {
+                slept = Some(step);
+            }
+            counts.push(alive);
+        }
+        (counts, first.unwrap(), slept.unwrap())
+    };
+    let (counts, first, slept) = run();
+    // Falling, nothing; the landing spawns 6 per contact point closing at
+    // 1 m/s or more, at the floor, flying straight up off it.
+    assert_eq!(counts[0], 0);
+    assert!(!first.is_empty() && first.len() % 6 == 0, "{}", first.len());
+    for particle in &first {
+        assert!(particle.position[1].abs() < 0.1, "{particle:?}");
+        assert!(particle.position[0].abs() <= 0.55, "{particle:?}");
+        let [x, y, z] = particle.velocity;
+        assert!(y > 1.9 && x.abs() < 0.05 && z.abs() < 0.05, "{particle:?}");
+    }
+    // Resting contacts close slower than 1 m/s and spawn nothing more, so
+    // the count holds until the body sleeps and adds its settle puff.
+    let before = counts[slept - 1];
+    assert_eq!(counts[slept], before + 6, "{counts:?}");
+    assert!(counts[slept..].iter().all(|&alive| alive == before + 6));
+    let landed = counts.iter().position(|&alive| alive > 0).unwrap();
+    assert!(
+        counts[landed..slept].iter().all(|&alive| alive == before),
+        "{counts:?}"
+    );
+    // The same seed and ticks give the same particles.
+    assert_eq!(run().1, first);
+}
+
+#[test]
 fn landing_fires_one_sound_and_a_seeded_burst_that_expires() {
     let run = || {
         let mut app = App::new();

@@ -300,6 +300,7 @@ impl Default for App {
                     particles::restart_on_contact,
                     particles::add_particle_systems,
                     particles::update_particles,
+                    particles::emit_on_impacts,
                 )
                     .chain(),
                 (

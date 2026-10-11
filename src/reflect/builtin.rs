@@ -440,6 +440,12 @@ crate::reflect! {
         duration: f32 { unit: "s", min: 0.0, doc: "one cycle" },
         looping: bool { doc: "off stops emitting after one cycle" },
         on_collision: bool { doc: "restart on contact; CPU colliders only" },
+        impact_speed: f32 {
+            unit: "m/s", min: 0.0,
+            doc: "contacts closing this fast spawn impact_count particles there; 0 is off",
+        },
+        impact_count: u32 { doc: "particles per impact or settle" },
+        on_settle: bool { doc: "spawn impact_count particles when the body falls asleep" },
         shape: EmitterShape,
         shape_size: [f32; 3] {
             unit: "m", min: 0.0,

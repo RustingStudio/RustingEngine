@@ -2880,6 +2880,24 @@ Depends on: Milestones 3 and 4.
   `gpu-tests`), `cargo test --workspace` (878 lib) and the gpu-tests run
   (1008 lib) pass.
 - [ ] Particle emission driven by physics events: impacts, fracture, debris settling.
+  Partial (lane/render): `ParticleEmitter` gains `impact_speed`,
+  `impact_count` and `on_settle` (`emit_on_impacts` in
+  `src/runtime/particles.rs`, after `update_particles`). Each contact of
+  the emitter's CPU body closing at `impact_speed` m/s or faster spawns
+  `impact_count` particles at the contact point, launched around the
+  contact normal away from the other body; `on_settle` spawns them at the
+  body when it gets `Sleeping`. Contacts come in solver order and spawns
+  take the emitter's spawn numbers, so runs repeat. Inspector rows, schema
+  text and `docs/effects.md` "Impacts and settling" cover it. Evidence:
+  `impacts_and_settling_spawn_particles_where_the_body_hits` (a dropped
+  box spawns a multiple of 6 particles at the floor flying straight up on
+  the landing step, none from resting contacts, 6 more the step it
+  sleeps, and the same particles on a rerun). It failed with the speed
+  threshold removed and with the launch direction flipped. Full check:
+  fmt, clippy x3, `cargo test --workspace` (lib 886) and the gpu-tests run
+  (lib 1018) pass.
+  Not done: fracture events (the engine has no fracture yet); GPU emitters
+  spawn impact particles at the emitter, not the contact point.
 - [ ] Decals, including decals that survive or are invalidated by fracture.
   Partial (lane/render): `rusting.decal` projects an image (or plain color)
   along its object's -Z into a box of half size `extents`, painting base

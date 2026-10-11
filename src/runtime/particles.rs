@@ -17,8 +17,10 @@ use std::f32::consts::{PI, TAU};
 use std::time::Duration;
 
 use bevy_ecs::entity::Entity;
+use std::collections::BTreeSet;
+
 use bevy_ecs::prelude::{
-    Commands, Component, Query, Res, Resource, With, Without, World,
+    Commands, Component, Has, Local, Query, Res, Resource, With, Without, World,
 };
 use bevy_ecs::query::QueryItem;
 use serde::{Deserialize, Serialize};
@@ -196,6 +198,15 @@ pub struct ParticleEmitter {
     pub looping: bool,
     /// Restart when this body's collider starts touching another one.
     pub on_collision: bool,
+    /// Closing speed in m/s at which a contact of this body spawns
+    /// `impact_count` particles at the contact point, launched along the
+    /// contact normal away from the other body; 0 is off.
+    pub impact_speed: f32,
+    /// Particles spawned by each impact or settle.
+    pub impact_count: u32,
+    /// Spawn `impact_count` particles at the body when it falls asleep
+    /// (debris settling).
+    pub on_settle: bool,
     pub shape: EmitterShape,
     pub shape_size: [f32; 3],
     /// Seconds each particle lives.
@@ -270,6 +281,9 @@ impl Default for ParticleEmitter {
             duration: 5.0,
             looping: true,
             on_collision: false,
+            impact_speed: 0.0,
+            impact_count: 10,
+            on_settle: false,
             shape: EmitterShape::Point,
             shape_size: [0.5; 3],
             lifetime: [1.0, 2.0],
@@ -499,15 +513,24 @@ fn pick<T: Copy>(items: &[T], unit: f32) -> Option<T> {
     items.get(index.min(items.len().saturating_sub(1))).copied()
 }
 
-fn spawn(emitter: &ParticleEmitter, frame: Frame, draw: &Draw) -> Particle {
-    let axis = {
-        let length = sim_math::length(emitter.direction);
-        if length > 0.0 {
-            emitter.direction.map(|v| v / length)
-        } else {
-            [0.0, 1.0, 0.0]
-        }
-    };
+/// The emitter's normalized launch direction, or up.
+fn launch_axis(emitter: &ParticleEmitter) -> [f32; 3] {
+    let length = sim_math::length(emitter.direction);
+    if length > 0.0 {
+        emitter.direction.map(|v| v / length)
+    } else {
+        [0.0, 1.0, 0.0]
+    }
+}
+
+/// One new particle launched around the normalized `axis`, in the frame's
+/// space.
+fn spawn(
+    emitter: &ParticleEmitter,
+    frame: Frame,
+    draw: &Draw,
+    axis: [f32; 3],
+) -> Particle {
     let size = emitter.shape_size;
     let radius = size[0].max(0.0);
     let (offset, direction) = match emitter.shape {
@@ -671,7 +694,12 @@ fn step(
             spawn: system.spawned,
         };
         system.spawned += 1;
-        system.particles.push(spawn(emitter, frame, &draw));
+        system.particles.push(spawn(
+            emitter,
+            frame,
+            &draw,
+            launch_axis(emitter),
+        ));
     }
 }
 
@@ -886,6 +914,118 @@ pub(super) fn restart_on_contact(
         }
     }
     *touching = now;
+}
+
+type ImpactParts = (
+    Entity,
+    &'static ParticleEmitter,
+    &'static mut ParticleSystem,
+    Option<&'static GlobalTransform>,
+    Option<&'static crate::Transform>,
+    Option<&'static SceneId>,
+    Has<super::Sleeping>,
+);
+
+/// Per fixed step, after the particles moved: spawns `impact_count`
+/// particles at each contact of an emitter's body closing at
+/// `impact_speed` or faster, and at the body when it falls asleep with
+/// `on_settle`. Contacts come in the solver's stable order, and each spawn
+/// takes the next spawn number, so runs repeat. GPU emitters spawn them at
+/// the emitter, and Local space particles start at the emitter.
+// ponytail: no fracture events yet; add them here when Milestone 11
+// fracture lands.
+pub(super) fn emit_on_impacts(
+    physics: Res<super::PhysicsWorld>,
+    seed: Res<RandomSeed>,
+    time: Res<FrameTime>,
+    mut emitters: Query<ImpactParts>,
+    mut asleep: Local<BTreeSet<Entity>>,
+) {
+    let mut now_asleep = BTreeSet::new();
+    for (entity, emitter, mut system, global, transform, id, sleeping) in
+        &mut emitters
+    {
+        if sleeping {
+            now_asleep.insert(entity);
+        }
+        if system.paused {
+            continue;
+        }
+        let frame = emitter_frame(global, transform);
+        // Each impact: where, and the direction particles leave along.
+        let mut impacts = Vec::new();
+        if emitter.impact_speed > 0.0 {
+            for contact in physics.contacts() {
+                if contact.sensor || contact.speed < emitter.impact_speed {
+                    continue;
+                }
+                let away = if contact.a == entity {
+                    contact.normal.map(|v| -v)
+                } else if contact.b == entity {
+                    contact.normal
+                } else {
+                    continue;
+                };
+                impacts.push((contact.point, away));
+            }
+        }
+        if emitter.on_settle && sleeping && !asleep.contains(&entity) {
+            impacts.push((frame.point([0.0; 3]), [0.0, 1.0, 0.0]));
+        }
+        let count = u64::from(emitter.impact_count);
+        if emitter.simulation == ParticleSimulation::Gpu {
+            system.spawned += count * impacts.len() as u64;
+            continue;
+        }
+        let stream =
+            RandomSeed::stream("particle_impacts", stream_key(entity, id));
+        for (point, away) in impacts {
+            let at = if emitter.space == ParticleSpace::World {
+                impact_frame(point, away)
+            } else {
+                Frame {
+                    matrix: GlobalTransform::default().matrix,
+                }
+            };
+            let axis = if emitter.space == ParticleSpace::World {
+                [0.0, 1.0, 0.0]
+            } else {
+                launch_axis(emitter)
+            };
+            let room = u64::from(emitter.max_particles)
+                .saturating_sub(system.alive() as u64);
+            for _ in 0..count.min(room) {
+                let draw = Draw {
+                    seed: &seed,
+                    tick: time.fixed_tick,
+                    stream,
+                    spawn: system.spawned,
+                };
+                system.spawned += 1;
+                system.particles.push(spawn(emitter, at, &draw, axis));
+            }
+        }
+    }
+    *asleep = now_asleep;
+}
+
+/// A unit frame at `point` whose y axis is the unit vector `up`.
+fn impact_frame(point: [f32; 3], up: [f32; 3]) -> Frame {
+    let helper = if up[1].abs() < 0.9 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let x = sim_math::normalize(cross(up, helper));
+    let z = cross(x, up);
+    Frame {
+        matrix: [
+            [x[0], x[1], x[2], 0.0],
+            [up[0], up[1], up[2], 0.0],
+            [z[0], z[1], z[2], 0.0],
+            [point[0], point[1], point[2], 1.0],
+        ],
+    }
 }
 
 /// One particle as the renderer draws it.
