@@ -2013,4 +2013,179 @@ mod tests {
         }
         assert_eq!(verified, Some(Ok(Check::Match)));
     }
+
+    #[test]
+    fn a_client_that_drops_mid_match_resynchronizes_on_rejoin() {
+        use crate::runtime::{Name, SceneComponentRegistry, SceneId};
+        use crate::Transform;
+        use bevy_ecs::prelude::{Entity, With, World};
+        use replicate::{
+            Check, Replica, Replicated, Replication, NAME, TRANSFORM,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = NetSession::host_on(listener, "").unwrap();
+        host.simulate(NetConditions {
+            loss: 0.2,
+            seed: 3,
+            ..NetConditions::default()
+        });
+        let mut replication = Replication::new();
+        replication.component(TRANSFORM).component(NAME);
+        let world = || {
+            let mut world = World::new();
+            world.insert_resource(SceneComponentRegistry::default());
+            world
+        };
+        let (mut host_world, mut client_world) = (world(), world());
+        let spawn = |world: &mut World, name: &str| {
+            world
+                .spawn((
+                    Replicated,
+                    SceneId::new(),
+                    Name(name.into()),
+                    Transform::default(),
+                ))
+                .id()
+        };
+        let a = spawn(&mut host_world, "A");
+        let b = spawn(&mut host_world, "B");
+        spawn(&mut host_world, "C");
+
+        // One host tick: move everything, send each client its snapshot,
+        // and take acknowledgements and departures.
+        let tick = |replication: &mut Replication, world: &mut World| {
+            let mut query =
+                world.query_filtered::<&mut Transform, With<Replicated>>();
+            for mut transform in query.iter_mut(world) {
+                transform.position[0] += 1.0;
+            }
+            replication.snapshot(world).unwrap();
+            for peer in host.peers() {
+                let bytes = replication.snapshot_for(peer).unwrap();
+                host.send_unreliable(peer, &bytes).unwrap();
+            }
+            let mut left = Vec::new();
+            for event in host.poll() {
+                match event {
+                    NetEvent::Message { from, bytes } => {
+                        replication.accept(from, &bytes).unwrap().unwrap();
+                    }
+                    NetEvent::Disconnected(peer) => {
+                        replication.forget(peer);
+                        left.push(peer);
+                    }
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+            left
+        };
+        let pump =
+            |client: &NetSession, replica: &mut Replica, world: &mut World| {
+                for event in client.poll() {
+                    if let NetEvent::Message { from, bytes } = event {
+                        replica.apply(world, from, &bytes).unwrap().unwrap();
+                        client
+                            .send_unreliable(HOST, &replica.ack().unwrap())
+                            .unwrap();
+                    }
+                }
+            };
+        // Sends the latest snapshot and a checksum reliably, then checks.
+        let settle = |replication: &mut Replication,
+                      client: &NetSession,
+                      replica: &mut Replica,
+                      world: &mut World| {
+            let peer = client.id();
+            host.send(peer, &replication.snapshot_for(peer).unwrap())
+                .unwrap();
+            host.send(peer, &replication.checksum()).unwrap();
+            let start = Instant::now();
+            loop {
+                assert!(
+                    start.elapsed() < Duration::from_secs(2),
+                    "no checksum"
+                );
+                for event in client.poll() {
+                    let NetEvent::Message { from, bytes } = event else {
+                        continue;
+                    };
+                    if let Some(check) = replica.verify(world, from, &bytes) {
+                        return check.unwrap();
+                    }
+                    replica.apply(world, from, &bytes).unwrap().unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let names = |world: &mut World| {
+            let mut query =
+                world.query_filtered::<(&Name, &Transform), With<Replicated>>();
+            let mut names: Vec<_> = query
+                .iter(world)
+                .map(|(name, transform)| {
+                    (name.0.clone(), transform.position[0])
+                })
+                .collect();
+            names.sort_by(|x, y| x.0.cmp(&y.0));
+            names
+        };
+
+        let client = NetSession::join(address, "").unwrap();
+        assert_eq!(wait(&host, 1), [NetEvent::Connected(1)]);
+        let mut replica = Replica::new(&replication);
+        for _ in 0..20 {
+            tick(&mut replication, &mut host_world);
+            pump(&client, &mut replica, &mut client_world);
+        }
+        assert_eq!(
+            settle(&mut replication, &client, &mut replica, &mut client_world),
+            Check::Match
+        );
+
+        // The client drops; the match goes on without it.
+        drop(client);
+        let start = Instant::now();
+        while tick(&mut replication, &mut host_world) != [1] {
+            assert!(start.elapsed() < Duration::from_secs(2), "no departure");
+        }
+        host_world.despawn(b);
+        spawn(&mut host_world, "D");
+        for _ in 0..10 {
+            tick(&mut replication, &mut host_world);
+        }
+        // Meanwhile the client's own copy drifts.
+        let stale: Vec<Entity> = client_world
+            .query_filtered::<Entity, With<Replicated>>()
+            .iter(&client_world)
+            .collect();
+        client_world
+            .get_mut::<Transform>(stale[0])
+            .unwrap()
+            .position[1] = 9.0;
+
+        // It rejoins as a new peer with the world and replica it kept; the
+        // first snapshot it gets is whole and replaces what it had.
+        let client = NetSession::join(address, "").unwrap();
+        assert_eq!(client.id(), 2);
+        for _ in 0..20 {
+            tick(&mut replication, &mut host_world);
+            pump(&client, &mut replica, &mut client_world);
+        }
+        assert_eq!(
+            settle(&mut replication, &client, &mut replica, &mut client_world),
+            Check::Match
+        );
+        let synced = names(&mut client_world);
+        let kept: Vec<_> =
+            synced.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(kept, ["A", "C", "D"]);
+        assert_eq!(
+            synced[0].1,
+            host_world.get::<Transform>(a).unwrap().position[0]
+        );
+        assert_eq!(names(&mut client_world), names(&mut host_world));
+    }
 }
