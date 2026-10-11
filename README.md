@@ -1,6 +1,6 @@
 # RustingEngine
 
-<!--[![CI](https://github.com/GoingRusting/RustingEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/GoingRusting/RustingEngine/actions/workflows/ci.yml)-->
+<!--[![CI](https://github.com/RustingStudio/RustingEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/RustingStudio/RustingEngine/actions/workflows/ci.yml)-->
 
 **10,000 GPU-simulated cubes at more than 2,000 FPS on an RTX 3060.**
 
@@ -70,7 +70,7 @@ You need Rust and a graphics card with Vulkan. Linux and Windows are
 supported.
 
 ```bash
-git clone https://github.com/GoingRusting/RustingEngine.git
+git clone https://github.com/RustingStudio/RustingEngine.git
 cd RustingEngine
 ./scripts/run_editor.sh
 ```
