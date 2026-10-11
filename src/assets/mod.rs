@@ -22,6 +22,9 @@ use crate::runtime::{
 };
 
 mod data;
+mod pack;
+
+pub use pack::{file_len, pack_folder, read_file, PackArchive, PACK_MAGIC};
 
 pub use data::{
     read_data_file, write_data_file, DataAsset, DataAssetType, DataAssetTypes,
@@ -617,7 +620,7 @@ impl<T: Send + 'static> Assets<T> {
 }
 
 fn read_asset_file(path: &Path) -> Result<Vec<u8>, AssetError> {
-    std::fs::read(path).map_err(|error| AssetError::Load {
+    read_file(path).map_err(|error| AssetError::Load {
         path: path.to_owned(),
         message: error.to_string(),
     })
@@ -713,8 +716,7 @@ fn decode_texture_file(path: &Path) -> Result<TextureAsset, AssetError> {
             path: path.to_owned(),
             message,
         };
-        let bytes = std::fs::read(path)
-            .map_err(|error| load_error(error.to_string()))?;
+        let bytes = read_asset_file(path)?;
         let (size, texels) = radiance::decode(&bytes).map_err(load_error)?;
         return Ok(TextureAsset {
             size,
@@ -723,7 +725,12 @@ fn decode_texture_file(path: &Path) -> Result<TextureAsset, AssetError> {
             sampler: TextureSampler::default(),
         });
     }
-    let image = image::open(path).map_err(|error| AssetError::Load {
+    let bytes = read_asset_file(path)?;
+    let image = match image::ImageFormat::from_path(path) {
+        Ok(format) => image::load_from_memory_with_format(&bytes, format),
+        Err(_) => image::load_from_memory(&bytes),
+    }
+    .map_err(|error| AssetError::Load {
         path: path.to_owned(),
         message: error.to_string(),
     })?;
@@ -1441,7 +1448,9 @@ impl AssetServer {
     ) -> Result<Handle<MeshAsset>, AssetError> {
         let handle = self.meshes.get_or_insert_with(&path, decode_mesh_file)?;
         let lods = path.as_ref().with_extension("rlod");
-        if lods.is_file() && self.lod_groups.handle_for_path(&lods).is_none() {
+        if file_len(&lods).is_some()
+            && self.lod_groups.handle_for_path(&lods).is_none()
+        {
             self.load_lod_group(lods)?;
         }
         Ok(handle)

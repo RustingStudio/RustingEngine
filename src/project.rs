@@ -347,6 +347,12 @@ pub struct ExportPreset {
     /// non-zero exit fails the export.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sign: Vec<String>,
+    /// Pack the exported `assets/` and `scenes/` folders into
+    /// `assets.rpak` and `scenes.rpak` after excluded files are removed.
+    /// The game reads a file missing on disk from the pack beside its
+    /// folder, so asset paths do not change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pack: bool,
 }
 
 /// Whether `path` (relative, `/`-separated) matches `pattern`, where `*`
@@ -428,6 +434,24 @@ pub fn remove_excluded(
     }
     removed.sort();
     Ok(removed)
+}
+
+/// Packs the `assets/` and `scenes/` folders of an export into
+/// `<folder>.rpak` beside them and removes the loose folders; returns the
+/// pack names written.
+pub fn pack_export(export: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let mut packed = Vec::new();
+    for name in ["assets", "scenes"] {
+        let folder = export.join(name);
+        if !folder.is_dir() {
+            continue;
+        }
+        let pack = format!("{name}.rpak");
+        crate::assets::pack_folder(&folder, &export.join(&pack))?;
+        std::fs::remove_dir_all(&folder)?;
+        packed.push(pack);
+    }
+    Ok(packed)
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -3001,13 +3025,32 @@ mod tests {
         assert_eq!(removed, ["assets/hero.png", "scenes/level.rscene"]);
         assert!(export.join("game").is_file());
         assert!(export.join("build/main.rscene.bin").is_file());
+
+        std::fs::write(export.join("assets/hero.png"), "png").unwrap();
+        std::fs::write(export.join("scenes/level.rscene"), "{}").unwrap();
+        assert_eq!(
+            pack_export(&export).unwrap(),
+            ["assets.rpak", "scenes.rpak"]
+        );
+        assert!(!export.join("assets").exists());
+        assert!(!export.join("scenes").exists());
+        assert_eq!(
+            crate::assets::read_file(&export.join("assets/hero.png")).unwrap(),
+            b"png"
+        );
+        assert_eq!(
+            crate::assets::read_file(&export.join("scenes/level.rscene"))
+                .unwrap(),
+            b"{}"
+        );
         let _ = std::fs::remove_dir_all(export);
 
         let preset: ExportPreset = serde_json::from_str(
-            r#"{"target": "x86_64-pc-windows-gnu", "features": ["steam"], "exclude": ["**/*.psd"]}"#,
+            r#"{"target": "x86_64-pc-windows-gnu", "features": ["steam"], "exclude": ["**/*.psd"], "pack": true}"#,
         )
         .unwrap();
         assert_eq!(preset.features, ["steam"]);
+        assert!(preset.pack);
         assert!(
             serde_json::from_str::<ExportPreset>(r#"{"exclud": []}"#).is_err(),
             "a misspelt key is an error, not a silent no-op"

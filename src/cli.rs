@@ -6181,6 +6181,20 @@ pub fn export_game_project(
                 )
             }
         };
+    let packed = if preset.pack {
+        match crate::project::pack_export(&exported) {
+            Ok(packed) => packed,
+            Err(error) => {
+                return CliResult::failure(
+                    "EXPORT_FAILED",
+                    format!("could not pack the exported assets: {error}"),
+                    Some(exported),
+                )
+            }
+        }
+    } else {
+        Vec::new()
+    };
     if let Some((program, arguments)) = preset.sign.split_first() {
         let executable = exported.join(crate::project::executable_name(
             &project.manifest.binary_name,
@@ -6223,6 +6237,7 @@ pub fn export_game_project(
         "target": target,
         "features": preset.features,
         "excluded": excluded,
+        "packed": packed,
         "signed": !preset.sign.is_empty(),
         "files": files,
         "verified": null,
