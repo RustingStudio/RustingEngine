@@ -4,6 +4,7 @@
 
 ### Added
 
+- Tests: resize, minimize to a zero-sized surface, and restore redraw the scene correctly at each size
 - Rendering: windows pick an RGBA swapchain on surfaces that prefer it instead of failing on a forced BGRA format
 - Tests: the renderer shuts down validation-clean with frames in flight; `rendering::validation_error_count` counts validation-layer errors
 - Tests: unloaded meshes and textures free their GPU data only after the frames that read them complete

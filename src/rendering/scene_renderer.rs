@@ -21468,6 +21468,106 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn resize_minimize_and_restore_redraw_the_scene_at_each_size() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let red = MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        };
+        let mut scene = SlabScene::with_extent(&[(0.0, red)], [16, 16]);
+        // The slab covers x < 0: the left half of the view at any aspect.
+        scene.render_world.renderables[0].transform =
+            crate::runtime::GlobalTransform {
+                matrix: (Matrix4::new_translation(&nalgebra::Vector3::new(
+                    -2.0, 0.0, 0.0,
+                )) * Matrix4::new_nonuniform_scaling(
+                    &nalgebra::Vector3::new(4.0, 4.0, 0.1),
+                ))
+                .into(),
+            };
+        // Points the scene at a fresh target of `extent`, as a swapchain
+        // recreated after a resize does.
+        let resize = |scene: &mut SlabScene, extent: [u32; 2]| {
+            scene.image = Image::new(
+                scene.memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: crate::rendering::swapchain::OFFSCREEN_COLOR_FORMAT,
+                    extent: [extent[0], extent[1], 1],
+                    usage: ImageUsage::COLOR_ATTACHMENT
+                        | ImageUsage::TRANSFER_SRC,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            scene.extent = extent;
+        };
+        let frame = |scene: &mut SlabScene| {
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            scene.pixels()
+        };
+        // Red left of the middle column, black right of it, row by row.
+        let check = |pixels: &[u8], [width, height]: [u32; 2]| {
+            assert_eq!(pixels.len(), (width * height * 4) as usize);
+            for (index, pixel) in pixels.chunks(4).enumerate() {
+                let column = index as u32 % width;
+                let [b, g, r, _] = pixel.try_into().unwrap();
+                let left = column < width / 2;
+                assert_eq!(
+                    (r > 200, g < 20 && b < 20),
+                    (left, true),
+                    "{width}x{height} pixel {index}: {r} {g} {b}"
+                );
+            }
+        };
+        let first = frame(&mut scene);
+        check(&first, [16, 16]);
+        // A wider, shorter window keeps the slab on the left half.
+        resize(&mut scene, [40, 12]);
+        check(&frame(&mut scene), [40, 12]);
+        // Minimized: a zero-sized surface draws nothing, does not fail, and
+        // skips the ticks spent minimized instead of catching up on restore.
+        scene.render_world.physics_tick += 30;
+        for extent in [[0, 0], [40, 0], [0, 12]] {
+            let before = scene.now();
+            let skipped = scene
+                .renderer
+                .render(
+                    before,
+                    ImageView::new_default(scene.image.clone()).unwrap(),
+                    extent,
+                    SceneRenderOptions::game(extent),
+                    &scene.render_world,
+                    &scene.assets,
+                )
+                .expect("a zero-sized surface skips the frame");
+            // Nothing was submitted: the future handed in comes back.
+            assert!(skipped.queue().is_none(), "{extent:?} submitted work");
+        }
+        assert_eq!(scene.renderer.last_physics_tick, 30);
+        // Restored to the first size, the image is the first one again.
+        resize(&mut scene, [16, 16]);
+        assert_eq!(frame(&mut scene), first);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn rgba_swapchain_format_draws_the_same_image_as_bgra() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");

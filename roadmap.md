@@ -4606,7 +4606,18 @@ Depends on: Milestones 3, 4, and 21.
 
 ### Renderer integration tests
 
-- [ ] Resize, minimize, restore, and zero-sized surface handling.
+- [x] Resize, minimize, restore, and zero-sized surface handling.
+  Evidence (2026-10-12, lane render): GPU test
+  `resize_minimize_and_restore_redraw_the_scene_at_each_size` draws a slab
+  over the left half of the view at 16x16, then into a fresh 40x12 target as
+  a recreated swapchain would, checking every pixel at each size. Zero-sized
+  surfaces (`[0, 0]`, `[40, 0]`, `[0, 12]`) return `Ok` without submitting
+  work and skip the physics ticks spent minimized. Restored to 16x16, the
+  image equals the first one byte for byte. Mutation checks: removing the
+  zero-size guard panics in the orthographic projection; dropping the
+  minimized tick skip fails the tick assertion; never resizing the depth
+  target fails the 40x12 image. Full check: lib 975 passed, gpu-tests
+  1146 passed.
 - [x] Unsupported present-mode and format fallback.
   Evidence (2026-10-12, lane render): the game runner and the editor
   forced a `B8G8R8A8_UNORM` swapchain, which fails on surfaces with no BGRA
