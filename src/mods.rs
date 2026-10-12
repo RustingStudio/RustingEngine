@@ -394,13 +394,18 @@ pub fn conflicts(root: &Path, mods: &[Mod]) -> Vec<ModConflict> {
     let mut found = Vec::new();
     for (file, holding) in shared_files(mods) {
         let mut fields = Vec::new();
-        let small =
-            |len: Option<u64>| len.is_none_or(|len| len <= MAX_COMPARED_SCENE);
+        // Only regular files of a known, small size are read: a link to
+        // `/dev/zero` or a pipe has no length and is never compared.
+        let small = |len: u64| len <= MAX_COMPARED_SCENE;
+        let base_len = crate::assets::file_len(&root.join(&file));
         if file.ends_with(".rscene")
-            && small(crate::assets::file_len(&root.join(&file)))
-            && holding.iter().all(|m| small(m.len_of(&file)))
+            && base_len.is_none_or(small)
+            && holding.iter().all(|m| m.len_of(&file).is_some_and(small))
         {
-            let base = scene(crate::assets::read_unmodded(&root.join(&file)))
+            let base = base_len
+                .and_then(|_| {
+                    scene(crate::assets::read_unmodded(&root.join(&file)))
+                })
                 .unwrap_or_else(|| serde_json::json!({}));
             let scenes: Vec<_> =
                 holding.iter().map(|m| scene(m.read(&file))).collect();
@@ -660,6 +665,32 @@ mod tests {
         let set = load_mods(&mods);
         assert_eq!(set.mods[0].files(), ["assets/a.txt", "assets/again"]);
         std::fs::remove_dir_all(mods).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenes_linked_to_endless_files_are_not_compared() {
+        let root = std::env::temp_dir()
+            .join(format!("rusting-mod-zero-{}", uuid::Uuid::new_v4()));
+        let mods = root.join("mods");
+        std::fs::create_dir_all(root.join("scenes")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", root.join("scenes/z.rscene"))
+            .unwrap();
+        for name in ["a", "b"] {
+            add_mod(&mods, name, "1.0.0", "");
+            std::fs::create_dir_all(mods.join(name).join("scenes")).unwrap();
+            std::os::unix::fs::symlink(
+                "/dev/zero",
+                mods.join(name).join("scenes/z.rscene"),
+            )
+            .unwrap();
+        }
+        let set = load_mods(&mods);
+        let found = conflicts(&root, &set.mods);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file, "scenes/z.rscene");
+        assert!(found[0].fields.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
