@@ -189,8 +189,9 @@ impl PackArchive {
 }
 
 /// Reads `path` from disk or, when there is no such file, from the pack
-/// that stands in for one of its folders: `game/assets/sfx/hit.wav` is read
-/// as `sfx/hit.wav` from `game/assets.rpak`. Loose files win, so a patch can
+/// that stands in for its nearest `assets` or `scenes` folder:
+/// `game/assets/sfx/hit.wav` is read as `sfx/hit.wav` from
+/// `game/assets.rpak`. Loose files win, so a patch can
 /// replace one packed file.
 ///
 /// # Errors
@@ -226,34 +227,36 @@ fn packed(path: &Path) -> Option<(std::sync::Arc<PackArchive>, String)> {
     // pack rewritten while the game runs is not seen until a restart.
     static OPEN: OnceLock<Mutex<BTreeMap<PathBuf, Option<Arc<PackArchive>>>>> =
         OnceLock::new();
-    for folder in path.ancestors().skip(1) {
-        let name = folder.file_name()?.to_str()?;
-        let pack = folder.with_file_name(format!("{name}.rpak"));
-        let archive = OPEN
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(pack.clone())
-            .or_insert_with(|| match PackArchive::open(&pack) {
-                Ok(archive) => Some(Arc::new(archive)),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => {
-                    eprintln!("assets: cannot open pack: {error}");
-                    None
-                }
-            })
-            .clone();
-        if let Some(archive) = archive {
-            let parts: Option<Vec<&str>> = path
-                .strip_prefix(folder)
-                .ok()?
-                .components()
-                .map(|part| part.as_os_str().to_str())
-                .collect();
-            return Some((archive, parts?.join("/")));
-        }
-    }
-    None
+    // Only the nearest `assets/` or `scenes/` folder is looked up, so a
+    // stray `.rpak` higher up the tree (`/home.rpak`) is never read.
+    let folder = path.ancestors().skip(1).find(|folder| {
+        matches!(
+            folder.file_name().and_then(|name| name.to_str()),
+            Some("assets" | "scenes")
+        )
+    })?;
+    let pack = folder.with_extension("rpak");
+    let archive = OPEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(pack.clone())
+        .or_insert_with(|| match PackArchive::open(&pack) {
+            Ok(archive) => Some(Arc::new(archive)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                eprintln!("assets: cannot open pack: {error}");
+                None
+            }
+        })
+        .clone()?;
+    let parts: Option<Vec<&str>> = path
+        .strip_prefix(folder)
+        .ok()?
+        .components()
+        .map(|part| part.as_os_str().to_str())
+        .collect();
+    Some((archive, parts?.join("/")))
 }
 
 fn read_array<const N: usize>(reader: &mut impl Read) -> io::Result<[u8; N]> {
@@ -371,6 +374,13 @@ mod tests {
             io::ErrorKind::NotFound
         );
         assert_eq!(file_len(&missing), None);
+        // Only `assets` and `scenes` folders stand in for packs.
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("note.txt"), b"x").unwrap();
+        pack_folder(&other, &dir.join("other.rpak")).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+        assert!(read_file(&other.join("note.txt")).is_err());
         // A loose file wins over the packed one.
         std::fs::create_dir_all(&assets).unwrap();
         std::fs::write(&note, b"loose").unwrap();
