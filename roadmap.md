@@ -2348,6 +2348,9 @@ Depends on: Milestones 5, 6, and 10. Deformable and fluid tooling follows Milest
 ### Authoring tools
 
 - [ ] Collider editing gizmos, automatic collider generation, and convex decomposition (V-HACD-class) for imported meshes.
+  - [x] Convex decomposition: `runtime::decompose::decompose` voxelizes a closed mesh solid and splits its box by axis-aligned planes until each region's hull (built from the clipped surface, so it follows the mesh) exceeds its solid volume by less than `concavity`, up to `max_hulls`; an open mesh falls back to its one hull. Evidence: `cargo test --lib decompose` (a box stays one hull of volume 1; an L of two boxes splits into two hulls of 1 and 0.5 m³ with identical repeat output; a cup gives 5+ hulls within 15% of its solid volume, and `max_hulls: 3` caps it; an open box gives its one hull) plus the full check (CPU lib 978, gpu-tests lib 1132).
+  - [ ] Automatic collider generation: an import or editor action that spawns one hidden `ConvexMesh` child per hull, folded into the body's compound.
+  - [ ] Collider editing gizmos (editor work).
 - [ ] Joint placement and limit-editing gizmos with live preview.
 - [ ] Ragdoll creation wizard from a skeleton.
 - [ ] Physics material library, collision-layer matrix editor, and force-field visualization.

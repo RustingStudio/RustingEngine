@@ -12,6 +12,7 @@ mod click;
 pub mod cloth;
 mod components;
 mod cpu_physics;
+pub mod decompose;
 mod determinism;
 mod effect_presets;
 mod events;
