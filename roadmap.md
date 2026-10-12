@@ -4602,7 +4602,17 @@ Depends on: Milestones 3, 4, and 21.
 - [x] Common instance field order across compute shaders.
 - [x] Common physics push-constant declaration across compute shaders.
 - [ ] Shader reflection compared with every Rust storage, uniform, vertex, and push-constant type.
-- [ ] Shader compilation as a dedicated CI job.
+- [x] Shader compilation as a dedicated CI job.
+  Evidence (2026-10-12, lane render): `scripts/check_shaders.sh` compiles
+  every `.vert`, `.frag` and `.comp` file under `src/shaders` with
+  `glslc --target-env=vulkan1.2 -I src/shaders`, without building the
+  crate, and fails if any shader fails. The new `shaders` job in
+  `.github/workflows/ci.yml` installs `glslc` and runs it. Local run: 29
+  shaders checked, 0 failed; appending a stray identifier to `cull.comp`
+  made it print glslc's error with the line number and exit 1. Shaders
+  written inline in Rust still compile only through `cargo build`, and the
+  job also covers `cs_grid_build.comp`, which no Rust code loads. Full
+  check: lib 975 passed, gpu-tests 1146 passed.
 
 ### Renderer integration tests
 
