@@ -136,6 +136,43 @@ impl Mod {
         }
     }
 
+    /// The mod's files under `assets/` and `scenes/`, `/`-separated and
+    /// sorted.
+    #[must_use]
+    pub fn files(&self) -> Vec<String> {
+        let mut files: Vec<String> = match &self.pack {
+            Some(pack) => pack.paths().map(str::to_owned).collect(),
+            None => {
+                let mut files = Vec::new();
+                let mut pending = vec![self.path.clone()];
+                while let Some(dir) = pending.pop() {
+                    for path in std::fs::read_dir(&dir)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|e| e.path())
+                    {
+                        if path.is_dir() {
+                            pending.push(path);
+                        } else if let Some(entry) = path
+                            .strip_prefix(&self.path)
+                            .ok()
+                            .and_then(Path::to_str)
+                        {
+                            files.push(entry.replace('\\', "/"));
+                        }
+                    }
+                }
+                files
+            }
+        };
+        files.retain(|file| {
+            file.starts_with("assets/") || file.starts_with("scenes/")
+        });
+        files.sort();
+        files
+    }
+
     /// The size of one of the mod's files.
     #[must_use]
     pub fn len_of(&self, entry: &str) -> Option<u64> {
@@ -310,6 +347,131 @@ pub fn load_mods(folder: &Path) -> ModSet {
     set
 }
 
+/// A game file that more than one loaded mod holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ModConflict {
+    /// `/`-separated, such as `assets/hero.png`.
+    pub file: String,
+    /// The mods holding it, in load order; the last one's file is read.
+    pub mods: Vec<String>,
+    /// For a `.rscene`, the fields two of the mods changed from the game's
+    /// scene in different ways. Only the last mod's changes take effect.
+    pub fields: Vec<FieldConflict>,
+}
+
+/// A scene field two mods changed differently.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FieldConflict {
+    /// Entity ID, or `None` for a scene-level field.
+    pub entity: Option<String>,
+    pub name: Option<String>,
+    /// Such as `transform`, `components/rusting.light/intensity`, or
+    /// `entity` when one mod removed the entity and the other changed it.
+    pub field: String,
+    /// The earlier and the later mod in load order.
+    pub mods: [String; 2],
+}
+
+/// The files of the game at `root` that more than one of `mods` (in load
+/// order) holds, and for scenes each field that two of them changed
+/// differently from the game's own scene (an empty scene when the game
+/// has none). A scene file that is not JSON gets no field detail.
+#[must_use]
+pub fn conflicts(root: &Path, mods: &[Mod]) -> Vec<ModConflict> {
+    let mut holders: BTreeMap<String, Vec<&Mod>> = BTreeMap::new();
+    for held in mods {
+        for file in held.files() {
+            holders.entry(file).or_default().push(held);
+        }
+    }
+    let scene = |bytes: io::Result<Vec<u8>>| -> Option<serde_json::Value> {
+        serde_json::from_slice(&bytes.ok()?).ok()
+    };
+    let mut found = Vec::new();
+    for (file, holding) in holders {
+        if holding.len() < 2 {
+            continue;
+        }
+        let mut fields = Vec::new();
+        if file.ends_with(".rscene") {
+            let base = scene(crate::assets::read_unmodded(&root.join(&file)))
+                .unwrap_or_else(|| serde_json::json!({}));
+            let scenes: Vec<_> =
+                holding.iter().map(|m| scene(m.read(&file))).collect();
+            for (i, earlier) in holding.iter().enumerate() {
+                for (j, later) in holding.iter().enumerate().skip(i + 1) {
+                    let (Some(a), Some(b)) = (&scenes[i], &scenes[j]) else {
+                        continue;
+                    };
+                    let pair = [
+                        earlier.manifest.name.clone(),
+                        later.manifest.name.clone(),
+                    ];
+                    for conflict in
+                        crate::scene_merge::merge_scenes(&base, a, b).1
+                    {
+                        for field in component_fields(&base, a, b, &conflict) {
+                            fields.push(FieldConflict {
+                                entity: conflict.entity.clone(),
+                                name: conflict.name.clone(),
+                                field,
+                                mods: pair.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        found.push(ModConflict {
+            file,
+            mods: holding.iter().map(|m| m.manifest.name.clone()).collect(),
+            fields,
+        });
+    }
+    found
+}
+
+/// Narrows a `components/NAME` conflict to the component's own fields
+/// both sides changed differently, none when they changed different
+/// fields; other conflicts stay as they are.
+fn component_fields(
+    base: &serde_json::Value,
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+    conflict: &crate::scene_merge::MergeConflict,
+) -> Vec<String> {
+    let whole = vec![conflict.field.clone()];
+    let (Some(component), Some(id)) =
+        (conflict.field.strip_prefix("components/"), &conflict.entity)
+    else {
+        return whole;
+    };
+    let value = |scene: &serde_json::Value| {
+        scene["entities"]
+            .as_array()
+            .and_then(|list| list.iter().find(|e| e["id"] == id.as_str()))
+            .map(|e| e["components"][component].clone())
+            .unwrap_or_default()
+    };
+    let (base, a, b) = (value(base), value(a), value(b));
+    let (Some(a_map), Some(b_map)) = (a.as_object(), b.as_object()) else {
+        return whole;
+    };
+    let null = serde_json::Value::Null;
+    let mut keys: Vec<&String> = a_map.keys().chain(b_map.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    keys.into_iter()
+        .filter(|key| {
+            let (o, t) =
+                (a.get(*key).unwrap_or(&null), b.get(*key).unwrap_or(&null));
+            let was = base.get(*key).unwrap_or(&null);
+            o != was && t != was && o != t
+        })
+        .map(|key| format!("{}/{key}", conflict.field))
+        .collect()
+}
+
 /// Checks the mod folder's manifest and packs the folder into `out`.
 ///
 /// # Errors
@@ -362,6 +524,14 @@ pub fn mount_beside(scene: &Path) {
         eprintln!(
             "mods: loaded {} {}",
             loaded.manifest.name, loaded.manifest.version
+        );
+    }
+    for conflict in conflicts(root, &set.mods) {
+        eprintln!(
+            "mods: {} is in {}; {} wins",
+            conflict.file,
+            conflict.mods.join(", "),
+            conflict.mods.last().map_or("", String::as_str)
         );
     }
     if !set.mods.is_empty() {
@@ -512,6 +682,19 @@ mod tests {
             "MOD_MANIFEST_INVALID"
         );
 
+        let found = conflicts(&root, &load_mods(&mods).mods);
+        let files: Vec<(&str, &[String])> = found
+            .iter()
+            .map(|c| (c.file.as_str(), c.mods.as_slice()))
+            .collect();
+        assert_eq!(
+            files,
+            [(
+                "assets/hero.txt",
+                &["first".to_owned(), "second".to_owned()][..]
+            ),]
+        );
+
         mount_beside(&root.join("build/main.rscene.bin"));
         let read = |path: &str| {
             String::from_utf8(
@@ -532,6 +715,61 @@ mod tests {
 
         mount(&root, Vec::new());
         assert_eq!(read("assets/hero.txt"), "game hero");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scene_conflicts_name_entity_and_component_fields() {
+        let root = std::env::temp_dir()
+            .join(format!("rusting-mod-fields-{}", uuid::Uuid::new_v4()));
+        let mods = root.join("mods");
+        let scene = |intensity: f64, color: [f64; 3], x: f64| {
+            serde_json::json!({
+                "format_version": 1,
+                "entities": [{
+                    "id": "lamp", "name": "Lamp",
+                    "transform": {"position": [x, 0.0, 0.0]},
+                    "components": {"rusting.point_light": {"intensity": intensity, "color": color}},
+                }],
+            })
+            .to_string()
+        };
+        write(
+            &root.join("scenes/main.rscene"),
+            &scene(1.0, [1.0, 1.0, 1.0], 0.0),
+        );
+        for (name, intensity, color, x) in [
+            ("bright", 5.0, [1.0, 1.0, 1.0], 2.0),
+            ("red", 1.0, [1.0, 0.0, 0.0], 2.0),
+            ("dim", 0.5, [0.0, 0.0, 1.0], 0.0),
+        ] {
+            add_mod(&mods, name, "1.0.0", "");
+            write(
+                &mods.join(name).join("scenes/main.rscene"),
+                &scene(intensity, color, x),
+            );
+        }
+        let found = conflicts(&root, &load_mods(&mods).mods);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].mods, ["bright", "dim", "red"]);
+        let fields: Vec<(String, &str)> = found[0]
+            .fields
+            .iter()
+            .map(|f| (f.mods.join("+"), f.field.as_str()))
+            .collect();
+        // bright and red move the lamp to the same place and change
+        // different light fields: no conflict.
+        assert_eq!(
+            fields,
+            [
+                (
+                    "bright+dim".to_owned(),
+                    "components/rusting.point_light/intensity"
+                ),
+                ("dim+red".to_owned(), "components/rusting.point_light/color"),
+            ]
+        );
+        assert_eq!(found[0].fields[0].name.as_deref(), Some("Lamp"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

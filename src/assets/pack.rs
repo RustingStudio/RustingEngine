@@ -201,6 +201,11 @@ pub fn read_file(path: &Path) -> io::Result<Vec<u8>> {
     if let Some(modded) = crate::mods::read_mounted(path) {
         return modded;
     }
+    read_unmodded(path)
+}
+
+/// [`read_file`] without the mounted mods: the game's own file.
+pub(crate) fn read_unmodded(path: &Path) -> io::Result<Vec<u8>> {
     match std::fs::read(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             match packed(path) {

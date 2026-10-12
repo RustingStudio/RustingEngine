@@ -35,9 +35,9 @@ better_trees/
   `0.x` version the minor number must match too: `"0.2"` accepts 0.2.0 up
   to 0.3.0.
 
-`rusting mod pack better_trees` checks `mod.json` and packs the folder into
-one `better_trees.rmod` file; `--out FILE` picks another name. The
-unpacked folder works too, which is handy while making the mod.
+`rusting mod pack better_trees --out better_trees.rmod` checks `mod.json`
+and packs the folder into one file. The unpacked folder works too, which is
+handy while making the mod.
 
 ## Installing and ordering mods
 
@@ -67,10 +67,25 @@ each mod left out:
 rusting mod list my_game --json
 ```
 
+## Conflicts
+
+Two mods that hold the same file conflict: only the later one's file is
+read. `rusting mod list` reports each such file under `conflicts`, with the
+mods that hold it in load order, and the game prints
+`mods: FILE is in A, B; B wins` as it starts. For a `.rscene` file the
+report also names each field two mods changed from the game's scene in
+different ways: the entity's ID and name, and the field, such as
+`transform` or `components/rusting.point_light/intensity`. Two mods that
+change different fields of one component, or make the same change, do not
+conflict there, but the later mod's scene still replaces the earlier one's
+whole, so a mod author who wants both changes merges the scenes into one
+mod or makes one mod depend on the other.
+
 ## In game code
 
 `rusting_engine::mods::load_mods` reads a mods folder and
 `rusting_engine::mods::mount` mounts a list of mods over a game folder, for
-a game with its own mod menu. Everything that reads through
+a game with its own mod menu; `rusting_engine::mods::conflicts` reports
+what they fight over. Everything that reads through
 `rusting_engine::assets::read_file`, which is every scene, texture, model
 and sound the engine loads, sees the mounted mods.

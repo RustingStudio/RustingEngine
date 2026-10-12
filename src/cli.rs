@@ -7952,14 +7952,10 @@ src/main.rs:30:5: error[E0425]: cannot find value `x` in this scope";
     }
 }
 
-/// Checks a mod folder's `mod.json` and packs the folder into a `.rmod`
-/// archive, `<folder>.rmod` unless `out` is given.
-pub fn pack_mod(folder: &Path, out: Option<&Path>) -> CliResult {
-    let out = out.map_or_else(
-        || folder.with_extension(crate::mods::MOD_EXTENSION),
-        Path::to_owned,
-    );
-    match crate::mods::pack_mod(folder, &out) {
+/// Checks a mod folder's `mod.json` and packs the folder into the `.rmod`
+/// archive `out`. `out` is always an argument, so --confine checks it.
+pub fn pack_mod(folder: &Path, out: &Path) -> CliResult {
+    match crate::mods::pack_mod(folder, out) {
         Ok(manifest) => CliResult::success(json!({
             "name": manifest.name,
             "version": manifest.version,
@@ -7972,7 +7968,8 @@ pub fn pack_mod(folder: &Path, out: Option<&Path>) -> CliResult {
 }
 
 /// The mods in `<root>/mods` that a game there would load, in load order,
-/// with an error diagnostic for each one left out.
+/// the files and scene fields more than one of them changes, and an error
+/// diagnostic for each mod left out.
 pub fn list_mods(root: &Path) -> CliResult {
     let set = crate::mods::load_mods(&root.join("mods"));
     let mods: Vec<Value> = set
@@ -7990,7 +7987,10 @@ pub fn list_mods(root: &Path) -> CliResult {
     CliResult {
         schema_version: 1,
         ok: set.errors.is_empty(),
-        data: json!({ "mods": mods }),
+        data: json!({
+            "mods": mods,
+            "conflicts": crate::mods::conflicts(root, &set.mods),
+        }),
         diagnostics: set
             .errors
             .into_iter()

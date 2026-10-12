@@ -430,7 +430,7 @@ pub const CODES: &[CodeInfo] = &[
         "MOD_MANIFEST_INVALID",
         "A mod's mod.json is missing or wrong (format_version 1, a name of letters, digits, `_`, `-` or `.`, a major.minor.patch version, version requirements in `depends`), its .rmod cannot be read, two mods share a name, or mods/load_order.json is not a list of names.",
         "Fix the file the diagnostic names and run `rusting mod list` again.",
-        "rusting mod pack my_mod --json",
+        "rusting mod pack my_mod --out my_mod.rmod --json",
     ),
     code(
         "OUTSIDE_CONFINE",

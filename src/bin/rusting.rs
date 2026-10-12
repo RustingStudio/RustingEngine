@@ -351,9 +351,8 @@ fn run_command(args: &[String]) -> CliResult {
             }
             cli::generate_scenes(Path::new(root), &names, force, dry_run)
         }
-        ["mod", "pack", folder] => cli::pack_mod(Path::new(folder), None),
         ["mod", "pack", folder, "--out", out] => {
-            cli::pack_mod(Path::new(folder), Some(Path::new(out)))
+            cli::pack_mod(Path::new(folder), Path::new(out))
         }
         ["mod", "list"] => cli::list_mods(Path::new(".")),
         ["mod", "list", root] => cli::list_mods(Path::new(root)),

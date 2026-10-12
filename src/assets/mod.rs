@@ -24,6 +24,7 @@ use crate::runtime::{
 mod data;
 mod pack;
 
+pub(crate) use pack::read_unmodded;
 pub use pack::{file_len, pack_folder, read_file, PackArchive, PACK_MAGIC};
 
 pub use data::{
