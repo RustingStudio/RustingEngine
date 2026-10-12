@@ -1,3 +1,25 @@
+/// Asserts a hand-written GPU upload type has the size and field offsets of
+/// the type `vulkano_shaders` reflects from the shader's block, field by
+/// field: `assert_shader_layout!(Rust = Reflected { rust_field: shader_field })`.
+#[cfg(test)]
+macro_rules! assert_shader_layout {
+    ($rust:ty = $shader:ty { $($field:ident: $reflected:ident),+ $(,)? }) => {
+        assert_eq!(
+            std::mem::size_of::<$rust>(),
+            std::mem::size_of::<$shader>(),
+            "size of {}",
+            stringify!($rust)
+        );
+        $(assert_eq!(
+            std::mem::offset_of!($rust, $field),
+            std::mem::offset_of!($shader, $reflected),
+            "offset of {}::{}",
+            stringify!($rust),
+            stringify!($field)
+        );)+
+    };
+}
+
 pub mod benchmark;
 pub mod camera;
 pub mod capture;

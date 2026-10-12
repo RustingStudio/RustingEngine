@@ -4,6 +4,7 @@
 
 ### Added
 
+- Tests: `assert_shader_layout!` checks render upload types field by field against the shader-reflected blocks
 - Tests: a `shaders` CI job compiles every shader file with `glslc` through `scripts/check_shaders.sh`
 - Tests: resize, minimize to a zero-sized surface, and restore redraw the scene correctly at each size
 - Rendering: windows pick an RGBA swapchain on surfaces that prefer it instead of failing on a forced BGRA format

@@ -4602,6 +4602,34 @@ Depends on: Milestones 3, 4, and 21.
 - [x] Common instance field order across compute shaders.
 - [x] Common physics push-constant declaration across compute shaders.
 - [ ] Shader reflection compared with every Rust storage, uniform, vertex, and push-constant type.
+  Split 2026-10-12 (lane render) into render-owned and physics-owned types.
+  - [x] Render types. Evidence (2026-10-12, lane render): the new
+    `rendering::assert_shader_layout!` test macro compares a hand-written
+    upload type's size and every field offset against the type
+    `vulkano_shaders` reflects from the shader's block. Unit tests
+    `post_effects::tests::post_effect_parameters_match_their_shader_blocks`
+    (`BloomParams` against both bloom shaders' push constants,
+    `OcclusionParams` against both occlusion shaders' buffers),
+    `cull_gpu_layouts_match_shader_structs` (`CullInstance`,
+    `DrawIndexedIndirectCommand` and `CullPushConstants`, which only had
+    hard-coded sizes before) and
+    `shadow_and_debug_layouts_match_shader_blocks` (all 23 fields of
+    `ShadowUpload`, `DebugPushConstants`) join the existing
+    `RenderInstanceUpload`, `CameraUniform` and `LightUpload` checks. The
+    egui, exposure and temporal push constants already use the reflected
+    types. Vertex types (`SceneVertex`, `VisibleInstance`, `ParticleVertex`,
+    `DebugVertex`, `EguiVertex`) are checked against the shader's input
+    interface by `Vertex::definition` at every pipeline build. Mutation
+    checks: swapping `fog` and `fog_shape` in `ShadowUpload`, `viewport` and
+    `lod` in `CullPushConstants`, or the two `BloomParams` fields each fail
+    with the field's name; narrowing `SceneVertex::uv` to `R32_SFLOAT`
+    fails pipeline creation in the GPU tests. Full check: lib 977 passed,
+    gpu-tests 1148 passed.
+  - [ ] Physics types: field offsets of `GpuBodyShape`, `GpuColliderUpload`,
+    `GpuForceFieldUpload` (no check yet), and of `GpuCommandUpload`,
+    `GpuConditionUpload`, `GpuRuleState`, `PhysicsPushConstants` and
+    `GpuEventUpload` (size only), against their compute shaders, with
+    `assert_shader_layout!`.
 - [x] Shader compilation as a dedicated CI job.
   Evidence (2026-10-12, lane render): `scripts/check_shaders.sh` compiles
   every `.vert`, `.frag` and `.comp` file under `src/shaders` with

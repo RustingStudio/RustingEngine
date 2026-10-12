@@ -12104,6 +12104,44 @@ mod tests {
     }
 
     #[test]
+    fn shadow_and_debug_layouts_match_shader_blocks() {
+        assert_shader_layout!(
+            ShadowUpload = super::fragment_shader::Shadow {
+                environment: environment,
+                scene_color: scene_color,
+                viewport: viewport,
+                probes: probes,
+                inverse_view_projection: inverse_view_projection,
+                fog: fog,
+                fog_shape: fog_shape,
+                ambient_occlusion: ambient_occlusion,
+                cascades: cascades,
+                cascade_far: cascade_far,
+                cascade_forward: cascade_forward,
+                cascade_info: cascade_info,
+                cluster_view: cluster_view,
+                cluster_depth: cluster_depth,
+                fog_shafts: fog_shafts,
+                fog_volumes: fog_volumes,
+                fog_volume_colors: fog_volume_colors,
+                sky: sky,
+                decal_info: decal_info,
+                decals: decals,
+                decal_axes: decal_axes,
+                decal_colors: decal_colors,
+                decal_surfaces: decal_surfaces,
+            }
+        );
+        assert_shader_layout!(
+            DebugPushConstants = super::debug_vertex_shader::Camera {
+                view_projection: view_projection,
+                viewport_size: viewport_size,
+                _padding: padding,
+            }
+        );
+    }
+
+    #[test]
     fn light_gpu_layouts_match_shader_structs() {
         use std::mem::{offset_of, size_of};
 
@@ -15509,8 +15547,31 @@ mod tests {
     }
     #[test]
     fn cull_gpu_layouts_match_shader_structs() {
-        assert_eq!(std::mem::size_of::<CullInstance>(), 64);
-        assert_eq!(std::mem::size_of::<DrawIndexedIndirectCommand>(), 20);
+        assert_shader_layout!(
+            CullInstance = cull_shader::CullInstance {
+                sphere: sphere,
+                slot: slot,
+                lod: lod,
+                lod_ends: lod_ends,
+            }
+        );
+        assert_shader_layout!(
+            DrawIndexedIndirectCommand = cull_shader::DrawCommand {
+                index_count: index_count,
+                instance_count: instance_count,
+                first_index: first_index,
+                vertex_offset: vertex_offset,
+                first_instance: first_instance,
+            }
+        );
+        assert_shader_layout!(
+            CullPushConstants = cull_shader::Cull {
+                clip: clip,
+                viewport: viewport,
+                lod: lod,
+                info: info,
+            }
+        );
         // Clip matrix, viewport, LOD camera, and info: under the 128-byte
         // guaranteed push-constant range.
         assert_eq!(std::mem::size_of::<CullPushConstants>(), 112);
