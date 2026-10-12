@@ -4674,7 +4674,20 @@ Depends on: Milestones 3, 4, and 21.
   --lib auto_culling_break_even -- --ignored --nocapture`. Limit:
   measured on one discrete GPU; an integrated GPU may want a lower value.
   Full check: workspace lib 973 passed, gpu-tests run 1139 passed.
-- [ ] Capability fallback behavior on the low-end baseline.
+- [x] Capability fallback behavior on the low-end baseline.
+  Evidence (2026-10-12, lane render): GPU test
+  `low_end_capabilities_fall_back_and_draw_the_eco_image` gives the
+  renderer the low-end baseline (integrated GPU, 1 GiB, no optional
+  feature, no timestamps, no MSAA) and draws a scene of 4096 instances and
+  the Eco light budget plus 3 point lights with quality, culling and
+  anti-aliasing on `Auto`. The frame resolves to `Eco`, culls on the CPU,
+  draws with 1 sample, keeps the Eco light budget and reports the 3
+  dropped lights; the image equals the same scene forced to `Eco` on the
+  real device. Making `resolve_quality` ignore integrated GPUs fails it
+  (`Balanced`), and so does dropping the integrated/Eco culling threshold
+  (`Gpu`). Limit: the baseline is emulated on this device's capabilities;
+  real low-end hardware is still untested. Full check: workspace lib 973
+  passed, gpu-tests run 1140 passed.
 
 ### Golden-image tests
 

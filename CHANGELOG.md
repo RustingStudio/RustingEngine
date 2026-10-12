@@ -4,6 +4,7 @@
 
 ### Added
 
+- Tests: the low-end capability baseline falls back to Eco, CPU culling, no MSAA and the Eco light budget, and draws the Eco image
 - Rendering: `CullingMode::Auto` draws scenes under 128 instances with no culling (was 64), the break-even measured on an RTX 3060
 - Tests: GPU bodies are culled where the GPU moved them, with no state read back
 - Rendering: `rusting.text` draws text in the world (signs, labels) with the built-in pixel font

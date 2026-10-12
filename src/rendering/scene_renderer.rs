@@ -21223,6 +21223,110 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn low_end_capabilities_fall_back_and_draw_the_eco_image() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // One visible slab, enough copies out of view to reach the GPU
+        // culling size, and more lights than the Eco budget.
+        let build = || {
+            let mut scene = SlabScene::new(&[(0.0, MaterialAsset::default())]);
+            let mut hidden = scene.render_world.renderables[0];
+            hidden.transform.matrix = Matrix4::new_translation(
+                &nalgebra::Vector3::new(100.0, 0.0, 0.0),
+            )
+            .into();
+            scene.render_world.renderables.extend(
+                (1..GPU_CULL_MIN_INSTANCES as u32).map(|index| {
+                    let mut copy = hidden;
+                    copy.entity =
+                        bevy_ecs::entity::Entity::from_raw_u32(10_000 + index)
+                            .unwrap();
+                    copy
+                }),
+            );
+            scene.render_world.point_lights =
+                (0..light_budget(QualityProfile::Eco) as u32 + 3)
+                    .map(|index| crate::runtime::ExtractedPointLight {
+                        entity: bevy_ecs::entity::Entity::from_raw_u32(
+                            2000 + index,
+                        )
+                        .unwrap(),
+                        transform: crate::runtime::GlobalTransform {
+                            matrix: Matrix4::new_translation(
+                                &nalgebra::Vector3::new(
+                                    index as f32 * 0.01 - 1.0,
+                                    0.0,
+                                    0.5,
+                                ),
+                            )
+                            .into(),
+                        },
+                        light: crate::runtime::PointLight::default(),
+                    })
+                    .collect();
+            scene.render_world.lights_revision += 1;
+            scene.render_world.culling = CullingMode::Auto;
+            scene.render_world.antialiasing = Antialiasing::Auto;
+            scene
+        };
+        let frame = |scene: &mut SlabScene| {
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            scene.pixels()
+        };
+
+        // The low-end baseline: an integrated GPU with 1 GiB, no optional
+        // feature, no timestamps and no MSAA.
+        let mut low = build();
+        low.renderer.capabilities = RendererCapabilities {
+            integrated_gpu: true,
+            device_local_bytes: 1 << 30,
+            multi_draw_indirect: Capability::default(),
+            draw_indirect_count: Capability::default(),
+            bindless_textures: Capability::default(),
+            memory_budget: Capability::default(),
+            sampler_anisotropy: Capability::default(),
+            timestamp_queries: false,
+            msaa_samples: 1,
+            msaa_2x: false,
+            ..low.renderer.capabilities.clone()
+        };
+        low.render_world.quality = QualityProfile::Auto;
+        let low_image = frame(&mut low);
+        assert_eq!(
+            resolve_quality(QualityProfile::Auto, &low.renderer.capabilities),
+            QualityProfile::Eco
+        );
+        // Culling stays on the CPU below four times the usual size, MSAA
+        // is off and the light list keeps the Eco budget.
+        assert_eq!(low.renderer.last_culling_path(), CullingPath::Cpu);
+        assert_eq!(low.renderer.scene_samples, 1);
+        let eco = light_budget(QualityProfile::Eco);
+        assert_eq!(
+            low.renderer.prepared_lights.as_ref().unwrap().count,
+            eco as u32
+        );
+        assert_eq!(low.renderer.capacity_diagnostics().dropped_lights, 3);
+        assert!(low.center_pixel()[2] > 0, "the slab draws");
+
+        // The same scene on this device forced to Eco draws the same image.
+        let mut forced = build();
+        forced.render_world.quality = QualityProfile::Eco;
+        assert_eq!(frame(&mut forced), low_image);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn hot_reloaded_mesh_swaps_next_frame_and_old_buffers_outlive_in_flight_frame(
     ) {
         if vulkano::VulkanLibrary::new().is_err() {
