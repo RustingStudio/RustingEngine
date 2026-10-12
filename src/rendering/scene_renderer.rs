@@ -21386,6 +21386,94 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn unloaded_assets_free_their_gpu_data_only_after_in_flight_frames() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let unlit = MaterialAsset {
+            model: MaterialModel::Unlit,
+            ..Default::default()
+        };
+        let mut scene = SlabScene::new(&[(0.0, unlit)]);
+        let cube = scene.assets.meshes.get(scene.assets.fallback_mesh).cloned();
+        let mesh = scene.assets.meshes.insert(cube.unwrap());
+        let texture = scene.assets.textures.insert(TextureAsset {
+            size: [2, 2],
+            rgba8: [0, 255, 0, 255].repeat(4),
+            color_space: TextureColorSpace::Srgb,
+            sampler: TextureSampler::default(),
+        });
+        let material = scene.render_world.renderables[0].material;
+        scene
+            .assets
+            .materials
+            .get_mut(material)
+            .unwrap()
+            .base_color_texture = Some(texture);
+        scene.render_world.renderables[0].mesh = mesh;
+
+        // Frame 1 is submitted but deliberately not waited on.
+        let before = scene.now();
+        #[allow(clippy::arc_with_non_send_sync)]
+        let frame_one = Arc::new(
+            scene.render(before).then_signal_fence_and_flush().unwrap(),
+        );
+        let old_vertices = Arc::downgrade(
+            scene.renderer.prepared_meshes[&mesh.key()]
+                .vertices
+                .buffer(),
+        );
+        let old_texels = Arc::downgrade(
+            scene.renderer.prepared_textures[&texture.key()]
+                .view
+                .as_ref()
+                .unwrap(),
+        );
+
+        // Unload between frames: the entity goes, then its assets.
+        scene.render_world.renderables.clear();
+        scene.render_world.renderables_revision += 1;
+        scene.assets.materials.remove(material).unwrap();
+        scene.assets.meshes.remove(mesh).unwrap();
+        scene.assets.textures.remove(texture).unwrap();
+        let frame_two = scene.render(frame_one.clone().boxed());
+        assert!(!scene.renderer.prepared_meshes.contains_key(&mesh.key()));
+        assert!(!scene
+            .renderer
+            .prepared_textures
+            .contains_key(&texture.key()));
+        assert!(
+            old_vertices.upgrade().is_some() && old_texels.upgrade().is_some(),
+            "unloaded data stays alive while frame 1 may still read it"
+        );
+        frame_two
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        let [b, g, r, _] = scene.center_pixel();
+        assert_eq!([b, g, r], [0, 0, 0], "frame 2 draws nothing");
+        drop(frame_one);
+        // The renderer drops completed frame fences on its next frame.
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        assert!(
+            old_vertices.upgrade().is_none() && old_texels.upgrade().is_none(),
+            "unloaded data is freed once every referencing frame completed"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn alpha_modes_render_opaque_mask_and_sorted_blend() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");

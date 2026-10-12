@@ -4609,7 +4609,18 @@ Depends on: Milestones 3, 4, and 21.
 - [ ] Resize, minimize, restore, and zero-sized surface handling.
 - [ ] Unsupported present-mode and format fallback.
 - [ ] Frames-in-flight reuse and validation-clean shutdown.
-- [ ] Asset unload/reload while referenced by submitted frames.
+- [x] Asset unload/reload while referenced by submitted frames.
+  Evidence (2026-10-12, lane render): reload is covered by GPU test
+  `hot_reloaded_mesh_swaps_next_frame_and_old_buffers_outlive_in_flight_frame`;
+  unload by new GPU test
+  `unloaded_assets_free_their_gpu_data_only_after_in_flight_frames`. A
+  slab with its own mesh, material and texture is submitted and not
+  waited on; then the renderable is removed and the three assets are
+  unloaded. The next frame drops them from the renderer's caches and
+  draws nothing, the vertex buffer and texture view stay alive while frame
+  1 may read them, and both are freed on the frame after frame 1
+  completes. Keeping removed textures in the cache fails it. Full check:
+  workspace lib 973 passed, gpu-tests run 1141 passed.
 - [x] Culling enabled/disabled equivalence.
   Evidence (2026-10-12, lane render): GPU test
   `scene_renderer::tests::every_culling_mode_draws_the_same_image` renders
