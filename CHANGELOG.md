@@ -12,6 +12,7 @@
 - Tests: a golden-image test of PBR reference spheres
 - Tests: golden-image tests of the Linear, Reinhard and ACES tone mappers
 - Tests: every culling mode and path draws the same image as no culling
+- Tests: automatic culling bounds contain every vertex of the primitives and imported sample meshes
 
 ## [2.4.1] - 2026-10-10
 

@@ -4547,7 +4547,18 @@ Depends on: Milestones 3, 4, and 21.
   CPU fails it (2201 bytes differ), and so does shrinking the GPU cull
   sphere to 0.3 (2201). Full check: workspace lib 964 passed, gpu-tests
   run 1125 passed.
-- [ ] Automatic primitive/imported-mesh bounds contain their complete source geometry.
+- [x] Automatic primitive/imported-mesh bounds contain their complete source geometry.
+  Evidence (2026-10-12, lane render): unit test
+  `scene_renderer::tests::automatic_bounds_contain_every_vertex_of_primitives_and_imported_meshes`
+  takes all 15 `PrimitiveShape`s and the 7 primitives imported from the
+  four `samples/vertical_slice` glTF files (copied to a temp folder, since
+  import cooks next to the source), and checks every vertex lies in the
+  culling box `PreparedMesh` caches, its bounding sphere, and the
+  `world_aabb` and `world_sphere` under a rotated, unevenly scaled, moved
+  model matrix. A sphere sized by the largest half extent fails it, and so
+  do a world box from two corners and a mesh box that skips the last
+  vertex. Full check: workspace lib 965 passed, gpu-tests run 1126
+  passed.
 - [ ] GPU-owned objects are culled from the current GPU transform without full-state CPU readback.
 - [ ] Objects outside the camera stop producing render work but continue physics simulation.
 - [ ] `CullingMode::Auto` skips culling overhead below its tested scene-size threshold.

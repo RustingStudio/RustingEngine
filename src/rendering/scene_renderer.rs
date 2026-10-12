@@ -15410,6 +15410,90 @@ mod tests {
     }
 
     #[test]
+    fn automatic_bounds_contain_every_vertex_of_primitives_and_imported_meshes()
+    {
+        use crate::assets::{procedural_primitive_mesh, PrimitiveShape};
+        #[cfg_attr(not(feature = "gltf"), allow(unused_mut))]
+        let mut meshes: Vec<(String, MeshAsset)> = PrimitiveShape::ALL
+            .into_iter()
+            .map(|shape| {
+                (format!("{shape:?}"), procedural_primitive_mesh(shape))
+            })
+            .collect();
+        #[cfg(feature = "gltf")]
+        for file in ["environment", "windmill", "bending_bar", "squash_box"] {
+            // A copy, since importing cooks files next to the source.
+            let folder = std::env::temp_dir()
+                .join(format!("rusting-bounds-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&folder).unwrap();
+            let path = folder.join(format!("{file}.gltf"));
+            std::fs::copy(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("samples/vertical_slice/{file}.gltf")),
+                &path,
+            )
+            .unwrap();
+            let mut assets = AssetServer::default();
+            for primitive in assets.import_gltf(&path).unwrap() {
+                let mesh = assets.meshes.get(primitive.mesh).unwrap().clone();
+                meshes.push((format!("{file}/{}", primitive.name), mesh));
+            }
+            std::fs::remove_dir_all(folder).unwrap();
+        }
+        // Rotated, unevenly scaled and moved, as a placed object is.
+        let model: [[f32; 4]; 4] =
+            (Matrix4::new_translation(&Vector3::new(3.0, -2.0, 7.0))
+                * nalgebra::Rotation3::from_euler_angles(0.7, -0.4, 1.9)
+                    .to_homogeneous()
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    2.0, 0.5, 3.0,
+                )))
+            .into();
+        let matrix = matrix_from_array(model);
+        let inside_box = |p: [f32; 3], min: [f32; 3], max: [f32; 3]| {
+            (0..3).all(|i| p[i] >= min[i] - 1e-4 && p[i] <= max[i] + 1e-4)
+        };
+        let inside_sphere = |p: [f32; 3], s: [f32; 4]| {
+            let d = Vector3::from(p) - Vector3::new(s[0], s[1], s[2]);
+            d.norm() <= s[3] * (1.0 + 1e-5) + 1e-4
+        };
+        for (name, mesh) in &meshes {
+            assert!(!mesh.vertices.is_empty(), "{name} has no vertices");
+            // The bounds `PreparedMesh` caches for culling.
+            let (min, max) = crate::runtime::picking::mesh_bounds(mesh)
+                .map(|(min, max)| (min.into(), max.into()))
+                .unwrap();
+            let local = RenderBounds::Aabb { min, max };
+            let sphere = bounding_sphere(local);
+            let RenderBounds::Aabb {
+                min: world_min,
+                max: world_max,
+            } = world_aabb(model, min, max)
+            else {
+                unreachable!()
+            };
+            let world = world_sphere(&model, sphere);
+            for vertex in &mesh.vertices {
+                let p = vertex.position;
+                let q: [f32; 3] =
+                    matrix.transform_point(&Point3::from(p)).coords.into();
+                assert!(inside_box(p, min, max), "{name}: {p:?} out of box");
+                assert!(
+                    inside_sphere(p, sphere),
+                    "{name}: {p:?} out of sphere"
+                );
+                assert!(
+                    inside_box(q, world_min, world_max),
+                    "{name}: {q:?} out of the world box"
+                );
+                assert!(
+                    inside_sphere(q, world),
+                    "{name}: {q:?} out of the world sphere"
+                );
+            }
+        }
+    }
+    #[test]
     fn cull_gpu_layouts_match_shader_structs() {
         assert_eq!(std::mem::size_of::<CullInstance>(), 64);
         assert_eq!(std::mem::size_of::<DrawIndexedIndirectCommand>(), 20);
