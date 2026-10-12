@@ -91,8 +91,8 @@ pub use fluid::{
     FluidSettings, FluidSolver, FluidSurface, FluidVolume,
 };
 pub use fracture::{
-    Debris, DebrisBudget, Fracture, Fractured, FracturedMesh, Refrozen,
-    TerrainFracture, MAX_FRACTURE_PIECES,
+    Debris, DebrisAggregation, DebrisBudget, Fracture, Fractured,
+    FracturedMesh, Refrozen, TerrainFracture, MAX_FRACTURE_PIECES,
 };
 pub use game_feel::*;
 pub use hierarchy::{propagate_transforms, HierarchyDiagnostics};

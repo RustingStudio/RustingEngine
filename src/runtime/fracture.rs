@@ -91,6 +91,28 @@ impl Default for DebrisBudget {
     }
 }
 
+/// Merges small sleeping [`Debris`] into one fixed triangle-mesh body per
+/// grid cell, so a long match leaves few bodies however much breaks. Each
+/// tick, the sleeping pieces no wider than `max_size` metres, and earlier
+/// aggregates, are grouped by the `cell`-metre cube their box centre is in;
+/// a cube with two or more becomes one body. Pieces merge in
+/// [`SpawnOrder`], and the body takes the first one's look and spawn
+/// order. A `cell` of 0 turns this off.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct DebrisAggregation {
+    pub cell: f32,
+    pub max_size: f32,
+}
+
+impl Default for DebrisAggregation {
+    fn default() -> Self {
+        Self {
+            cell: 0.0,
+            max_size: 0.5,
+        }
+    }
+}
+
 /// Sent in the fixed step an object with a [`Fracture`] broke, after it
 /// was despawned and its pieces spawned. Breaks send in `SceneId` order.
 #[derive(Clone, Debug, PartialEq)]
@@ -537,6 +559,56 @@ pub(super) fn manage_debris(world: &mut World) {
             merge(world, &members);
         }
     }
+    let aggregation = world
+        .get_resource::<DebrisAggregation>()
+        .copied()
+        .unwrap_or_default();
+    if aggregation.cell > 0.0 {
+        aggregate(world, aggregation);
+    }
+}
+
+/// Merges sleeping debris per [`DebrisAggregation`] cell.
+fn aggregate(world: &mut World, settings: DebrisAggregation) {
+    let mut pieces: Vec<_> = world
+        .query::<(
+            Entity,
+            &Debris,
+            Option<&SpawnOrder>,
+            Option<&Collider>,
+            Option<&RigidBody>,
+        )>()
+        .iter(world)
+        .filter(|(_, debris, ..)| debris.asleep_since.is_some())
+        .map(|(entity, _, order, collider, body)| {
+            // What `merge` makes: a fixed triangle mesh.
+            let merged = collider
+                .is_some_and(|c| c.shape == ColliderShape::TriangleMesh)
+                && body.is_some_and(|b| b.kind == RigidBodyKind::Fixed);
+            (order.map(|o| o.0), entity, merged)
+        })
+        .collect();
+    pieces
+        .sort_unstable_by_key(|&(order, entity, _)| (order, entity.to_bits()));
+    let mut cells = BTreeMap::<[i64; 3], Vec<Entity>>::new();
+    for (_, entity, merged) in pieces {
+        let Some(points) = world_points(world, entity) else {
+            continue;
+        };
+        let low = points.iter().fold(points[0], |m, p| m.inf(p));
+        let high = points.iter().fold(points[0], |m, p| m.sup(p));
+        if !merged && (high - low).max() > settings.max_size {
+            continue;
+        }
+        let centre = 0.5 * (low + high) / settings.cell;
+        let key = [0, 1, 2].map(|axis| centre[axis].floor() as i64);
+        cells.entry(key).or_default().push(entity);
+    }
+    for members in cells.into_values() {
+        if members.len() > 1 {
+            merge(world, &members);
+        }
+    }
 }
 
 /// Replaces sleeping pieces with one fixed triangle-mesh body in world
@@ -546,7 +618,7 @@ fn merge(world: &mut World, members: &[Entity]) {
     let mut mass = 0.0;
     for &entity in members {
         let (Some(transform), Some(renderer)) = (
-            world.get::<Transform>(entity).copied(),
+            pose(world, entity),
             world.get::<MeshRenderer>(entity).copied(),
         ) else {
             continue;
@@ -1316,44 +1388,19 @@ pub(super) fn refreeze_debris(world: &mut World) {
     }
     terrains.sort_by(|a, b| (&a.0, a.1.to_bits()).cmp(&(&b.0, b.1.to_bits())));
     let mut pieces: Vec<_> = world
-        .query::<(
-            Entity,
-            &Debris,
-            &Transform,
-            &MeshRenderer,
-            Option<&GpuStateMirror>,
-            Option<&SpawnOrder>,
-        )>()
+        .query::<(Entity, &Debris, Option<&SpawnOrder>)>()
         .iter(world)
-        .filter_map(|(entity, debris, transform, renderer, mirror, order)| {
+        .filter_map(|(entity, debris, order)| {
             let asleep =
                 tick.saturating_sub(debris.asleep_since?) as f32 * step;
-            // A GPU body's own `Transform` is its spawn pose.
-            let pose = mirror.map_or(*transform, |m| m.transform);
-            Some((order.map(|o| o.0), entity, asleep, pose, renderer.mesh))
+            Some((order.map(|o| o.0), entity, asleep))
         })
         .collect();
     pieces
         .sort_unstable_by_key(|&(order, entity, ..)| (order, entity.to_bits()));
     let mut changed = vec![None::<[[f32; 3]; 2]>; terrains.len()];
-    for (_, entity, asleep, pose, mesh) in pieces {
-        let Some(points) = world
-            .get_resource::<AssetServer>()
-            .and_then(|assets| assets.meshes.get(mesh))
-            .map(|mesh| {
-                let [roll, pitch, yaw] = pose.rotation;
-                let turn = sim_math::rotation_from_euler(roll, pitch, yaw);
-                mesh.vertices
-                    .iter()
-                    .map(|v| {
-                        V::from(pose.position)
-                            + turn
-                                * V::from(v.position)
-                                    .component_mul(&V::from(pose.scale))
-                    })
-                    .collect::<Vec<_>>()
-            })
-        else {
+    for (_, entity, asleep) in pieces {
+        let Some(points) = world_points(world, entity) else {
             continue;
         };
         if points.is_empty() {
@@ -1391,6 +1438,37 @@ pub(super) fn refreeze_debris(world: &mut World) {
             events.send(Refrozen { terrain, bounds });
         }
     }
+}
+
+/// Where `entity` is: a GPU body's own `Transform` is its spawn pose, so
+/// its read-back [`GpuStateMirror`] wins.
+fn pose(world: &World, entity: Entity) -> Option<Transform> {
+    world
+        .get::<GpuStateMirror>(entity)
+        .map(|mirror| mirror.transform)
+        .or_else(|| world.get::<Transform>(entity).copied())
+}
+
+/// The world-space vertices of `entity`'s mesh at its [`pose`]; `None`
+/// without a mesh or with an empty one.
+fn world_points(world: &World, entity: Entity) -> Option<Vec<V>> {
+    let pose = pose(world, entity)?;
+    let renderer = world.get::<MeshRenderer>(entity)?;
+    let mesh = world
+        .get_resource::<AssetServer>()?
+        .meshes
+        .get(renderer.mesh)?;
+    let [roll, pitch, yaw] = pose.rotation;
+    let turn = sim_math::rotation_from_euler(roll, pitch, yaw);
+    let points: Vec<_> = mesh
+        .vertices
+        .iter()
+        .map(|v| {
+            V::from(pose.position)
+                + turn * V::from(v.position).component_mul(&V::from(pose.scale))
+        })
+        .collect();
+    (!points.is_empty()).then_some(points)
 }
 
 /// Raises the samples nearest the footprint of `points` (world space) to
@@ -2085,6 +2163,89 @@ mod tests {
         }
         assert!(!frozen.is_empty());
         assert!(frozen.iter().all(|e| e.terrain == terrain));
+    }
+
+    #[test]
+    fn small_sleeping_debris_merges_into_one_static_body_per_cell() {
+        let mut app = ground();
+        app.world_mut().insert_resource(DebrisAggregation {
+            cell: 4.0,
+            max_size: 0.5,
+        });
+        let piece = |app: &mut crate::runtime::App, x: f32, half: f32| {
+            let world = app.world_mut();
+            let order = next_spawn_order(world);
+            let (mesh, material) = {
+                let mut assets = world.resource_mut::<AssetServer>();
+                let material = assets.fallback_material;
+                (assets.meshes.insert(box_mesh([half; 3])), material)
+            };
+            world.spawn((
+                Transform::new([x, half + 0.05, 0.5]),
+                PhysicsBody::default(),
+                RigidBody {
+                    mass: 1.0,
+                    ..RigidBody::default()
+                },
+                Collider {
+                    shape: ColliderShape::ConvexMesh,
+                    ..Collider::default()
+                },
+                MeshRenderer {
+                    mesh,
+                    material,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                },
+                order,
+                Debris {
+                    group: order.0,
+                    lifetime: 0.0,
+                    merge: false,
+                    asleep_since: None,
+                },
+            ));
+        };
+        // Cell x -4..0 holds two small pieces and one too big to merge;
+        // cell 0..4 one small piece alone.
+        piece(&mut app, -1.0, 0.2);
+        piece(&mut app, -3.0, 0.2);
+        piece(&mut app, -2.0, 0.5);
+        piece(&mut app, 1.0, 0.2);
+        run(&mut app, 300);
+        let bodies = |app: &mut crate::runtime::App| {
+            let world = app.world_mut();
+            let mut bodies: Vec<_> = world
+                .query_filtered::<(&RigidBody, &Collider), With<Debris>>()
+                .iter(world)
+                .map(|(body, collider)| {
+                    (
+                        body.kind == RigidBodyKind::Fixed,
+                        collider.shape,
+                        body.mass,
+                    )
+                })
+                .collect();
+            bodies.sort_by(|a, b| a.2.total_cmp(&b.2));
+            bodies
+        };
+        let merged = (true, ColliderShape::TriangleMesh, 2.0);
+        let piece_body = |mass| (false, ColliderShape::ConvexMesh, mass);
+        assert_eq!(
+            bodies(&mut app),
+            [piece_body(1.0), piece_body(1.0), merged]
+        );
+        // A later piece joins the cell's aggregate.
+        piece(&mut app, -0.5, 0.2);
+        run(&mut app, 300);
+        assert_eq!(
+            bodies(&mut app),
+            [
+                piece_body(1.0),
+                piece_body(1.0),
+                (true, ColliderShape::TriangleMesh, 3.0)
+            ]
+        );
     }
 
     /// Pieces of each dig, as (offset from the dug chunk's centre, mass

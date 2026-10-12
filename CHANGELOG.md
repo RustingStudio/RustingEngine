@@ -11,6 +11,7 @@
 - `TerrainFracture::pieces` cracks dug-out slabs into Voronoi pieces seeded by the scene's `RandomSeed` at the tick
 - GPU debris put to sleep by the GPU solver now counts as asleep, so the `DebrisBudget` can free dug terrain slabs at the cap
 - `TerrainFracture::refreeze` freezes debris that rests asleep on the terrain back into its heights and sends a `Refrozen` event
+- `DebrisAggregation` merges small sleeping debris into one static body per grid cell
 
 ### Fixed
 
