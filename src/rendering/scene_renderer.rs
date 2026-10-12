@@ -19332,6 +19332,109 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn pbr_reference_spheres_match_their_golden_image() {
+        use crate::assets::{procedural_primitive_mesh, PrimitiveShape};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // The classic chart: roughness rising left to right, a dielectric
+        // row on top and a metal row below, all one orange under a sun
+        // from the upper left and a grazing back light on the right rims.
+        // Highlight size, Fresnel and the metal's tinted reflection all
+        // show in the image, so a wrong BRDF term changes it.
+        let mut scene = SlabScene::with_extent(&[], [160, 64]);
+        if let Some(camera) = &mut scene.render_world.active_camera {
+            camera.projection = Projection::Orthographic {
+                vertical_size: 4.0,
+                near: 0.1,
+                far: 100.0,
+            };
+        }
+        scene.render_world.ambient_light = Some(crate::runtime::AmbientLight {
+            color: [1.0; 3],
+            intensity: 0.2,
+        });
+        let sphere = scene
+            .assets
+            .meshes
+            .insert(procedural_primitive_mesh(PrimitiveShape::Sphere));
+        for index in 0..10u32 {
+            let column = index % 5;
+            let row = index / 5;
+            let material = scene.assets.materials.insert(MaterialAsset {
+                base_color: [1.0, 0.5, 0.1, 1.0],
+                metallic: row as f32,
+                roughness: 0.1 + column as f32 * 0.2,
+                ..MaterialAsset::default()
+            });
+            scene.render_world.renderables.push(
+                crate::runtime::ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(index + 1)
+                        .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: (Matrix4::new_translation(&Vector3::new(
+                            column as f32 * 2.0 - 4.0,
+                            1.0 - row as f32 * 2.0,
+                            0.0,
+                        )) * Matrix4::new_scaling(1.8))
+                        .into(),
+                    },
+                    mesh: sphere,
+                    material,
+                    cast_shadows: false,
+                    receive_shadows: false,
+                    bounds: None,
+                },
+            );
+        }
+        for (index, (direction, illuminance)) in [
+            (Vector3::new(0.6, -0.6, -1.0), 1.0),
+            (Vector3::new(-1.0, 0.0, 0.6), 0.5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let direction = direction.normalize();
+            scene.render_world.directional_lights.push(
+                crate::runtime::ExtractedDirectionalLight {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(
+                        2000 + index as u32,
+                    )
+                    .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: nalgebra::Rotation3::rotation_between(
+                            &-Vector3::z(),
+                            &direction,
+                        )
+                        .unwrap()
+                        .to_homogeneous()
+                        .into(),
+                    },
+                    light: crate::runtime::DirectionalLight {
+                        color: [1.0; 3],
+                        illuminance: illuminance
+                            * crate::runtime::DirectionalLight::LUX_PER_UNIT,
+                        shadows: false,
+                    },
+                },
+            );
+        }
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        assert_golden(&scene, "pbr_reference_spheres", 8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn a_screen_material_shows_what_its_camera_sees() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");

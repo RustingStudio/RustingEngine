@@ -4587,7 +4587,17 @@ Depends on: Milestones 3, 4, and 21.
   fails it (difference 90), and so does comparing against depth 0.02
   nearer the light (difference 90). Full check: workspace lib 964
   passed, gpu-tests run 1122 passed.
-- [ ] PBR reference spheres.
+- [x] PBR reference spheres.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::pbr_reference_spheres_match_their_golden_image`
+  draws the classic chart, one orange with roughness 0.1 to 0.9 across, a
+  dielectric row over a metal row, lit by a sun from the upper left and a
+  grazing back light on the right rims; compared with
+  `src/rendering/golden/pbr_reference_spheres.png` (tolerance 8). An
+  untinted metal F0 fails it (difference 175), and so does dropping the
+  Schlick Fresnel term (difference 47; the back light was added after the
+  head-on sun alone let that pass). Full check: workspace lib 964
+  passed, gpu-tests run 1123 passed.
 - [ ] Tone mapping.
 - [ ] Editor compositing.
 
