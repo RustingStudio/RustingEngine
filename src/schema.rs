@@ -1096,6 +1096,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"spacing": 0.1, "count_x": 4, "count_y": 4, "count_z": 4, "density": 1000.0, "softness": 0.0001, "squash": 0.0, "damping": 1.0, "tear_strain": 0.0, "substeps": 10, "visible": true, "color": [0.35, 0.8, 0.3, 1.0], "texture": ""}),
     },
     ComponentSection {
+        key: "rusting.text",
+        summary: "Text standing in the world: signs, labels, numbers over objects. text (lines split at \\n) is drawn with the built-in 5 by 7 pixel font as a flat mesh in the entity's XY plane, centered on it and read from +Z (turn the entity to aim it); size is the height of a capital in metres. It draws unlit in color (linear RGBA), so it reads the same in light and shadow, and redraws when the component changes. Characters outside printable ASCII draw as ?. No font file or other font.",
+        gpu: NO_GPU,
+        example: || json!({"text": "SHOP", "size": 0.5, "color": [1.0, 0.85, 0.3, 1.0]}),
+    },
+    ComponentSection {
         key: "rusting.cloth",
         summary: "XPBD cloth: a sheet of count_x by count_y squares of spacing metres in the entity's XY plane, centered on it, each cut into two triangles. stretch (edge compliance) 0 does not stretch; bend sets how easily it folds. wind blows on it with drag; self_collision keeps folds thickness apart. pin_top holds the top edge on holder (a body that carries it and feels its pull) or in place when holder is null. tear_strain above 0 tears edges stretched past rest times 1 + tear_strain. It drapes over sphere, box and capsule colliders and pushes dynamic bodies back. visible draws both sides in color (linear RGBA) times texture, an image stretched once over the sheet with its top row along the top edge, so it folds and tears with the cloth (flags, banners). CPU only, deterministic; at most 4096 particles.",
         gpu: NO_GPU,

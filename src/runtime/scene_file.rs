@@ -1160,6 +1160,8 @@ pub const FLUID_BLOCK_COMPONENT: &str = "rusting.fluid_block";
 pub const SOFT_BLOCK_COMPONENT: &str = "rusting.soft_block";
 /// Registry name of the built-in cloth sheet.
 pub const CLOTH_COMPONENT: &str = "rusting.cloth";
+/// Registry name of the built-in world-space text.
+pub const WORLD_TEXT_COMPONENT: &str = "rusting.text";
 pub const WATER_COMPONENT: &str = "rusting.water";
 pub const GRAVITY_VOLUME_COMPONENT: &str = "rusting.gravity_volume";
 pub const VEHICLE_COMPONENT: &str = "rusting.vehicle";
@@ -1331,6 +1333,9 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::ClothSheet>(CLOTH_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::WorldText>(WORLD_TEXT_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::WaterBody>(WATER_COMPONENT)

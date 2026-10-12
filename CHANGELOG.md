@@ -4,6 +4,7 @@
 
 ### Added
 
+- Rendering: `rusting.text` draws text in the world (signs, labels) with the built-in pixel font
 - Fluids: Granular fluid blocks draw an opaque sand surface instead of translucent water
 - Rendering: decals take a `roughness` painted with their coverage, so a dark decal can be a wet stain or a puddle that catches highlights
 - Tests: a golden-image test of every primitive's normals

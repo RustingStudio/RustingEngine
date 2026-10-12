@@ -4007,7 +4007,23 @@ Goal: fix every engine gap that `RustingGames/forty-thousand-and-one/FRICTION.md
 - [x] F11, F13, F14: the GPU contact pass takes the largest push and velocity change per direction instead of their sum, runs 4 rounds per tick (`CONTACT_ROUNDS`), ignores contacts closer than a 2 mm margin, and dynamic bodies sleep after 20 ticks under 0.05 m/s (`angular_velocity.w`; `GpuCondition::sleeping()`). Verification: gpu-test `a_deep_gpu_ball_pit_settles_and_its_walls_hold`: 3,600 balls in a 4 x 4 m pit with sideways gravity of 8 m/s^2, 3,045 at rest and 0 escaped. The old solver gave 646 at rest and 17 escaped through wall corners.
 - [x] F15, F16, F19, F22: reading a missing counter warns once, and `set_counter` / `add_to_counter` create it, so game state needs no scene entity per counter; the scenario docs give the order inside one tick; `expect` and invariants take `not_equals`. Verification: runtime and scenario unit tests.
 - [x] F17, F18, F21: `preset apply --only`, EPIPE exits quietly, `scene query` returns component values as JSON. Verification: CLI tests.
-- [ ] F23: 3D world-space text. Deferred; needs a text atlas in the scene renderer.
+- [x] F23: 3D world-space text. Deferred; needs a text atlas in the scene renderer.
+  Done without an atlas (editor help text for it in placement.rs, agent guide regenerated): `rusting.text` (`WorldText`: text, size, color)
+  builds a flat mesh with one quad per pixel run of the built-in 5 x 7
+  pixel font (`fontgen::glyph_pixels`), centered on the entity in its XY
+  plane and facing +Z, drawn with an unlit material per color. A change
+  rewrites the entity's own mesh in place. Schema text, reflect fields
+  and `docs/look-and-feel.md` "Text in the world". Evidence: unit tests
+  `text_mesh_draws_each_pixel_run_centered` (7 runs for "I", 0.7 m tall,
+  centered; two lines double it; a space draws nothing) and
+  `changing_world_text_rewrites_its_own_mesh` (same mesh and material
+  handles, new vertex count, unlit white); GPU test
+  `world_text_draws_upright_and_unmirrored` (an "L": stem top left and
+  foot bottom right lit, top right empty). It failed with the text
+  mirrored. Full check: fmt, clippy x3, `cargo test --workspace` (lib
+  973) and the gpu-tests run (lib 1138) pass.
+  Limits: printable ASCII only, one pixel font, no billboard mode (turn
+  the entity), one-sided.
 - [x] F24: `rusting determinism <root> --gpu <scenario.json>` runs the scenario in a debug and a release build and compares the GPU state hashes of every tick both runs reached (`DETERMINISM_DIVERGED` with the tick, or `DETERMINISM_NO_GPU_STATE`). Scenario reports carry `gpu_state_hashes`; a failing expect step does not stop the comparison (`scenario_passed`). Evidence (2026-10-02, RTX 3060): `rusting determinism . --gpu tests/w6_seed_a.json` on 40,001 compared 29 ticks, all equal (its pinned `night_hash` is stale after the solver change, so `scenario_passed` is false).
 - [x] F28: HUD elements are placed from this frame's measured text, so a right or bottom anchor keeps its margin when a `{counter}` value grows; the offset direction is in the schema. Evidence: 40,001 `tests/w4_cctv.json` recapture shows "COUNT: 40000" ending 24 px from the right edge.
 - [x] F29: the project guide says a `path` dependency follows a live engine and how to pin a `rev` or `tag`.

@@ -22592,6 +22592,54 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn world_text_draws_upright_and_unmirrored() {
+        use crate::runtime::world_text::text_mesh;
+        use crate::runtime::ExtractedRenderable;
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // An "L" 1.4 m tall facing the camera: its 5 x 7 cell spans
+        // x -0.5..0.5 and y -0.7..0.7, so a pixel is 0.2 m. The stem is the
+        // left pixel column, the foot the bottom row.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let material = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            ..Default::default()
+        });
+        let mesh = scene.assets.meshes.insert(text_mesh("L", 1.4));
+        scene.render_world.renderables = vec![ExtractedRenderable {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            transform: crate::runtime::GlobalTransform::default(),
+            mesh,
+            material,
+            cast_shadows: false,
+            receive_shadows: false,
+            bounds: None,
+        }];
+        scene.render_world.renderables_revision += 1;
+        // Screen pixels are 1/16 m from the top-left corner at (-1, 1).
+        let probes = [
+            ([9, 10], true, "stem, top left"),
+            ([20, 26], true, "foot, bottom right"),
+            ([20, 10], false, "top right is empty"),
+            ([22, 10], false, "where a mirrored stem would be"),
+        ];
+        for (pixel, lit, what) in probes {
+            let got = render_pixel(&mut scene, pixel);
+            assert_eq!(
+                got[..3].iter().all(|&c| c > 150),
+                lit,
+                "{what} {pixel:?}: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn cloth_textures_land_upright_and_unmirrored() {
         use crate::runtime::cloth::{cloth_mesh, Cloth};
         use crate::runtime::ExtractedRenderable;

@@ -9,6 +9,7 @@ use super::TypeRegistry;
 use crate::assets::{AlphaMode, MaterialAsset, MaterialModel};
 use crate::runtime::ClothSheet;
 use crate::runtime::Rope;
+use crate::runtime::WorldText;
 use crate::runtime::{
     AmbientLight, AmbientOcclusion, Antialiasing, Articulation, AutoExposure,
     AutoSimulation, AxisLock, AxisMotion, Bloom, BurstEmitter, CameraScreen,
@@ -767,6 +768,14 @@ crate::reflect! {
         visible: bool { doc: "draw both sides of the sheet" },
         color: [f32; 4] { unit: "linear RGBA", doc: "sheet color, multiplied into texture" },
         texture: PathBuf { unit: "asset path", doc: "image stretched once over the sheet, top row at the top edge; empty for plain color" },
+    }
+}
+
+crate::reflect! {
+    struct WorldText {
+        text: String { doc: "lines split at \\n; characters outside printable ASCII draw as ?" },
+        size: f32 { unit: "m", min: 0.01, doc: "height of a capital letter" },
+        color: [f32; 4] { unit: "linear RGBA", doc: "unlit text color" },
     }
 }
 

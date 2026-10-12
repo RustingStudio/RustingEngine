@@ -274,6 +274,16 @@ A `rusting.fluid_block` surface draws as translucent water for the
 liquid solvers and as opaque sand for `Granular`, so a heap of grains
 reads as a heap and not as a puddle.
 
+## Text in the world
+
+`rusting.text` puts text on a sign, over a door or above an object. It
+uses the same 5 x 7 pixel font as `rusting asset generate <root> font
+pixel`, so signs match the chunky placeholder look. `size` is the height
+of a capital in meters; 0.3 to 0.5 reads well at room scale. The text is
+unlit, so pick a `color` that stands out from the wall behind it. It faces
++Z: turn the entity to aim it. Lines split at `\n` stack downward, each
+centered.
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,

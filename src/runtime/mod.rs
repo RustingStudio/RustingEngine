@@ -58,6 +58,7 @@ mod ui;
 mod vehicle;
 pub mod water;
 mod waypoints;
+pub mod world_text;
 
 pub use actions::{
     bind_input_actions, parse_input, ActionMap, InputAction, InputBinding,
@@ -144,6 +145,7 @@ pub use ui::{RuntimeUi, UiTheme};
 pub use vehicle::{Vehicle, Wheel};
 pub use water::{WaterBody, WaterMesh};
 pub use waypoints::WaypointGraph;
+pub use world_text::{WorldText, WorldTextMesh};
 
 use std::hash::Hasher;
 use std::time::{Duration, Instant};
@@ -331,6 +333,7 @@ impl Default for App {
                     fluid::spawn_fluid_volumes,
                     soft_body::spawn_soft_bodies,
                     cloth::spawn_cloths,
+                    world_text::sync_world_texts,
                 )
                     .chain(),
                 fluid::couple_fluids,

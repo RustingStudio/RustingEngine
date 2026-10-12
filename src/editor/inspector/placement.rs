@@ -38,6 +38,7 @@ use crate::runtime::{
     ROPE_COMPONENT, SCENE_INSTANCE_COMPONENT, SKIN_COMPONENT,
     SLIDE_SOUND_COMPONENT, SOFT_BLOCK_COMPONENT, SOUND_CUE_COMPONENT,
     TERRAIN_COMPONENT, TWEEN_COMPONENT, VEHICLE_COMPONENT, WATER_COMPONENT,
+    WORLD_TEXT_COMPONENT,
 };
 use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
@@ -287,6 +288,10 @@ pub(in crate::editor) fn component_help(
         CLOTH_COMPONENT => (
             "A sheet of cloth that hangs, folds, flaps in the wind, drapes over colliders and can tear.",
             "Flags, curtains, banners, capes on a body, tarps over crates.",
+        ),
+        WORLD_TEXT_COMPONENT => (
+            "Text standing in the world, drawn in a chunky pixel font that faces the object's +Z.",
+            "Shop signs, door labels, numbers over objects, floor markings.",
         ),
         SOFT_BLOCK_COMPONENT => (
             "A block of jelly that wobbles, keeps its volume, lands on colliders and can tear.",
