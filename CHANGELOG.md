@@ -4,6 +4,7 @@
 
 ### Added
 
+- Release zips: an export preset with `"zip": true` zips the finished, signed and verified export folder into `<folder>.zip` beside it (stored, Unix modes kept, same bytes for the same folder); the export JSON reports `zip`.
 - Workshop and store hooks: `PlatformServices` gains `workshop_items`, `publish_workshop_item`, `owns_content` and `open_store_page`, each with a default (no workshop, all content owned, no store page), with matching `platform::` functions; games load subscribed workshop items with their `mods/` folder (`mods::load_mods_with`). Mod loading no longer follows linked folders inside a mod (a link loop hung the game), compares scenes field by field only in `rusting mod list` and only up to 4 MiB, and prints mod file names with control characters replaced
 - Mod conflicts: `rusting mod list` reports under `conflicts` each file more than one mod holds, and for scenes each entity and component field two mods changed differently; games print the conflicting files as they mount mods. `rusting mod pack` now needs `--out`, so `--confine` checks where it writes The scene comparison skips files that are not regular files of known size, so a mod scene linked to `/dev/zero` cannot hang it.
 - Mods: folders or `.rmod` archives with a `mod.json` (name, version, dependencies) in a game's `mods/` folder replace or add its assets and scenes, in a load order from `mods/load_order.json` or by name with dependencies first; `rusting mod pack` packs one and `rusting mod list` shows the order and the mods left out

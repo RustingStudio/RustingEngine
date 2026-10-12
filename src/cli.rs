@@ -6296,27 +6296,54 @@ pub fn export_game_project(
         "signed": !preset.sign.is_empty(),
         "files": files,
         "verified": null,
+        "zip": null,
     });
-    if target.is_some() {
+    let mut result = if target.is_some() {
         let mut result = CliResult::success(data);
         result.diagnostics.push(Diagnostic {
             code: "EXPORT_NOT_VERIFIED",
             severity: "warning",
             message: "cross-target exports are not run on this machine".into(),
-            file: Some(exported),
+            file: Some(exported.clone()),
             ..Diagnostic::default()
         });
-        return result;
+        result
+    } else {
+        match verify_export(&exported, &project.manifest.binary_name) {
+            Ok(run) if run.success => {
+                data["verified"] = run.data();
+                CliResult::success(data)
+            }
+            verified => {
+                return export_verify_failure(&verified, data, exported)
+            }
+        }
+    };
+    if preset.zip {
+        let mut zip = exported.clone().into_os_string();
+        zip.push(".zip");
+        let zip = PathBuf::from(zip);
+        if let Err(error) = crate::project::zip_folder(&exported, &zip) {
+            return CliResult::failure(
+                "EXPORT_FAILED",
+                format!("could not zip the export: {error}"),
+                Some(exported),
+            );
+        }
+        result.data["zip"] = json!(zip);
     }
-    let verified = verify_export(&exported, &project.manifest.binary_name);
-    let ok = verified.as_ref().is_ok_and(|run| run.success);
-    data["verified"] = match &verified {
+    result
+}
+
+fn export_verify_failure(
+    verified: &Result<ProcessRun, String>,
+    mut data: Value,
+    exported: PathBuf,
+) -> CliResult {
+    data["verified"] = match verified {
         Ok(run) => run.data(),
         Err(error) => json!({"error": error}),
     };
-    if ok {
-        return CliResult::success(data);
-    }
     let message = match &verified {
         Ok(run) => format!(
             "exported game failed its headless run:\n{}",

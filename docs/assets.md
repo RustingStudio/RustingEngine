@@ -286,9 +286,15 @@ rusting export my_game ~/exports --preset demo
   `add_gltf`; models placed in the editor are cooked already and load from
   the pack.
   Packing only happens at export.
+- `zip` set to `true` zips the finished export folder into
+  `<folder>.zip` beside it, after it is signed and checked, ready to
+  upload to a store or share. Files sit under the folder's name inside
+  the zip and keep their Unix permissions, so the game stays executable
+  after unzipping on Linux. The files are stored without compression, and
+  a zip holds at most 65,535 files and 4 GiB.
 
-The export's JSON lists the `features`, the `excluded` files and the
-`packed` archives. A native
+The export's JSON lists the `features`, the `excluded` files, the
+`packed` archives and the `zip` path. A native
 export is still run headless, so leaving out a file the game loads fails
 with `EXPORT_VERIFY_FAILED`. An unknown preset name fails with
 `EXPORT_PRESET_UNKNOWN`, which lists the presets the project has.
