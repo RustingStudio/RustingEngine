@@ -4,6 +4,7 @@
 
 ### Added
 
+- Mods: folders or `.rmod` archives with a `mod.json` (name, version, dependencies) in a game's `mods/` folder replace or add its assets and scenes, in a load order from `mods/load_order.json` or by name with dependencies first; `rusting mod pack` packs one and `rusting mod list` shows the order and the mods left out
 - Mesh generation: `meshgen::spline` (Catmull-Rom points), `extrude` (a profile swept along a path without twisting), `loft` (rings skinned into a closed mesh), and `ProcMesh::union`, `subtract` and `intersect`; `ProcMesh::glb` saves a mesh for a scene and `ProcMesh::asset` gives a flat-shaded asset that `TriangleMesh` and `ConvexMesh` colliders use
 - Generated level checks: a `scene_generators` entry's `checks` scenarios (such as an `explore` run that must reach every goal, or `invariants`) play on each new scene before it replaces the old one; a failure keeps the old scene and gives `GENERATED_SCENE_CHECK_FAILED`. `RunOptions.scene` runs a game on any scene
 - Scene generators: `scene_generators` in `project.json` name a project command that writes a scene from a seed and inputs; `rusting scene generate` reruns it only when the command, seed, inputs or watched files changed, checks the scene loads, journals the write, and refuses to overwrite hand edits without `--force`

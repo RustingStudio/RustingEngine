@@ -4359,6 +4359,7 @@ fn load_project_runtime<P: Plugin>(
     scene_path: &Path,
     plugin: P,
 ) -> Result<App, Box<dyn Error>> {
+    crate::mods::mount_beside(scene_path);
     let mut runtime = App::new();
     runtime.add_plugin(AssetPlugin)?;
     runtime.add_plugin(HybridPhysicsPlugin)?;

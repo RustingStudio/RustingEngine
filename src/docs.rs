@@ -149,6 +149,7 @@ const PAGES: &[(&str, &str, &str)] = &[
         "guide",
         include_str!("../docs/procedural.md"),
     ),
+    ("guide/modding", "guide", include_str!("../docs/modding.md")),
 ];
 
 /// Sample games shipped with the engine: name, README and game code.

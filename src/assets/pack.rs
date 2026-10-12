@@ -192,11 +192,15 @@ impl PackArchive {
 /// that stands in for its nearest `assets` or `scenes` folder:
 /// `game/assets/sfx/hit.wav` is read as `sfx/hit.wav` from
 /// `game/assets.rpak`. Loose files win, so a patch can
-/// replace one packed file.
+/// replace one packed file, and a mounted mod ([`crate::mods::mount`])
+/// wins over both.
 ///
 /// # Errors
 /// Returns the disk error when no pack holds the file either.
 pub fn read_file(path: &Path) -> io::Result<Vec<u8>> {
+    if let Some(modded) = crate::mods::read_mounted(path) {
+        return modded;
+    }
     match std::fs::read(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             match packed(path) {
@@ -212,6 +216,9 @@ pub fn read_file(path: &Path) -> io::Result<Vec<u8>> {
 /// from; `None` when neither has it.
 #[must_use]
 pub fn file_len(path: &Path) -> Option<u64> {
+    if let Some(len) = crate::mods::mounted_len(path) {
+        return Some(len);
+    }
     match std::fs::metadata(path) {
         Ok(meta) => meta.is_file().then_some(meta.len()),
         Err(_) => {

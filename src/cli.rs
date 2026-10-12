@@ -7951,3 +7951,56 @@ src/main.rs:30:5: error[E0425]: cannot find value `x` in this scope";
         std::fs::remove_dir_all(parent).unwrap();
     }
 }
+
+/// Checks a mod folder's `mod.json` and packs the folder into a `.rmod`
+/// archive, `<folder>.rmod` unless `out` is given.
+pub fn pack_mod(folder: &Path, out: Option<&Path>) -> CliResult {
+    let out = out.map_or_else(
+        || folder.with_extension(crate::mods::MOD_EXTENSION),
+        Path::to_owned,
+    );
+    match crate::mods::pack_mod(folder, &out) {
+        Ok(manifest) => CliResult::success(json!({
+            "name": manifest.name,
+            "version": manifest.version,
+            "archive": out,
+        })),
+        Err(error) => {
+            CliResult::failure(error.code, error.message, Some(error.path))
+        }
+    }
+}
+
+/// The mods in `<root>/mods` that a game there would load, in load order,
+/// with an error diagnostic for each one left out.
+pub fn list_mods(root: &Path) -> CliResult {
+    let set = crate::mods::load_mods(&root.join("mods"));
+    let mods: Vec<Value> = set
+        .mods
+        .iter()
+        .map(|loaded| {
+            json!({
+                "name": loaded.manifest.name,
+                "version": loaded.manifest.version,
+                "depends": loaded.manifest.depends,
+                "path": loaded.path,
+            })
+        })
+        .collect();
+    CliResult {
+        schema_version: 1,
+        ok: set.errors.is_empty(),
+        data: json!({ "mods": mods }),
+        diagnostics: set
+            .errors
+            .into_iter()
+            .map(|error| Diagnostic {
+                code: error.code,
+                severity: "error",
+                message: error.message,
+                file: Some(error.path),
+                ..Diagnostic::default()
+            })
+            .collect(),
+    }
+}

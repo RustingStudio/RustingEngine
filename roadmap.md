@@ -4481,6 +4481,8 @@ Goal: players can extend a shipped game safely.
 Depends on: Milestones 9, 21, and L8.
 
 - [ ] Mod packages: data assets, scenes, and WASM scripts in a versioned archive with a manifest, dependencies, and a load order.
+  - [x] Data assets and scenes: `src/mods.rs` reads `mod.json` (name, `major.minor.patch` version, `depends` with caret-style minimums) from a mod folder or a `.rmod` archive (the `.rpak` format), loads `mods/` in `load_order.json` order or by name with dependencies first (stable topological sort; unmet, disabled, wrong-version and cyclic mods and their dependents are left out with `MOD_DEPENDENCY_UNMET` / `MOD_DEPENDENCY_CYCLE` / `MOD_MANIFEST_INVALID`), and mounts them over `assets::read_file` / `file_len` as a game starts, last mod winning. `rusting mod pack` and `rusting mod list`; `docs/modding.md`. Evidence: `mods::tests` (versions, load order with cycles and missing or wrong-version dependencies, a packed and a folder mod overriding and adding files through `read_file`); smoke on a `starter` project in `target/tmp`: `mod pack` made `mods/hello.rmod`, `mod list` listed it, and `rusting run --ticks 5` printed `mods: loaded hello 1.0.0` and read the mod's `assets/msg.txt` (`"modded text"`), `"game text"` with the mod removed. lib 1135.
+  - [ ] WASM scripts in mods: after L8 gives a WASM runtime.
 - [ ] Capability-based sandbox for mod scripts: a game declares which APIs mods may call.
 - [ ] Mod conflict reporting by asset and component field.
 - [ ] Reusable in-game level editor built from the editor's widgets and command layer, with undo.

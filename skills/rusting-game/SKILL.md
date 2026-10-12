@@ -522,6 +522,12 @@ if scene.counter_complete("keys") && at_exit {
 `rusting export` ships only the main scene today, so exported builds cannot
 load other levels yet; `rusting run` and `rusting test` can.
 
+Players mod a game by putting folders or `.rmod` files (from
+`rusting mod pack`) with a `mod.json` and `assets/` or `scenes/` in the
+game's `mods/` folder; their files replace the game's. `rusting mod list`
+shows the load order and why a mod was left out
+(`rusting docs show guide/modding`).
+
 ## Scenarios
 
 A scenario is a JSON file in `tests/`. `rusting test` runs them all.

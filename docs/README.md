@@ -71,6 +71,8 @@ were run against this version of the engine.
   with solid operations, and generated scenes cached by seed and inputs.
 - [Look and feel](look-and-feel.md): art presets, color grading, and a
   polish checklist.
+- [Modding](modding.md): mods that replace or add a shipped game's assets
+  and scenes, with versions, dependencies and a load order.
 - [Cameras](cameras.md), [Audio](audio.md), and
   [Menus and UI](menus-and-ui.md).
 - [GPU condition shaders](gpu-condition-shaders.md): custom checks and

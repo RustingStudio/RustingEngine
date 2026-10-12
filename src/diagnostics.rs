@@ -415,6 +415,24 @@ pub const CODES: &[CodeInfo] = &[
         "rusting scene add-model scenes/main.rscene assets/models/barrel.glb --dry-run",
     ),
     code(
+        "MOD_DEPENDENCY_CYCLE",
+        "Mods in the game's mods/ folder depend on each other in a loop, so none of them loaded.",
+        "Remove the dependency that closes the loop from one mod's mod.json `depends`.",
+        "rusting mod list my_game --json",
+    ),
+    code(
+        "MOD_DEPENDENCY_UNMET",
+        "A mod needs another mod that is not installed, not in mods/load_order.json, left out itself, or at a version the requirement does not accept, so it did not load.",
+        "Install or enable the needed mod at a version with the same major number (minor for 0.x) and at least the one asked for, or relax the mod's `depends`.",
+        "rusting mod list my_game --json",
+    ),
+    code(
+        "MOD_MANIFEST_INVALID",
+        "A mod's mod.json is missing or wrong (format_version 1, a name of letters, digits, `_`, `-` or `.`, a major.minor.patch version, version requirements in `depends`), its .rmod cannot be read, two mods share a name, or mods/load_order.json is not a list of names.",
+        "Fix the file the diagnostic names and run `rusting mod list` again.",
+        "rusting mod pack my_mod --json",
+    ),
+    code(
         "OUTSIDE_CONFINE",
         "--confine (or RUSTING_CONFINE) limits commands to one folder, and the working folder, an argument or a file write was outside it. Links and `..` are resolved first.",
         "Use paths inside the confined folder, or run without --confine and with RUSTING_CONFINE unset.",
