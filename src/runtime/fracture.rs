@@ -7,7 +7,7 @@
 //! a non-convex mesh loses its dents. Every piece is convex, so it can use
 //! a `ConvexMesh` collider as it is.
 //!
-//! At play time [`break_fractures`] breaks an object whose contacts in one
+//! At play time `break_fractures` breaks an object whose contacts in one
 //! fixed tick bring at least `break_energy` joules of impact energy (the
 //! stress of every hit that tick, summed): the object is replaced by one
 //! dynamic `ConvexMesh` body per piece, moving as the object moved, with
@@ -18,7 +18,7 @@
 //! where it was hit, how hard, and the world box it filled, so audio,
 //! particles, navigation and gameplay can react without polling.
 //!
-//! The pieces are [`Debris`], and [`manage_debris`] keeps them cheap. Only
+//! The pieces are [`Debris`], and `manage_debris` keeps them cheap. Only
 //! sleeping debris is ever removed or merged, so nothing vanishes in
 //! flight: a piece asleep for its fracture's `debris_lifetime` despawns,
 //! and with `merge_debris` the pieces of one break, once all asleep, become

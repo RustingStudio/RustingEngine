@@ -642,7 +642,7 @@ fn sheet_material(
 /// Both sides of a cloth's triangles, each side with its own smooth
 /// normals: the first half of the vertices faces the way the triangles
 /// wind, the second half the other way. UVs stay pinned to the rest shape,
-/// so a texture moves with the cloth; see [`rest_uvs`].
+/// so a texture moves with the cloth; see `rest_uvs`.
 pub fn cloth_mesh(cloth: &Cloth) -> crate::assets::MeshAsset {
     let count = cloth.positions.len();
     let uvs = rest_uvs(cloth);

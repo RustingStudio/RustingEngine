@@ -1070,7 +1070,7 @@ impl Default for GpuSimulationLod {
 
 /// Device budget for GPU bodies. With this resource and at least one
 /// [`SimulationObserver`], at most `max_resident` GPU bodies (each a
-/// [`GpuBodyState`] in device memory) stay on the GPU: the nearest to an
+/// `GpuBodyState` in device memory) stay on the GPU: the nearest to an
 /// observer, ties broken by [`PhysicsId::slot`]. The rest stream out: each
 /// takes its last read-back state into its `Transform` and `RigidBody`,
 /// gains [`StreamedOut`] and leaves the GPU; it streams back in from that
