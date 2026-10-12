@@ -67,6 +67,24 @@ each mod left out:
 rusting mod list my_game --json
 ```
 
+## Workshop
+
+A storefront with a workshop plugs in through `platform::PlatformServices`
+(see [Menus and UI](menus-and-ui.md)). The game loads every subscribed item
+from `platform::workshop_items()` together with the mods in `mods/`: they
+share the load order, and a mod in `mods/` wins over a workshop item with
+the same name. A mod upload tool packs the mod and hands it to the store:
+
+```rust
+use rusting_engine::{mods, platform};
+
+let manifest = mods::pack_mod(folder, &archive)?; // checks mod.json
+let item_id = platform::publish_workshop_item(&archive, &manifest)?;
+```
+
+Without a storefront there is no workshop, and publishing returns an
+error.
+
 ## Conflicts
 
 Two mods that hold the same file conflict: only the later one's file is
@@ -86,6 +104,7 @@ mod or makes one mod depend on the other.
 `rusting_engine::mods::load_mods` reads a mods folder and
 `rusting_engine::mods::mount` mounts a list of mods over a game folder, for
 a game with its own mod menu; `rusting_engine::mods::conflicts` reports
-what they fight over. Everything that reads through
+what they fight over. `rusting_engine::mods::load_mods_with` also takes
+mods from elsewhere, such as workshop items. Everything that reads through
 `rusting_engine::assets::read_file`, which is every scene, texture, model
 and sound the engine loads, sees the mounted mods.

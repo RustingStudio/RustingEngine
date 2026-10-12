@@ -4,6 +4,7 @@
 
 ### Added
 
+- Workshop and store hooks: `PlatformServices` gains `workshop_items`, `publish_workshop_item`, `owns_content` and `open_store_page`, each with a default (no workshop, all content owned, no store page), with matching `platform::` functions; games load subscribed workshop items with their `mods/` folder (`mods::load_mods_with`). Mod loading no longer follows linked folders inside a mod (a link loop hung the game), compares scenes field by field only in `rusting mod list` and only up to 4 MiB, and prints mod file names with control characters replaced
 - Mod conflicts: `rusting mod list` reports under `conflicts` each file more than one mod holds, and for scenes each entity and component field two mods changed differently; games print the conflicting files as they mount mods. `rusting mod pack` now needs `--out`, so `--confine` checks where it writes
 - Mods: folders or `.rmod` archives with a `mod.json` (name, version, dependencies) in a game's `mods/` folder replace or add its assets and scenes, in a load order from `mods/load_order.json` or by name with dependencies first; `rusting mod pack` packs one and `rusting mod list` shows the order and the mods left out
 - Mesh generation: `meshgen::spline` (Catmull-Rom points), `extrude` (a profile swept along a path without twisting), `loft` (rings skinned into a closed mesh), and `ProcMesh::union`, `subtract` and `intersect`; `ProcMesh::glb` saves a mesh for a scene and `ProcMesh::asset` gives a flat-shaded asset that `TriangleMesh` and `ConvexMesh` colliders use

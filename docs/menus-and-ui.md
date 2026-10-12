@@ -126,6 +126,16 @@ if platform::achievement_unlocked("night_5") { /* show the badge */ }
   optional own save folder such as a cloud-synced one). Install it once at
   start with `platform::set_platform_services(Box::new(MyStore::new()))`;
   game code keeps calling the same functions.
+- Store content and the workshop go through the same services:
+  `platform::owns_content("soundtrack")` says whether the player owns a DLC
+  (always true with no storefront), `platform::open_store_page(None)` opens
+  the game's store page (or `Some(id)` a DLC's), and
+  `platform::workshop_items()` lists the subscribed workshop mods a
+  storefront downloaded, which the game loads with its `mods/` folder
+  (see [Modding](modding.md)). `platform::publish_workshop_item(archive,
+  &manifest)` uploads a mod packed by `rusting mod pack` and returns its
+  item ID. Each has a default in the trait, so a store implements only
+  what it has.
 - The engine ships no storefront SDK yet: Steamworks waits on the owner's
   approval of the `steamworks` crate (see `rusting_engine::steam`).
 - Achievements and stats are presentation, like audio. Never let them

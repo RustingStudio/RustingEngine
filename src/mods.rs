@@ -146,13 +146,12 @@ impl Mod {
                 let mut files = Vec::new();
                 let mut pending = vec![self.path.clone()];
                 while let Some(dir) = pending.pop() {
-                    for path in std::fs::read_dir(&dir)
-                        .into_iter()
-                        .flatten()
-                        .flatten()
-                        .map(|e| e.path())
+                    for entry in
+                        std::fs::read_dir(&dir).into_iter().flatten().flatten()
                     {
-                        if path.is_dir() {
+                        let path = entry.path();
+                        // Not followed into linked folders, which can loop.
+                        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                             pending.push(path);
                         } else if let Some(entry) = path
                             .strip_prefix(&self.path)
@@ -228,11 +227,18 @@ pub struct ModSet {
 /// depends on it. A missing folder gives an empty set.
 #[must_use]
 pub fn load_mods(folder: &Path) -> ModSet {
+    load_mods_with(folder, &[])
+}
+
+/// [`load_mods`] with more mods from elsewhere, such as the platform's
+/// [`crate::platform::workshop_items`]. They take part in the load order
+/// by name like the folder's own; a mod in `folder` wins a name clash.
+#[must_use]
+pub fn load_mods_with(folder: &Path, extra: &[PathBuf]) -> ModSet {
     let mut set = ModSet::default();
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return set;
-    };
-    let mut paths: Vec<PathBuf> = entries
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
@@ -241,6 +247,10 @@ pub fn load_mods(folder: &Path) -> ModSet {
         })
         .collect();
     paths.sort();
+    paths.extend_from_slice(extra);
+    if paths.is_empty() {
+        return set;
+    }
     let mut found: BTreeMap<String, Mod> = BTreeMap::new();
     for path in paths {
         match Mod::open(&path) {
@@ -378,22 +388,18 @@ pub struct FieldConflict {
 /// has none). A scene file that is not JSON gets no field detail.
 #[must_use]
 pub fn conflicts(root: &Path, mods: &[Mod]) -> Vec<ModConflict> {
-    let mut holders: BTreeMap<String, Vec<&Mod>> = BTreeMap::new();
-    for held in mods {
-        for file in held.files() {
-            holders.entry(file).or_default().push(held);
-        }
-    }
     let scene = |bytes: io::Result<Vec<u8>>| -> Option<serde_json::Value> {
         serde_json::from_slice(&bytes.ok()?).ok()
     };
     let mut found = Vec::new();
-    for (file, holding) in holders {
-        if holding.len() < 2 {
-            continue;
-        }
+    for (file, holding) in shared_files(mods) {
         let mut fields = Vec::new();
-        if file.ends_with(".rscene") {
+        let small =
+            |len: Option<u64>| len.is_none_or(|len| len <= MAX_COMPARED_SCENE);
+        if file.ends_with(".rscene")
+            && small(crate::assets::file_len(&root.join(&file)))
+            && holding.iter().all(|m| small(m.len_of(&file)))
+        {
             let base = scene(crate::assets::read_unmodded(&root.join(&file)))
                 .unwrap_or_else(|| serde_json::json!({}));
             let scenes: Vec<_> =
@@ -429,6 +435,33 @@ pub fn conflicts(root: &Path, mods: &[Mod]) -> Vec<ModConflict> {
         });
     }
     found
+}
+
+/// Scenes larger than this get no field detail in [`conflicts`]: mods
+/// are untrusted, and the comparison grows with the square of the entity
+/// count.
+const MAX_COMPARED_SCENE: u64 = 4 << 20;
+
+/// Each file more than one of `mods` holds, with the mods holding it.
+fn shared_files(mods: &[Mod]) -> Vec<(String, Vec<&Mod>)> {
+    let mut holders: BTreeMap<String, Vec<&Mod>> = BTreeMap::new();
+    for held in mods {
+        for file in held.files() {
+            holders.entry(file).or_default().push(held);
+        }
+    }
+    holders
+        .into_iter()
+        .filter(|(_, holding)| holding.len() > 1)
+        .collect()
+}
+
+/// `text` with control characters, which a mod's file names and manifest
+/// can carry to move a terminal's cursor or recolor it, shown as `?`.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
 }
 
 /// Narrows a `components/NAME` conflict to the component's own fields
@@ -503,21 +536,23 @@ pub fn mount(root: &Path, mods: Vec<Mod>) {
 }
 
 /// Mounts the mods in `mods/` beside the folder that holds `scene` (a
-/// game's `build/` or `scenes/` folder), reporting each loaded mod and
-/// each error on stderr. Games call this as they start.
+/// game's `build/` or `scenes/` folder) and the platform's subscribed
+/// workshop items, reporting each loaded mod, conflict and error on
+/// stderr. Games call this as they start.
 pub fn mount_beside(scene: &Path) {
     let folder = scene.parent().unwrap_or(Path::new("."));
     let root = match folder.file_name().and_then(|name| name.to_str()) {
         Some("build" | "scenes") => folder.parent().unwrap_or(folder),
         _ => folder,
     };
-    let set = load_mods(&root.join("mods"));
+    let set =
+        load_mods_with(&root.join("mods"), &crate::platform::workshop_items());
     for error in &set.errors {
         eprintln!(
             "mods: {} {}: {}",
             error.code,
-            error.path.display(),
-            error.message
+            printable(&error.path.display().to_string()),
+            printable(&error.message)
         );
     }
     for loaded in &set.mods {
@@ -526,12 +561,15 @@ pub fn mount_beside(scene: &Path) {
             loaded.manifest.name, loaded.manifest.version
         );
     }
-    for conflict in conflicts(root, &set.mods) {
+    // Only the files: comparing scenes field by field is for `mod list`.
+    for (file, holding) in shared_files(&set.mods) {
+        let names: Vec<&str> =
+            holding.iter().map(|m| m.manifest.name.as_str()).collect();
         eprintln!(
             "mods: {} is in {}; {} wins",
-            conflict.file,
-            conflict.mods.join(", "),
-            conflict.mods.last().map_or("", String::as_str)
+            printable(&file),
+            names.join(", "),
+            names.last().unwrap_or(&"")
         );
     }
     if !set.mods.is_empty() {
@@ -597,6 +635,53 @@ mod tests {
 
     fn codes(set: &ModSet) -> Vec<&str> {
         set.errors.iter().map(|e| e.code).collect()
+    }
+
+    #[test]
+    fn untrusted_mod_text_is_printed_without_control_characters() {
+        assert_eq!(
+            printable("scenes/\u{1b}[2Jx\n.rscene"),
+            "scenes/?[2Jx?.rscene"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_folder_loop_in_a_mod_ends_the_file_walk() {
+        let mods = std::env::temp_dir()
+            .join(format!("rusting-mod-loop-{}", uuid::Uuid::new_v4()));
+        add_mod(&mods, "loop", "1.0.0", "");
+        write(&mods.join("loop/assets/a.txt"), "a");
+        std::os::unix::fs::symlink(
+            mods.join("loop"),
+            mods.join("loop/assets/again"),
+        )
+        .unwrap();
+        let set = load_mods(&mods);
+        assert_eq!(set.mods[0].files(), ["assets/a.txt", "assets/again"]);
+        std::fs::remove_dir_all(mods).unwrap();
+    }
+
+    #[test]
+    fn workshop_items_load_with_the_folders_mods() {
+        let root = std::env::temp_dir()
+            .join(format!("rusting-workshop-{}", uuid::Uuid::new_v4()));
+        let (mods, workshop) = (root.join("mods"), root.join("workshop"));
+        add_mod(&mods, "local", "1.0.0", r#""subscribed": "2""#);
+        add_mod(&mods, "both", "1.0.0", "");
+        add_mod(&workshop, "subscribed", "2.1.0", "");
+        add_mod(&workshop, "both", "9.0.0", "");
+        let items = [workshop.join("subscribed"), workshop.join("both")];
+        let set = load_mods_with(&mods, &items);
+        assert_eq!(names(&set), ["both", "subscribed", "local"]);
+        assert_eq!(set.mods[0].manifest.version, "1.0.0", "the folder's wins");
+        assert_eq!(codes(&set), ["MOD_MANIFEST_INVALID"]);
+        // Workshop items alone, with no mods folder.
+        assert_eq!(
+            names(&load_mods_with(&root.join("none"), &items[..1])),
+            ["subscribed"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
