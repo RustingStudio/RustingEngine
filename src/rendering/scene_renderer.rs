@@ -12426,7 +12426,18 @@ mod tests {
             slabs: &[(f32, MaterialAsset)],
             extent: [u32; 2],
         ) -> Self {
-            use crate::rendering::swapchain::OFFSCREEN_COLOR_FORMAT;
+            Self::with_format(
+                slabs,
+                extent,
+                crate::rendering::swapchain::OFFSCREEN_COLOR_FORMAT,
+            )
+        }
+
+        fn with_format(
+            slabs: &[(f32, MaterialAsset)],
+            extent: [u32; 2],
+            format: Format,
+        ) -> Self {
             let base = crate::rendering::test_support::headless_device();
             let memory_allocator = Arc::new(
                 StandardMemoryAllocator::new_default(base.device.clone()),
@@ -12434,7 +12445,7 @@ mod tests {
             let renderer = SceneRenderer::new(
                 base.queue.clone(),
                 memory_allocator.clone(),
-                OFFSCREEN_COLOR_FORMAT,
+                format,
                 extent,
             )
             .unwrap();
@@ -12495,7 +12506,7 @@ mod tests {
             let image = Image::new(
                 memory_allocator.clone(),
                 ImageCreateInfo {
-                    format: OFFSCREEN_COLOR_FORMAT,
+                    format,
                     extent: [extent[0], extent[1], 1],
                     usage: ImageUsage::COLOR_ATTACHMENT
                         | ImageUsage::TRANSFER_SRC,
@@ -21450,6 +21461,52 @@ mod tests {
         let mut forced = build();
         forced.render_world.quality = QualityProfile::Eco;
         assert_eq!(frame(&mut forced), low_image);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn rgba_swapchain_format_draws_the_same_image_as_bgra() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // An orange slab over a blue background, so a channel swap shows.
+        let draw = |format| {
+            let orange = MaterialAsset {
+                model: MaterialModel::Unlit,
+                base_color: [1.0, 0.5, 0.1, 1.0],
+                ..Default::default()
+            };
+            let mut scene =
+                SlabScene::with_format(&[(0.0, orange)], [16, 16], format);
+            scene.render_world.renderables[0].transform.matrix =
+                Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(
+                    1.0, 1.0, 0.1,
+                ))
+                .into();
+            scene.render_world.background_color = [0.1, 0.2, 0.9, 1.0];
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            scene.pixels()
+        };
+        let bgra = draw(Format::B8G8R8A8_UNORM);
+        let mut rgba = draw(Format::R8G8B8A8_UNORM);
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        assert_eq!(rgba, bgra);
+        let center = (8 * 16 + 8) * 4;
+        let corner = 0;
+        assert!(bgra[center + 2] > bgra[center], "orange slab in the middle");
+        assert!(bgra[corner] > bgra[corner + 2], "blue background around it");
     }
 
     #[test]

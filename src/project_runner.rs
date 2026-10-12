@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::{Mut, Resource, World};
-use vulkano::format::Format;
 use vulkano::image::ImageUsage;
 use vulkano::swapchain::Surface;
 use vulkano::VulkanError;
@@ -25,6 +24,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 use crate::rendering::frame_pacer::{select_present_mode, FramePacer};
 use crate::rendering::render_scale::ScaledTarget;
 use crate::rendering::scene_renderer::SceneRenderer;
+use crate::rendering::swapchain::swapchain_format;
 use crate::runtime::{
     apply_gpu_state_samples, load_scene, load_scene_document,
     record_gpu_state_hashes, route_gpu_physics_events, scene_document,
@@ -4655,7 +4655,8 @@ impl WindowRunner {
                 ..WindowDescriptor::default()
             },
             |create_info| {
-                create_info.image_format = Format::B8G8R8A8_UNORM;
+                create_info.image_format =
+                    swapchain_format(create_info.image_format);
                 create_info.min_image_count = create_info
                     .min_image_count
                     .max(SWAPCHAIN_IMAGES.load(Ordering::Relaxed));

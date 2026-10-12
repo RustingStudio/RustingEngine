@@ -85,6 +85,21 @@ pub fn create_render_pass(
     create_render_pass_for_format(device, swapchain.image_format())
 }
 
+/// The swapchain format the windowed renderers draw to. The renderers encode
+/// gamma themselves, so they want a UNORM format: the UNORM form of the
+/// surface's preferred format when that is RGBA, `B8G8R8A8_UNORM` otherwise.
+// ponytail: vulkano_util hands the swapchain callback only the surface's
+// first format; a surface offering neither 8-bit UNORM layout still fails
+// at swapchain creation. Query the full list if such a surface turns up.
+pub fn swapchain_format(preferred: Format) -> Format {
+    match preferred {
+        Format::R8G8B8A8_SRGB | Format::R8G8B8A8_UNORM => {
+            Format::R8G8B8A8_UNORM
+        }
+        _ => Format::B8G8R8A8_UNORM,
+    }
+}
+
 /// Color format used by offscreen render targets — the same choice the
 /// windowed swapchain path prefers when a surface offers it.
 pub const OFFSCREEN_COLOR_FORMAT: Format = Format::B8G8R8A8_SRGB;
@@ -228,6 +243,21 @@ pub fn create_framebuffers(
 mod tests {
     use super::*;
     use vulkano::VulkanLibrary;
+
+    #[test]
+    fn swapchain_format_is_the_unorm_form_of_the_surface_preference() {
+        for (preferred, chosen) in [
+            (Format::B8G8R8A8_SRGB, Format::B8G8R8A8_UNORM),
+            (Format::B8G8R8A8_UNORM, Format::B8G8R8A8_UNORM),
+            // Surfaces with no BGRA format (many Android drivers) prefer
+            // RGBA, and forcing BGRA there fails swapchain creation.
+            (Format::R8G8B8A8_SRGB, Format::R8G8B8A8_UNORM),
+            (Format::R8G8B8A8_UNORM, Format::R8G8B8A8_UNORM),
+            (Format::A2B10G10R10_UNORM_PACK32, Format::B8G8R8A8_UNORM),
+        ] {
+            assert_eq!(swapchain_format(preferred), chosen, "{preferred:?}");
+        }
+    }
 
     #[test]
     #[cfg_attr(

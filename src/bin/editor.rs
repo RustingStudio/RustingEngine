@@ -17,6 +17,7 @@ use rusting_engine::rendering::frame_pacer::{select_present_mode, FramePacer};
 use rusting_engine::rendering::scene_renderer::{
     SceneRenderOptions, SceneRenderer, SceneViewport,
 };
+use rusting_engine::rendering::swapchain::swapchain_format;
 use rusting_engine::runtime::{
     extract_render_world, Camera, CpuFrameTimings, MeshRenderer, Name,
     RenderCameraOverride, RenderWorld, TimeControl,
@@ -123,7 +124,8 @@ impl EditorWindowRunner {
             &self.vulkan,
             &descriptor,
             |create_info| {
-                create_info.image_format = Format::B8G8R8A8_UNORM;
+                create_info.image_format =
+                    swapchain_format(create_info.image_format);
                 create_info.min_image_count =
                     create_info.min_image_count.max(2);
             },

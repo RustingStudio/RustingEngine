@@ -4607,7 +4607,24 @@ Depends on: Milestones 3, 4, and 21.
 ### Renderer integration tests
 
 - [ ] Resize, minimize, restore, and zero-sized surface handling.
-- [ ] Unsupported present-mode and format fallback.
+- [x] Unsupported present-mode and format fallback.
+  Evidence (2026-10-12, lane render): the game runner and the editor
+  forced a `B8G8R8A8_UNORM` swapchain, which fails on surfaces with no BGRA
+  format (common on Android). They now take
+  `rendering::swapchain::swapchain_format`, the UNORM form of the
+  surface's preferred format when that is RGBA, else `B8G8R8A8_UNORM`.
+  Present-mode choice moved into the pure
+  `frame_pacer::pick_present_mode`. Unit tests
+  `present_mode_falls_back_to_what_the_surface_supports` (FIFO only,
+  no Immediate, an empty list, VSync without FIFO) and
+  `swapchain_format_is_the_unorm_form_of_the_surface_preference`; GPU test
+  `rgba_swapchain_format_draws_the_same_image_as_bgra` renders the same
+  scene into both UNORM layouts and compares them channel-swapped. Falling
+  back to Immediate instead of FIFO, or mapping RGBA to BGRA, fails the
+  unit tests. Limit: vulkano_util shows the swapchain callback only the
+  surface's first format, so a surface offering neither 8-bit UNORM layout
+  still fails; no real surface was tested here. Full check: workspace lib
+  975 passed, gpu-tests run 1145 passed.
 - [x] Frames-in-flight reuse and validation-clean shutdown.
   Evidence (2026-10-12, lane render): reuse is covered by GPU test
   `frame_contexts_bound_frames_in_flight_and_wait_only_on_reuse`; shutdown

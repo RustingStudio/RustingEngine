@@ -23,6 +23,14 @@ pub fn select_present_mode(
     else {
         return PresentMode::Fifo;
     };
+    pick_present_mode(&modes, vsync)
+}
+
+/// The present mode [`select_present_mode`] takes from the modes a surface
+/// supports: FIFO first with VSync, otherwise Immediate, then Mailbox, and
+/// FIFO, which every surface has, when no preferred mode is there.
+#[must_use]
+pub fn pick_present_mode(modes: &[PresentMode], vsync: bool) -> PresentMode {
     let preferences = if vsync {
         [
             PresentMode::Fifo,
@@ -80,5 +88,39 @@ impl FramePacer {
             event_loop
                 .set_control_flow(ControlFlow::WaitUntil(self.next_frame));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn present_mode_falls_back_to_what_the_surface_supports() {
+        let all = [
+            PresentMode::Fifo,
+            PresentMode::Mailbox,
+            PresentMode::Immediate,
+        ];
+        assert_eq!(pick_present_mode(&all, true), PresentMode::Fifo);
+        assert_eq!(pick_present_mode(&all, false), PresentMode::Immediate);
+        // No Immediate: tear-free Mailbox is the next fastest.
+        let no_immediate = [PresentMode::Fifo, PresentMode::Mailbox];
+        assert_eq!(
+            pick_present_mode(&no_immediate, false),
+            PresentMode::Mailbox
+        );
+        // FIFO only, as many mobile and Wayland surfaces offer.
+        assert_eq!(
+            pick_present_mode(&[PresentMode::Fifo], false),
+            PresentMode::Fifo
+        );
+        // A surface that reports no mode still gets FIFO.
+        assert_eq!(pick_present_mode(&[], false), PresentMode::Fifo);
+        // A VSync request on a surface without FIFO in its list.
+        assert_eq!(
+            pick_present_mode(&[PresentMode::Mailbox], true),
+            PresentMode::Mailbox
+        );
     }
 }
