@@ -19075,6 +19075,146 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn alpha_mask_and_blend_modes_match_their_golden_image() {
+        use crate::assets::{procedural_primitive_mesh, PrimitiveShape};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Unlit quads over a checkerboard, in a 3 by 2 grid: opaque ignores
+        // alpha, mask cuts at its cutoff, blend fades with the texture or
+        // the color's alpha, two overlapping blended quads listed front
+        // first still draw back to front, and a high cutoff hides a quad.
+        let mut scene = SlabScene::with_extent(&[], [144, 96]);
+        if let Some(camera) = &mut scene.render_world.active_camera {
+            camera.projection = Projection::Orthographic {
+                vertical_size: 4.0,
+                near: 0.1,
+                far: 100.0,
+            };
+        }
+        let nearest = TextureSampler {
+            mag_filter: TextureFilter::Nearest,
+            min_filter: TextureFilter::Nearest,
+            mipmap_filter: TextureFilter::Nearest,
+            wrap: [TextureWrap::ClampToEdge; 2],
+        };
+        let checker = scene.assets.textures.insert(TextureAsset {
+            size: [12, 8],
+            rgba8: (0..96)
+                .flat_map(|i| {
+                    if (i % 12 + i / 12) % 2 == 0 {
+                        [255, 255, 255, 255]
+                    } else {
+                        [64, 64, 64, 255]
+                    }
+                })
+                .collect(),
+            color_space: TextureColorSpace::Linear,
+            sampler: nearest,
+        });
+        // White, alpha rising from 0 on the left to 1 on the right.
+        let ramp = scene.assets.textures.insert(TextureAsset {
+            size: [8, 1],
+            rgba8: (0..8u32)
+                .flat_map(|x| [255, 255, 255, (x * 255 / 7) as u8])
+                .collect(),
+            color_space: TextureColorSpace::Linear,
+            sampler: nearest,
+        });
+        let quad = scene
+            .assets
+            .meshes
+            .insert(procedural_primitive_mesh(PrimitiveShape::Quad));
+        let unlit = |base_color, alpha_mode, texture| MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color,
+            alpha_mode,
+            base_color_texture: texture,
+            ..MaterialAsset::default()
+        };
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let half = AlphaMode::Mask { cutoff: 0.5 };
+        // (center, size, material) in draw-list order.
+        let quads = [
+            (
+                [0.0, 0.0, -1.0],
+                [6.0, 4.0],
+                unlit([1.0; 4], AlphaMode::Opaque, Some(checker)),
+            ),
+            (
+                [-2.0, 1.0, 0.0],
+                [1.6, 1.6],
+                unlit(red, AlphaMode::Opaque, Some(ramp)),
+            ),
+            ([0.0, 1.0, 0.0], [1.6, 1.6], unlit(red, half, Some(ramp))),
+            (
+                [2.0, 1.0, 0.0],
+                [1.6, 1.6],
+                unlit(red, AlphaMode::Blend, Some(ramp)),
+            ),
+            (
+                [-2.0, -1.0, 0.0],
+                [1.6, 1.6],
+                unlit([0.0, 1.0, 0.0, 0.5], AlphaMode::Blend, None),
+            ),
+            (
+                [0.2, -0.8, 0.5],
+                [1.2, 1.2],
+                unlit([0.0, 0.0, 1.0, 0.6], AlphaMode::Blend, None),
+            ),
+            (
+                [-0.2, -1.2, 0.0],
+                [1.2, 1.2],
+                unlit([1.0, 0.0, 0.0, 0.6], AlphaMode::Blend, None),
+            ),
+            (
+                [2.0, -1.0, 0.0],
+                [1.6, 1.6],
+                unlit(red, AlphaMode::Mask { cutoff: 1.01 }, Some(ramp)),
+            ),
+        ];
+        for (index, (center, [width, height], material)) in
+            quads.into_iter().enumerate()
+        {
+            let material = scene.assets.materials.insert(material);
+            scene.render_world.renderables.push(
+                crate::runtime::ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(
+                        index as u32 + 1,
+                    )
+                    .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: (Matrix4::new_translation(&Vector3::from(
+                            center,
+                        )) * Matrix4::new_nonuniform_scaling(
+                            &Vector3::new(width, height, 1.0),
+                        ))
+                        .into(),
+                    },
+                    mesh: quad,
+                    material,
+                    cast_shadows: false,
+                    receive_shadows: false,
+                    bounds: None,
+                },
+            );
+        }
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        assert_golden(&scene, "alpha_modes", 8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn a_screen_material_shows_what_its_camera_sees() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");

@@ -4565,7 +4565,17 @@ Depends on: Milestones 3, 4, and 21.
   Importing base color as linear fails it (difference 72), and so does
   reading occlusion from G (difference 50). Full check: workspace lib
   964 passed, gpu-tests run 1120 passed.
-- [ ] Alpha mask and blend modes.
+- [x] Alpha mask and blend modes.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::alpha_mask_and_blend_modes_match_their_golden_image`
+  draws unlit quads over a checkerboard: opaque ignoring a texture alpha
+  ramp, mask cut at 0.5, blend fading with the ramp and with a color alpha
+  of 0.5, two overlapping blended quads listed front first, and a mask
+  with cutoff 1.01 that hides its quad; compared with
+  `src/rendering/golden/alpha_modes.png` (tolerance 8). Skipping the mask
+  discard fails it (difference 255), and so does skipping the back to
+  front sort of blended instances (difference 65). Full check: workspace
+  lib 964 passed, gpu-tests run 1121 passed.
 - [ ] Directional shadow depth.
 - [ ] PBR reference spheres.
 - [ ] Tone mapping.
