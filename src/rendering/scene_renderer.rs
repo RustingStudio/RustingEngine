@@ -18095,6 +18095,85 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn gpu_bodies_are_culled_where_the_gpu_moved_them_without_state_readback() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let mut scene = SlabScene::new(&[(
+            0.0,
+            MaterialAsset {
+                model: MaterialModel::Unlit,
+                ..MaterialAsset::default()
+            },
+        )]);
+        // The body starts above the ±1 view and falls on the GPU. Nothing
+        // reads its state back, so the CPU transform stays up there.
+        let world = &mut scene.render_world;
+        world.renderables[0].transform.matrix =
+            Matrix4::new_translation(&Vector3::new(0.0, 3.0, 0.0)).into();
+        world.gpu_physics = vec![crate::runtime::ExtractedGpuPhysicsBody {
+            entity: world.renderables[0].entity,
+            physics_id: Default::default(),
+            transform: crate::Transform::new([0.0, 3.0, 0.0]),
+            rigid_body: Default::default(),
+            solver: Default::default(),
+            collider: None,
+            custom_shader: None,
+            sync: Default::default(),
+            rules: Vec::new(),
+        }];
+        world.gpu_physics_revision = 1;
+        world.physics_enabled = true;
+        world.physics_gravity = [0.0, -9.81, 0.0];
+        world.fixed_delta_seconds = 1.0 / 60.0;
+        let mut culled_frames = 0;
+        let mut drawn_frames = 0;
+        for tick in 1..=90 {
+            scene.render_world.physics_tick = tick;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            assert_eq!(scene.renderer.last_culling_path(), CullingPath::Gpu);
+            assert_eq!(
+                scene.renderer.render_counters().physics_state_bytes,
+                0,
+                "tick {tick}: no state read back"
+            );
+            let commands = scene.renderer.last_draw_commands[0].clone();
+            let drawn = commands.read().unwrap()[0].instance_count;
+            if drawn == 0 {
+                assert_eq!(drawn_frames, 0, "tick {tick}: culled again");
+                culled_frames += 1;
+                continue;
+            }
+            drawn_frames += 1;
+            let center = scene.center_pixel();
+            if center[0] < 200 {
+                continue;
+            }
+            // Its 0.87 m bounding sphere clears the view top until the body
+            // falls below 1.87 m, about 29 ticks in.
+            assert!(
+                culled_frames > 20,
+                "culled above the view: {culled_frames}"
+            );
+            let cpu = scene.render_world.renderables[0].transform.matrix;
+            assert_eq!(cpu[3][1], 3.0, "the CPU transform never moved");
+            return;
+        }
+        panic!("the GPU body never came into view");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn gpu_bodies_are_not_culled_by_their_stale_cpu_transform() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");

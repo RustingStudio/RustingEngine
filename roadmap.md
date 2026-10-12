@@ -4634,7 +4634,18 @@ Depends on: Milestones 3, 4, and 21.
   do a world box from two corners and a mesh box that skips the last
   vertex. Full check: workspace lib 965 passed, gpu-tests run 1126
   passed.
-- [ ] GPU-owned objects are culled from the current GPU transform without full-state CPU readback.
+- [x] GPU-owned objects are culled from the current GPU transform without full-state CPU readback.
+  Already true: the cull shader takes a GPU-owned instance's model matrix
+  from the physics state buffer (`physics_states.data[render.physics.x]`),
+  not from its extracted CPU transform. Evidence (2026-10-12, lane
+  render): new GPU test
+  `scene_renderer::tests::gpu_bodies_are_culled_where_the_gpu_moved_them_without_state_readback`
+  drops a GPU body from 3 m above a ±1 m view under GPU gravity; every
+  frame takes the GPU path with `physics_state_bytes` 0, the body is
+  culled for more than 20 frames, then drawn at the view center while its
+  CPU transform is still at 3 m. With the shader reading the CPU model
+  instead, the body is never drawn and the test fails. Full check:
+  workspace lib 973 passed, gpu-tests run 1139 passed.
 - [x] Objects outside the camera stop producing render work but continue physics simulation.
   Evidence (2026-10-12, lane render): GPU test
   `scene_renderer::tests::culled_cpu_bodies_keep_simulating` drops a CPU
