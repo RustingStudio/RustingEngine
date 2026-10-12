@@ -4535,7 +4535,18 @@ Depends on: Milestones 3, 4, and 21.
 - [ ] Unsupported present-mode and format fallback.
 - [ ] Frames-in-flight reuse and validation-clean shutdown.
 - [ ] Asset unload/reload while referenced by submitted frames.
-- [ ] Culling enabled/disabled equivalence.
+- [x] Culling enabled/disabled equivalence.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::every_culling_mode_draws_the_same_image` renders
+  a perspective view of a shadowed floor and 135 cubes, some in view, some
+  straddling every frustum plane, some behind the camera, and some off view
+  whose shadows fall in it, through `Disabled` (`Direct`), `Frustum` (`Cpu`,
+  culling over 40), `FrustumAndOcclusion` (`GpuOcclusion`) and, with
+  far-off filler up to `GPU_CULL_MIN_INSTANCES`, `Frustum` again (`Gpu`);
+  all four images are byte-identical. Testing only the AABB center on the
+  CPU fails it (2201 bytes differ), and so does shrinking the GPU cull
+  sphere to 0.3 (2201). Full check: workspace lib 964 passed, gpu-tests
+  run 1125 passed.
 - [ ] Automatic primitive/imported-mesh bounds contain their complete source geometry.
 - [ ] GPU-owned objects are culled from the current GPU transform without full-state CPU readback.
 - [ ] Objects outside the camera stop producing render work but continue physics simulation.

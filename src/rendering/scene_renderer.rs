@@ -19516,6 +19516,165 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn every_culling_mode_draws_the_same_image() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A perspective camera over a shadowed floor and a 9 by 5 by 3
+        // block of cubes: some in view, some straddling every frustum
+        // plane, some behind the camera, and some outside the view whose
+        // shadows fall inside it. Culling only skips work, so every mode
+        // must draw the same pixels.
+        let mut scene = SlabScene::with_extent(
+            &[(
+                -1.0,
+                MaterialAsset {
+                    base_color: [0.6, 0.6, 0.6, 1.0],
+                    ..MaterialAsset::default()
+                },
+            )],
+            [128, 96],
+        );
+        if let Some(camera) = &mut scene.render_world.active_camera {
+            camera.projection = Projection::Perspective {
+                vertical_fov_radians: 1.0,
+                near: 0.1,
+                far: 30.0,
+            };
+        }
+        scene.render_world.renderables[0].receive_shadows = true;
+        scene.render_world.renderables[0].transform.matrix =
+            (Matrix4::new_translation(&Vector3::new(0.0, 0.0, -1.0))
+                * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                    40.0, 40.0, 0.1,
+                )))
+            .into();
+        scene.render_world.ambient_light = Some(crate::runtime::AmbientLight {
+            color: [1.0; 3],
+            intensity: 0.3,
+        });
+        let materials: Vec<_> =
+            [[0.9, 0.2, 0.1], [0.2, 0.8, 0.3], [0.2, 0.4, 0.9]]
+                .into_iter()
+                .map(|[r, g, b]| {
+                    scene.assets.materials.insert(MaterialAsset {
+                        base_color: [r, g, b, 1.0],
+                        ..MaterialAsset::default()
+                    })
+                })
+                .collect();
+        let mesh = scene.assets.fallback_mesh;
+        for index in 0..135u32 {
+            let x = (index % 9) as f32 * 2.0 - 8.0;
+            let y = ((index / 9) % 5) as f32 * 2.0 - 4.0;
+            let z = [0.0, 3.0, 7.0][(index / 45) as usize];
+            scene.render_world.renderables.push(
+                crate::runtime::ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(index + 2)
+                        .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: (Matrix4::new_translation(&Vector3::new(
+                            x, y, z,
+                        )) * Matrix4::new_scaling(0.8))
+                        .into(),
+                    },
+                    mesh,
+                    material: materials[index as usize % 3],
+                    cast_shadows: true,
+                    receive_shadows: true,
+                    bounds: None,
+                },
+            );
+        }
+        let direction = Vector3::new(0.8, 0.3, -1.0).normalize();
+        scene.render_world.directional_lights.push(
+            crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &direction,
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: crate::runtime::DirectionalLight::LUX_PER_UNIT,
+                    shadows: true,
+                },
+            },
+        );
+        // Two frames per mode: occlusion culling draws from the previous
+        // frame's visible set.
+        let frame = |scene: &mut SlabScene, mode| {
+            scene.render_world.culling = mode;
+            scene.render_world.renderables_revision += 1;
+            for _ in 0..2 {
+                let before = scene.now();
+                scene
+                    .render(before)
+                    .then_signal_fence_and_flush()
+                    .unwrap()
+                    .wait(None)
+                    .unwrap();
+            }
+            (scene.pixels(), scene.renderer.last_culling_path())
+        };
+        let (all, path) = frame(&mut scene, CullingMode::Disabled);
+        assert_eq!(path, CullingPath::Direct);
+        let (frustum, path) = frame(&mut scene, CullingMode::Frustum);
+        assert_eq!(path, CullingPath::Cpu);
+        let culled = scene.renderer.last_frame_culled().unwrap();
+        assert!(
+            culled > 40,
+            "the CPU path culls the off-view cubes: {culled}"
+        );
+        let (occlusion, path) =
+            frame(&mut scene, CullingMode::FrustumAndOcclusion);
+        assert_eq!(path, CullingPath::GpuOcclusion);
+        // Far-off filler pushes the scene to the GPU frustum path's size.
+        for index in
+            scene.render_world.renderables.len()..GPU_CULL_MIN_INSTANCES
+        {
+            scene.render_world.renderables.push(
+                crate::runtime::ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(
+                        index as u32 + 10_000,
+                    )
+                    .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: Matrix4::new_translation(&Vector3::new(
+                            -1000.0, 0.0, 0.0,
+                        ))
+                        .into(),
+                    },
+                    mesh,
+                    material: materials[0],
+                    cast_shadows: true,
+                    receive_shadows: true,
+                    bounds: None,
+                },
+            );
+        }
+        let (gpu, path) = frame(&mut scene, CullingMode::Frustum);
+        assert_eq!(path, CullingPath::Gpu);
+        let differing = |a: &[u8], b: &[u8]| {
+            a.iter().zip(b).filter(|(a, b)| a != b).count()
+        };
+        assert!(all.iter().any(|&channel| channel > 0));
+        assert_eq!(differing(&all, &frustum), 0, "CPU frustum culling");
+        assert_eq!(differing(&all, &occlusion), 0, "GPU occlusion culling");
+        assert_eq!(differing(&all, &gpu), 0, "GPU frustum culling");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn a_screen_material_shows_what_its_camera_sees() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
