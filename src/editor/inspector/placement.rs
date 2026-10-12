@@ -18,8 +18,8 @@ use crate::runtime::{
     AMBIENT_OCCLUSION_COMPONENT, AUTO_EXPOSURE_COMPONENT, BACKGROUND_COMPONENT,
     BLOOM_COMPONENT, DECAL_COMPONENT, ENVIRONMENT_MAP_COMPONENT, FOG_COMPONENT,
     FOG_VOLUME_COMPONENT, HUD_ELEMENT_COMPONENT, POST_VOLUME_COMPONENT,
-    PROCEDURAL_SKY_COMPONENT, SKY_LIGHT_COMPONENT, SPRITE_COMPONENT,
-    TILE_MAP_COMPONENT, TONE_MAPPING_COMPONENT,
+    PROCEDURAL_SKY_COMPONENT, SKY_LIGHT_COMPONENT, SPRITE_ANIMATION_COMPONENT,
+    SPRITE_COMPONENT, TILE_MAP_COMPONENT, TONE_MAPPING_COMPONENT,
 };
 use crate::runtime::{
     ANIMATION_COMPONENT, ARTICULATION_COMPONENT, AUTO_SIMULATION_COMPONENT,
@@ -491,6 +491,10 @@ pub(in crate::editor) fn component_help(
         SPRITE_COMPONENT => (
             "Draws a flat image in this object's XY plane, layered in 2D canvas order.",
             "2D characters, pickups, background cards.",
+        ),
+        SPRITE_ANIMATION_COMPONENT => (
+            "Plays frames of a sprite sheet on this object's sprite.",
+            "Walk cycles, blinking pickups, flickering torches.",
         ),
         FOG_VOLUME_COMPONENT => (
             "Fills a box around this object with fog, seen from outside too.",

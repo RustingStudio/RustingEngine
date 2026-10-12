@@ -92,6 +92,89 @@ impl Default for Sprite {
     }
 }
 
+/// Plays frames of a sprite sheet on the [`Sprite`] of the same object by
+/// writing its `region`. The sheet is a grid of `columns` x `rows` equal
+/// frames numbered row by row from the top left; the animation shows
+/// `count` of them starting at `first`, `fps` per second of fixed time.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpriteAnimation {
+    pub columns: u32,
+    pub rows: u32,
+    pub first: u32,
+    pub count: u32,
+    pub fps: f32,
+    /// Start over after the last frame; otherwise hold it.
+    pub looping: bool,
+    /// Seconds of fixed time played so far.
+    #[serde(skip)]
+    pub elapsed: f64,
+}
+
+impl Default for SpriteAnimation {
+    fn default() -> Self {
+        Self {
+            columns: 1,
+            rows: 1,
+            first: 0,
+            count: 1,
+            fps: 10.0,
+            looping: true,
+            elapsed: 0.0,
+        }
+    }
+}
+
+impl SpriteAnimation {
+    /// The sheet frame showing now.
+    #[must_use]
+    pub fn frame(&self) -> u32 {
+        let count = self.count.max(1);
+        // Whole frames only, so a frame shows for exactly 1 / fps seconds.
+        // The tolerance keeps whole-nanosecond fixed steps (six 1/60 s steps
+        // at 10 fps sum to 0.99999996 frames) from showing a frame a tick
+        // late. ponytail: the shortfall grows about 1e-3 frames per 40
+        // minutes of play at 60 Hz; count ticks instead if longer runs drift.
+        let played =
+            (self.elapsed * f64::from(self.fps.max(0.0)) + 1e-3).floor() as u32;
+        let step = if self.looping {
+            played % count
+        } else {
+            played.min(count - 1)
+        };
+        self.first + step
+    }
+
+    /// `[u0, v0, u1, v1]` of `frame` in the sheet, v down.
+    #[must_use]
+    pub fn region(&self, frame: u32) -> [f32; 4] {
+        let (columns, rows) = (self.columns.max(1), self.rows.max(1));
+        let (column, row) = (frame % columns, (frame / columns).min(rows - 1));
+        let (width, height) = (1.0 / columns as f32, 1.0 / rows as f32);
+        [
+            column as f32 * width,
+            row as f32 * height,
+            (column + 1) as f32 * width,
+            (row + 1) as f32 * height,
+        ]
+    }
+}
+
+/// Per fixed step: advances every sprite animation and shows its frame.
+pub(super) fn animate_sprites(
+    time: Res<FrameTime>,
+    mut sprites: Query<(&mut SpriteAnimation, &mut Sprite)>,
+) {
+    let dt = time.fixed_delta.as_secs_f64();
+    for (mut animation, mut sprite) in &mut sprites {
+        animation.elapsed += dt;
+        let region = animation.region(animation.frame());
+        if sprite.region != region {
+            sprite.region = region;
+        }
+    }
+}
+
 /// Farthest column or row `set_tile` may grow a map to; a stray coordinate
 /// must not allocate gigabytes.
 pub const MAX_TILE_CELLS: usize = 4096;
@@ -608,5 +691,67 @@ pub(super) fn platformer_move(
             .floor
             .and_then(|floor| Some((floor, floor_at(floor)?)));
         transform.position = moved.position;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sprite_animations_step_through_sheet_frames_on_the_fixed_tick() {
+        let mut app = super::super::App::new();
+        let step = app.world().resource::<FrameTime>().fixed_delta;
+        // A 4 x 2 sheet; the walk is frames 2..5, wrapping onto row two.
+        let walk = app.spawn((
+            Sprite::default(),
+            SpriteAnimation {
+                columns: 4,
+                rows: 2,
+                first: 2,
+                count: 4,
+                fps: 1.0 / step.as_secs_f32(),
+                ..SpriteAnimation::default()
+            },
+        ));
+        let once = app.spawn((
+            Sprite::default(),
+            SpriteAnimation {
+                columns: 4,
+                rows: 2,
+                count: 2,
+                fps: 1.0 / step.as_secs_f32(),
+                looping: false,
+                ..SpriteAnimation::default()
+            },
+        ));
+        // Ten frames a second on the 60 Hz step: a new frame every six
+        // steps, though six whole-nanosecond steps sum just under 0.1 s.
+        let slow = app.spawn((
+            Sprite::default(),
+            SpriteAnimation {
+                count: 8,
+                columns: 8,
+                fps: 10.0,
+                ..SpriteAnimation::default()
+            },
+        ));
+        let mut frames = Vec::new();
+        let mut slow_frames = Vec::new();
+        for _ in 0..6 {
+            app.update(step).unwrap();
+            let animation =
+                |entity| app.world().get::<SpriteAnimation>(entity).unwrap();
+            frames.push((animation(walk).frame(), animation(once).frame()));
+            slow_frames.push(animation(slow).frame());
+        }
+        let region = |entity| app.world().get::<Sprite>(entity).unwrap().region;
+        assert_eq!(region(walk), [0.0, 0.5, 0.25, 1.0], "frame 4 is row two");
+        assert_eq!(
+            frames,
+            [(3, 1), (4, 1), (5, 1), (2, 1), (3, 1), (4, 1)],
+            "one frame per fixed step; the walk loops, the other holds"
+        );
+        assert_eq!(slow_frames, [0, 0, 0, 0, 0, 1]);
     }
 }

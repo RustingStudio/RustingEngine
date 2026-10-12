@@ -245,6 +245,7 @@ each one's fields, defaults and an example:
 - `rusting.fog_volume`: A box of uniform fog of half size extents around the object, turned and scaled with it: mist in a valley, smoke in a room.
 - `rusting.decal`: Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain.
 - `rusting.sprite`: A flat image of size (world units, before the object's scale) in the object's XY plane, centered on it and facing +Z: a 2D character, a pickup, a background card.
+- `rusting.sprite_animation`: Plays a sprite sheet on the rusting.sprite of the same object by setting its region.
 - `rusting.post_volume`: Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside.
 - `rusting.bloom`: Glow around pixels brighter than threshold (linear, before exposure), spread over the screen before tone mapping.
 - `rusting.auto_exposure`: Eye adaptation: every frame the renderer measures the average brightness of the lit image and moves exposure toward key / average, clamped to min_exposure..max_exposure, at speed per second (the first frame adapts at once).

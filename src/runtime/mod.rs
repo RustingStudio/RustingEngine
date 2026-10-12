@@ -326,6 +326,7 @@ impl Default for App {
                     game_feel::decay_camera_shake,
                     game_feel::fade_flashes,
                     game_feel::run_state_machines,
+                    two_d::animate_sprites,
                 )
                     .chain(),
                 animation::advance_animations,

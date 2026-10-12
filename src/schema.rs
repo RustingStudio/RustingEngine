@@ -916,6 +916,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"texture": "sprites/hero.png", "color": [1.0, 1.0, 1.0, 1.0], "size": [1.0, 1.0], "region": [0.0, 0.0, 0.25, 1.0], "flip_x": false, "flip_y": false, "layer": 0}),
     },
     ComponentSection {
+        key: "rusting.sprite_animation",
+        summary: "Plays a sprite sheet on the rusting.sprite of the same object by setting its region. The sheet is a grid of columns x rows equal frames, numbered row by row from the top left; the animation shows count frames starting at first, fps frames per second of fixed time, so it replays the same at the same tick. looping starts over after the last frame; false holds it. Swap first and count from code to change animations, for example walk and jump rows.",
+        gpu: NO_GPU,
+        example: || json!({"columns": 4, "rows": 2, "first": 0, "count": 4, "fps": 10.0, "looping": true}),
+    },
+    ComponentSection {
         key: "rusting.post_volume",
         summary: "Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside. Higher priority wins where volumes overlap. Fog and grading without a volume apply everywhere else; a hall with fog and a sickly grade and an office with a warm grade each get one.",
         gpu: NO_GPU,

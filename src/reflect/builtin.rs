@@ -26,9 +26,9 @@ use crate::runtime::{
     QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
     ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
     SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Sprite,
-    Squash, StateAction, StateTransition, Terrain, TerrainLayer, TileKind,
-    TileMap, ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat,
-    Vehicle, WaterBody, Wheel,
+    SpriteAnimation, Squash, StateAction, StateTransition, Terrain,
+    TerrainLayer, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
+    TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -1417,6 +1417,18 @@ crate::reflect! {
             doc: "canvas layer; higher layers draw over lower ones whatever their z",
         },
         #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+    }
+}
+
+crate::reflect! {
+    struct SpriteAnimation {
+        columns: u32 { min: 1.0, doc: "frames across the sheet" },
+        rows: u32 { min: 1.0, doc: "frames down the sheet" },
+        first: u32 { doc: "first frame shown, counted row by row from the top left" },
+        count: u32 { min: 1.0, doc: "frames in the animation" },
+        fps: f32 { unit: "frames/s", min: 0.0 },
+        looping: bool { doc: "start over after the last frame; otherwise hold it" },
+        #[skip] elapsed: f64,
     }
 }
 

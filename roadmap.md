@@ -3479,7 +3479,17 @@ Depends on: Milestones 3, 4, and 10 (2D physics).
     skipping the pass, unflipping u in the shader, binding the first batch's
     image for every batch, or drawing every batch from instance 0 each fails
     it.
-- [ ] Sprite sheets and sprite animation.
+- [x] Sprite sheets and sprite animation.
+  `rusting.sprite_animation` (columns, rows, first, count, fps, looping)
+  plays a grid sprite sheet on the object's `rusting.sprite` by writing its
+  region each fixed step, so a replay shows the same frame at the same tick;
+  it is registered for scenes, snapshots, reflection, the schema and the
+  inspector help. Evidence 2026-10-12:
+  `sprite_animations_step_through_sheet_frames_on_the_fixed_tick` passes;
+  dropping the loop wrap, the hold on the last frame, the first-frame offset,
+  the row step, the time advance, the region write, or the tolerance that
+  keeps six whole-nanosecond 1/60 s steps from showing a 10 fps frame a tick
+  late each fails it.
 - [ ] Tilemaps with multiple layers, autotiling rules, tile collision shapes, and tile navigation data.
 - [ ] 2D lights, shadows from occluder polygons, and normal-mapped sprites.
 - [ ] 2D GPU particles with physics-event emission.
