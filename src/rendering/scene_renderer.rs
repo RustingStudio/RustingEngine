@@ -656,6 +656,8 @@ struct SpritePush {
     ambient: [f32; 4],
     /// How many entries of the light buffer to use.
     light_count: u32,
+    /// How many entries of the occluder edge buffer to use.
+    edge_count: u32,
 }
 
 /// One 2D light as the sprite shader reads it.
@@ -670,6 +672,10 @@ struct SpriteLight {
 
 /// Sprites take only the first lights; each costs a test per sprite pixel.
 const MAX_LIGHTS_2D: usize = 16;
+
+/// Occluder edges past this many cast no shadow; each costs a crossing
+/// test per light per sprite pixel.
+const MAX_OCCLUDER_EDGES_2D: usize = 256;
 
 /// One sprite of the 2D pass, read per instance.
 #[repr(C)]
@@ -5428,11 +5434,30 @@ impl SceneRenderer {
                 .map_err(|error| SceneRenderError(error.to_string()))?
                 .copy_from_slice(&lights);
             self.counters.upload_bytes += light_upload.size();
+            let edges_2d = &render_world.occluder_edges_2d[..render_world
+                .occluder_edges_2d
+                .len()
+                .min(MAX_OCCLUDER_EDGES_2D)];
+            let edges = if edges_2d.is_empty() {
+                &[[0.0; 4]][..]
+            } else {
+                edges_2d
+            };
+            let edge_upload = self.frame_contexts[self.frame_index]
+                .transient
+                .allocate_slice::<[f32; 4]>(edges.len() as u64)
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            edge_upload
+                .write()
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .copy_from_slice(edges);
+            self.counters.upload_bytes += edge_upload.size();
             let ambient = render_world.ambient_2d.unwrap_or([1.0; 3]);
             let push = SpritePush {
                 view_projection: camera.view_projection,
                 ambient: [ambient[0], ambient[1], ambient[2], 0.0],
                 light_count: lights_2d.len() as u32,
+                edge_count: edges_2d.len() as u32,
             };
             let pipeline = active.sprite_pipeline.clone();
             commands
@@ -5463,6 +5488,7 @@ impl SceneRenderer {
                             0, view, sampler,
                         ),
                         WriteDescriptorSet::buffer(1, light_upload.clone()),
+                        WriteDescriptorSet::buffer(2, edge_upload.clone()),
                     ],
                     [],
                 )
@@ -11774,6 +11800,7 @@ layout(push_constant) uniform Push {
     mat4 view_projection;
     vec4 ambient;
     uint light_count;
+    uint edge_count;
 } push;
 const vec2 CORNERS[6] = vec2[](
     vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(0.5, 0.5),
@@ -11803,6 +11830,12 @@ layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
 layout(location = 2) in vec2 v_world;
 layout(location = 0) out vec4 f_color;
+layout(push_constant) uniform Push {
+    mat4 view_projection;
+    vec4 ambient;
+    uint light_count;
+    uint edge_count;
+} push;
 layout(set = 0, binding = 0) uniform sampler2D image;
 struct Light {
     vec4 position_radius;
@@ -11811,15 +11844,38 @@ struct Light {
 layout(set = 0, binding = 1) readonly buffer Lights {
     Light lights[];
 };
-layout(push_constant) uniform Push {
-    mat4 view_projection;
-    vec4 ambient;
-    uint light_count;
-} push;
+// Occluder edges as [ax, ay, bx, by] in world space.
+layout(set = 0, binding = 2) readonly buffer Edges {
+    vec4 edges[];
+};
+float cross2(vec2 a, vec2 b) {
+    return a.x * b.y - a.y * b.x;
+}
+// Whether the segment from p to q crosses any occluder edge.
+bool blocked(vec2 p, vec2 q) {
+    vec2 r = q - p;
+    for (uint i = 0; i < push.edge_count; i++) {
+        vec2 a = edges[i].xy;
+        vec2 s = edges[i].zw - a;
+        float d = cross2(r, s);
+        if (abs(d) < 1e-8) {
+            continue;
+        }
+        float t = cross2(a - p, s) / d;
+        float u = cross2(a - p, r) / d;
+        if (t > 0.0 && t < 1.0 && u >= 0.0 && u <= 1.0) {
+            return true;
+        }
+    }
+    return false;
+}
 void main() {
     vec3 light = push.ambient.rgb;
     for (uint i = 0; i < push.light_count; i++) {
         vec4 position_radius = lights[i].position_radius;
+        if (blocked(v_world, position_radius.xy)) {
+            continue;
+        }
         float reach = clamp(
             1.0 - distance(v_world, position_radius.xy) / max(position_radius.w, 1e-4),
             0.0, 1.0
@@ -24017,6 +24073,56 @@ mod tests {
         scene.render_world.lights_2d = many;
         let far = brightness(&mut scene, [9, 16]);
         assert!(far.iter().all(|&c| c < 30), "{far:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn light_occluders_2d_shadow_sprites_behind_their_edges() {
+        use crate::runtime::{ExtractedLight2d, ExtractedSprite};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A plain white 1 m sprite in the dark, lit from its left edge, with
+        // a short wall at x = 0 from y = -0.2 to 0.2; pixels are 1/16 m.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mut matrix = [[0.0; 4]; 4];
+        matrix[0][0] = 1.0;
+        matrix[1][1] = 1.0;
+        matrix[2][2] = 1.0;
+        matrix[3] = [0.0, 0.0, 0.0, 1.0];
+        scene.render_world.sprites = vec![ExtractedSprite {
+            matrix,
+            color: [1.0; 4],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            texture: None,
+            layer: 0,
+        }];
+        scene.render_world.ambient_2d = Some([0.0; 3]);
+        scene.render_world.lights_2d = vec![ExtractedLight2d {
+            position: [-0.45, 0.0, 0.0],
+            color: [3.0; 3],
+            radius: 2.0,
+        }];
+        let wall = [[0.0, -0.2, 0.0, 0.2], [0.0, 0.2, 0.0, -0.2]];
+        scene.render_world.occluder_edges_2d = wall.to_vec();
+        let green =
+            |scene: &mut SlabScene, pixel| render_pixel(scene, pixel)[1];
+        let behind = green(&mut scene, [21, 16]);
+        assert!(behind < 30, "behind the wall: {behind}");
+        let past = green(&mut scene, [21, 9]);
+        assert!(past > 150, "past the wall's end: {past}");
+        let front = green(&mut scene, [12, 16]);
+        assert!(front > 150, "in front of the wall: {front}");
+        // Edges past the 256th cast nothing.
+        let mut edges = vec![[5.0, 5.0, 5.0, 6.0]; MAX_OCCLUDER_EDGES_2D];
+        edges.extend(wall);
+        scene.render_world.occluder_edges_2d = edges;
+        let behind = green(&mut scene, [21, 16]);
+        assert!(behind > 150, "the wall past the cap: {behind}");
     }
 
     #[test]

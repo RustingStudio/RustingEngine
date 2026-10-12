@@ -10,7 +10,7 @@ use crate::assets::{AlphaMode, MaterialAsset, MaterialModel};
 use crate::runtime::ClothSheet;
 use crate::runtime::Rope;
 use crate::runtime::WorldText;
-use crate::runtime::{Ambient2d, Light2d};
+use crate::runtime::{Ambient2d, Light2d, LightOccluder2d};
 use crate::runtime::{
     AmbientLight, AmbientOcclusion, Antialiasing, Articulation, AutoExposure,
     AutoSimulation, AxisLock, AxisMotion, Bloom, BurstEmitter, CameraScreen,
@@ -1438,6 +1438,12 @@ crate::reflect! {
         color: [f32; 3] { unit: "linear rgb", min: 0.0 },
         intensity: f32 { min: 0.0 },
         radius: f32 { unit: "m", min: 0.0, doc: "sprites farther than this in XY get none of the light" },
+    }
+}
+
+crate::reflect! {
+    struct LightOccluder2d {
+        points: Vec<[f32; 2]> { unit: "m", doc: "closed outline in the object's XY plane that blocks 2D lights" },
     }
 }
 

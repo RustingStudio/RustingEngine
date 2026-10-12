@@ -130,6 +130,24 @@ impl Default for Ambient2d {
     }
 }
 
+/// A polygon that blocks every [`Light2d`]: sprite pixels whose straight
+/// line to a light crosses one of its edges get none of that light. The
+/// renderer uses the first 256 edges in entity order.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LightOccluder2d {
+    /// Closed outline in the object's XY plane.
+    pub points: Vec<[f32; 2]>,
+}
+
+impl Default for LightOccluder2d {
+    fn default() -> Self {
+        Self {
+            points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+        }
+    }
+}
+
 /// Plays frames of a sprite sheet on the [`Sprite`] of the same object by
 /// writing its `region`. The sheet is a grid of `columns` x `rows` equal
 /// frames numbered row by row from the top left; the animation shows

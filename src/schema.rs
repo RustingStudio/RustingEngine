@@ -928,6 +928,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"color": [1.0, 0.8, 0.5], "intensity": 1.5, "radius": 4.0}),
     },
     ComponentSection {
+        key: "rusting.light_occluder_2d",
+        summary: "A closed polygon (points, in the object's XY plane) that casts shadows from every rusting.light_2d: a sprite pixel whose straight line to a light crosses one of its edges gets none of that light. Pixels inside the polygon are shadowed too. The renderer uses the first 256 edges in entity order.",
+        gpu: "an edge crossing test per edge per light per sprite pixel",
+        example: || json!({"points": [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]}),
+    },
+    ComponentSection {
         key: "rusting.ambient_2d",
         summary: "The light every rusting.sprite gets before any rusting.light_2d: color (linear rgb) multiplies each sprite, so a dark value makes a night scene that only lights reveal. Without one, sprites keep their full color and lights brighten them. The first one in entity order is used.",
         gpu: NO_GPU,

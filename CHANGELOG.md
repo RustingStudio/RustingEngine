@@ -4,6 +4,7 @@
 
 ### Added
 
+- Rendering: 2D light occluder polygons cast shadows on sprites
 - Rendering: round 2D lights and a 2D ambient color light sprites in the sprite pass
 - Rendering: `rusting.sprite_animation` plays grid sprite sheets on a sprite, frame-stepped on the fixed tick
 - Rendering: 2D sprite pass draws `rusting.sprite` in canvas order over the frame, one instanced draw per image batch

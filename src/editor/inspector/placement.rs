@@ -19,9 +19,9 @@ use crate::runtime::{
     AUTO_EXPOSURE_COMPONENT, BACKGROUND_COMPONENT, BLOOM_COMPONENT,
     DECAL_COMPONENT, ENVIRONMENT_MAP_COMPONENT, FOG_COMPONENT,
     FOG_VOLUME_COMPONENT, HUD_ELEMENT_COMPONENT, LIGHT_2D_COMPONENT,
-    POST_VOLUME_COMPONENT, PROCEDURAL_SKY_COMPONENT, SKY_LIGHT_COMPONENT,
-    SPRITE_ANIMATION_COMPONENT, SPRITE_COMPONENT, TILE_MAP_COMPONENT,
-    TONE_MAPPING_COMPONENT,
+    LIGHT_OCCLUDER_2D_COMPONENT, POST_VOLUME_COMPONENT,
+    PROCEDURAL_SKY_COMPONENT, SKY_LIGHT_COMPONENT, SPRITE_ANIMATION_COMPONENT,
+    SPRITE_COMPONENT, TILE_MAP_COMPONENT, TONE_MAPPING_COMPONENT,
 };
 use crate::runtime::{
     ANIMATION_COMPONENT, ARTICULATION_COMPONENT, AUTO_SIMULATION_COMPONENT,
@@ -501,6 +501,10 @@ pub(in crate::editor) fn component_help(
         LIGHT_2D_COMPONENT => (
             "Lights nearby sprites with a round glow centered on this object.",
             "Torches, lamps, glowing pickups in 2D scenes.",
+        ),
+        LIGHT_OCCLUDER_2D_COMPONENT => (
+            "Blocks 2D lights with a polygon so it casts shadows.",
+            "Walls, pillars, crates that throw shadows from torches.",
         ),
         AMBIENT_2D_COMPONENT => (
             "Sets the light every sprite gets before 2D lights.",

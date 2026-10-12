@@ -168,6 +168,9 @@ pub struct RenderWorld {
     pub sprites: Vec<ExtractedSprite>,
     /// Each [`Light2d`](super::Light2d) in entity order.
     pub lights_2d: Vec<ExtractedLight2d>,
+    /// World-space edges `[ax, ay, bx, by]` of each
+    /// [`LightOccluder2d`](super::LightOccluder2d) in entity order.
+    pub occluder_edges_2d: Vec<[f32; 4]>,
     /// The first [`Ambient2d`](super::Ambient2d) color in entity order.
     pub ambient_2d: Option<[f32; 3]>,
     pub bloom: Option<super::Bloom>,
@@ -520,6 +523,37 @@ pub fn extract_render_world(world: &mut World) {
         lights.sort_by_key(|(entity, _)| *entity);
         lights.into_iter().map(|(_, light)| light).collect()
     };
+    let occluder_edges_2d = {
+        let mut query =
+            world
+                .query::<(Entity, &GlobalTransform, &super::LightOccluder2d)>();
+        let mut occluders = query
+            .iter(world)
+            .map(|(entity, transform, occluder)| {
+                let m = transform.matrix;
+                let points = occluder
+                    .points
+                    .iter()
+                    .map(|&[x, y]| {
+                        [
+                            m[0][0] * x + m[1][0] * y + m[3][0],
+                            m[0][1] * x + m[1][1] * y + m[3][1],
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                let edges = (0..points.len())
+                    .map(|i| {
+                        let [a, b] =
+                            [points[i], points[(i + 1) % points.len()]];
+                        [a[0], a[1], b[0], b[1]]
+                    })
+                    .collect::<Vec<_>>();
+                (entity.index(), edges)
+            })
+            .collect::<Vec<_>>();
+        occluders.sort_by_key(|(entity, _)| *entity);
+        occluders.into_iter().flat_map(|(_, edges)| edges).collect()
+    };
     let ambient_2d = world
         .query::<(Entity, &super::Ambient2d)>()
         .iter(world)
@@ -770,6 +804,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.decals = decals;
     render_world.sprites = sprites;
     render_world.lights_2d = lights_2d;
+    render_world.occluder_edges_2d = occluder_edges_2d;
     render_world.ambient_2d = ambient_2d;
     render_world.bloom = bloom;
     render_world.auto_exposure = auto_exposure;
@@ -1930,6 +1965,40 @@ mod tests {
             * nalgebra::Vector4::new(0.5, 0.5, 0.0, 1.0);
         assert_eq!(corner, nalgebra::Vector4::new(4.0, 2.0, 0.0, 1.0));
         assert_eq!(sprites[0].uv, [0.5, 0.0, 0.25, 1.0], "flip_x swaps u");
+    }
+
+    #[test]
+    fn light_occluders_2d_extract_closed_world_edges_in_entity_order() {
+        use crate::runtime::LightOccluder2d;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        // Scaled by 2 and moved, so points land in world space.
+        let mut transform = Transform::new([10.0, 20.0, 5.0]);
+        transform.scale = [2.0; 3];
+        app.spawn((
+            transform,
+            LightOccluder2d {
+                points: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            },
+        ));
+        app.spawn((
+            Transform::default(),
+            LightOccluder2d {
+                points: vec![[0.0, 0.0], [3.0, 0.0]],
+            },
+        ));
+        app.update(Duration::ZERO).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        assert_eq!(
+            render_world.occluder_edges_2d,
+            [
+                [10.0, 20.0, 12.0, 20.0],
+                [12.0, 20.0, 10.0, 22.0],
+                [10.0, 22.0, 10.0, 20.0],
+                [0.0, 0.0, 3.0, 0.0],
+                [3.0, 0.0, 0.0, 0.0],
+            ]
+        );
     }
 
     #[test]

@@ -3504,7 +3504,18 @@ Depends on: Milestones 3, 4, and 10 (2D physics).
     dropping the entity sort, taking the last ambient, dropping intensity,
     the sixteen-light cap, the white default ambient, the distance fade, the
     light color, or the ambient in the shader each fails one of them.
-  - [ ] Shadows from `LightOccluder2d` polygons.
+  - [x] Shadows from `LightOccluder2d` polygons.
+    `rusting.light_occluder_2d` (points) is registered like the lights.
+    Extraction turns each closed outline into world-space edges in entity
+    order; the sprite shader skips a light for a pixel whose segment to the
+    light crosses any of the first 256 edges, read from a second storage
+    buffer. Evidence 2026-10-12:
+    `light_occluders_2d_extract_closed_world_edges_in_entity_order` and
+    `light_occluders_2d_shadow_sprites_behind_their_edges` (gpu-tests) pass;
+    dropping the shadow test, either bound of the crossing test, the 256-edge
+    cap, the entity sort, the closing edge, or the world transform each fails
+    one of them. Counting the stand-in edge uploaded when there are none
+    survives, as that edge is degenerate and skipped.
   - [ ] Normal-mapped sprites.
 - [ ] 2D GPU particles with physics-event emission.
 - [ ] 2D camera with smoothing, limits, and pixel-perfect mode.
