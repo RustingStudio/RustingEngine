@@ -80,14 +80,28 @@ impl FramePacer {
 
         let interval =
             Duration::from_secs_f64(1.0 / f64::from(settings.max_fps.max(1)));
-        let now = Instant::now();
-        if now >= self.next_frame {
-            self.next_frame = now + interval;
-            window.request_redraw();
-        } else {
-            event_loop
-                .set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+        match self.due(Instant::now(), interval) {
+            Ok(()) => window.request_redraw(),
+            Err(deadline) => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            }
         }
+    }
+
+    /// Whether a frame is due at `now`, or else the instant to wait for.
+    /// Deadlines step by whole intervals from the last one, so a late wake
+    /// or a slow frame does not push every later frame back. A stall longer
+    /// than one interval restarts the schedule instead of bursting frames
+    /// to catch up.
+    fn due(&mut self, now: Instant, interval: Duration) -> Result<(), Instant> {
+        if now < self.next_frame {
+            return Err(self.next_frame);
+        }
+        self.next_frame += interval;
+        if self.next_frame <= now {
+            self.next_frame = now + interval;
+        }
+        Ok(())
     }
 }
 
@@ -122,5 +136,37 @@ mod tests {
             pick_present_mode(&[PresentMode::Mailbox], true),
             PresentMode::Mailbox
         );
+    }
+
+    #[test]
+    fn the_limiter_holds_its_rate_through_late_wakes_and_uneven_frames() {
+        let interval = Duration::from_millis(10);
+        let start = Instant::now();
+        let mut pacer = FramePacer { next_frame: start };
+        let mut now = start;
+        let mut frames = Vec::new();
+        for frame in 0..200u64 {
+            // The OS wakes the loop 0.5 ms after the deadline it asked for.
+            while let Err(deadline) = pacer.due(now, interval) {
+                now = deadline + Duration::from_micros(500);
+            }
+            frames.push(now - start);
+            // CPU and GPU work from 1 to 9.1 ms, and one 35 ms hitch.
+            now += if frame == 100 {
+                Duration::from_millis(35)
+            } else {
+                Duration::from_micros(1000 + frame * 37 % 8100)
+            };
+        }
+        // Before the hitch, frame k starts 0.5 ms after k intervals.
+        for (k, at) in frames[1..=100].iter().enumerate() {
+            let k = k as u32 + 1;
+            assert_eq!(*at, interval * k + Duration::from_micros(500), "{k}");
+        }
+        // The hitch restarts the schedule: no burst of catch-up frames.
+        let gaps: Vec<_> = frames.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.iter().all(|gap| *gap >= interval), "{gaps:?}");
+        assert_eq!(gaps[100], Duration::from_millis(35));
+        assert!(gaps[102..].iter().all(|gap| *gap == interval), "{gaps:?}");
     }
 }

@@ -3258,6 +3258,21 @@ Depends on: Milestones 3 and 4.
     `vulkano-taskgraph` or raw command buffers (owner decision, see
     `issues.md`).
 - [ ] Frame pacing that holds a stable presentation cadence under variable GPU load.
+  - [x] FPS limiter cadence: `FramePacer` steps its deadlines by whole
+    intervals from the last one, instead of from the moment a frame
+    started, so late wakes and uneven frames no longer push every later
+    frame back. A stall longer than one interval restarts the schedule
+    instead of bursting frames to catch up.
+    Evidence: unit test
+    `the_limiter_holds_its_rate_through_late_wakes_and_uneven_frames`
+    (simulated clock, 100 FPS cap, 0.5 ms late wakes, 1 to 9.1 ms frames,
+    one 35 ms hitch). Frame k starts at exactly k intervals plus 0.5 ms;
+    no gap is shorter than one interval; after the hitch the 10 ms
+    cadence resumes. Mutations caught: the old `now + interval` schedule
+    drifts to 21 ms by frame 2; without the restart, five frames burst
+    out 4.7 ms apart after the hitch.
+  - [ ] Cadence on real displays under variable GPU load (FIFO and Mailbox
+    present timing, frames in flight). Hardware only, not verifiable here.
 - [ ] Measure and report end-to-end input latency.
 
 ### Exit gate
