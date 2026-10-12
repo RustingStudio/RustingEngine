@@ -326,10 +326,13 @@ struct PendingCullReadback {
 pub const GPU_CULL_MIN_INSTANCES: usize = 4096;
 
 /// Below this many instances, `Auto` draws everything: the few off-view
-/// draws cost less than a cull dispatch or a visible-list upload.
-// ponytail: untimed guess like `GPU_CULL_MIN_INSTANCES`; tune from the
-// `CullingStats` break-even on real hardware.
-pub const AUTO_DIRECT_MAX_INSTANCES: usize = 64;
+/// draws cost less than a cull dispatch or a visible-list upload. Measured
+/// by the ignored test `auto_culling_break_even` on an RTX 3060 (spheres,
+/// two thirds off view): culling saved nothing up to 128 instances and
+/// started to pay at 256, with one shared material or one per object.
+// ponytail: measured on one discrete GPU only; rerun the test on an
+// integrated GPU and lower it there if culling pays sooner.
+pub const AUTO_DIRECT_MAX_INSTANCES: usize = 128;
 
 /// Picks the culling path for a frame. `Auto` skips culling for scenes
 /// under [`AUTO_DIRECT_MAX_INSTANCES`], even with GPU bodies, since direct
@@ -22663,6 +22666,86 @@ mod tests {
         for (pixel, want) in quadrants {
             let got = render_pixel(&mut scene, pixel);
             assert_eq!(got.map(|c| c > 150), want, "pixel {pixel:?}: {got:?}");
+        }
+    }
+
+    /// Frame time of drawing everything against CPU frustum culling, by
+    /// instance count, for one shared material and for one material per
+    /// object. `AUTO_DIRECT_MAX_INSTANCES` sits where culling starts to pay.
+    #[test]
+    #[ignore = "timing: run on a quiet machine with --release --features gpu-tests -- --ignored --nocapture"]
+    fn auto_culling_break_even() {
+        use crate::runtime::ExtractedRenderable;
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let frame_time = |count: usize, shared: bool, mode: CullingMode| {
+            let mut scene = SlabScene::with_extent(&[], [640, 360]);
+            let sphere = scene.assets.meshes.insert(
+                crate::assets::procedural_primitive_mesh(
+                    crate::PrimitiveShape::Sphere,
+                ),
+            );
+            let one = scene.assets.materials.insert(MaterialAsset::default());
+            // A row from x -3 to 3 under a ±1 view: two thirds off view.
+            scene.render_world.renderables = (0..count)
+                .map(|i| ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(
+                        i as u32 + 1,
+                    )
+                    .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: (Matrix4::new_translation(&Vector3::new(
+                            -3.0 + 6.0 * i as f32 / count as f32,
+                            0.0,
+                            0.0,
+                        )) * Matrix4::new_scaling(0.05))
+                        .into(),
+                    },
+                    mesh: sphere,
+                    material: if shared {
+                        one
+                    } else {
+                        scene.assets.materials.insert(MaterialAsset {
+                            roughness: i as f32 / count as f32,
+                            ..MaterialAsset::default()
+                        })
+                    },
+                    cast_shadows: false,
+                    receive_shadows: false,
+                    bounds: None,
+                })
+                .collect();
+            scene.render_world.renderables_revision += 1;
+            scene.render_world.culling = mode;
+            let mut times = Vec::new();
+            for frame in 0..120 {
+                let start = std::time::Instant::now();
+                let before = scene.now();
+                scene
+                    .render(before)
+                    .then_signal_fence_and_flush()
+                    .unwrap()
+                    .wait(None)
+                    .unwrap();
+                if frame >= 20 {
+                    times.push(start.elapsed().as_secs_f64() * 1e6);
+                }
+            }
+            times.sort_by(f64::total_cmp);
+            times[times.len() / 2]
+        };
+        println!("instances  shared: direct  cpu-cull   per-object: direct  cpu-cull  (median us)");
+        for count in [8, 16, 32, 64, 128, 256, 512, 1024] {
+            let row = [true, false].map(|shared| {
+                [CullingMode::Disabled, CullingMode::Frustum]
+                    .map(|mode| frame_time(count, shared, mode))
+            });
+            println!(
+                "{count:>9}  {:>14.0} {:>9.0}   {:>18.0} {:>9.0}",
+                row[0][0], row[0][1], row[1][0], row[1][1]
+            );
         }
     }
 

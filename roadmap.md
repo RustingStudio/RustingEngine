@@ -4657,7 +4657,23 @@ Depends on: Milestones 3, 4, and 21.
   indirect instances and a GPU rule event every tick. Disabling the CPU
   frustum test fails the new test. Full check: workspace lib 965
   passed, gpu-tests run 1127 passed.
-- [ ] `CullingMode::Auto` skips culling overhead below its tested scene-size threshold.
+- [x] `CullingMode::Auto` skips culling overhead below its tested scene-size threshold.
+  Evidence (2026-10-12, lane render, RTX 3060): the ignored timing test
+  `scene_renderer::tests::auto_culling_break_even` renders 8 to 1024
+  spheres in a row two thirds off view at 640x360, drawing everything
+  against CPU frustum culling, with one shared material and with one per
+  object (median of 100 frames after 20 warm-up). Three runs: up to 128
+  instances the two stay within noise (128: 168/165, 175/173 us shared;
+  485/490, 491/496 us per object); at 256 culling pays (per object
+  725/677, 778/703 us) and at 512 clearly (1094/720 us). So
+  `AUTO_DIRECT_MAX_INSTANCES` went from an untimed 64 to 128: `Auto` draws
+  scenes under 128 instances with no cull work, as the existing tests
+  check (`select_culling_path` unit test; GPU test
+  `gpu_bodies_are_not_culled_by_their_stale_cpu_transform` sees no
+  Culling pass). Rerun with `cargo test --release --features gpu-tests
+  --lib auto_culling_break_even -- --ignored --nocapture`. Limit:
+  measured on one discrete GPU; an integrated GPU may want a lower value.
+  Full check: workspace lib 973 passed, gpu-tests run 1139 passed.
 - [ ] Capability fallback behavior on the low-end baseline.
 
 ### Golden-image tests
