@@ -647,6 +647,25 @@ struct LightUpload {
     cookie: [f32; 4],
 }
 
+/// One sprite of the 2D pass, read per instance.
+#[repr(C)]
+#[derive(BufferContents, Vertex, Clone, Copy)]
+struct SpriteInstance {
+    /// Columns of the unit quad's model matrix.
+    #[format(R32G32B32A32_SFLOAT)]
+    column0: [f32; 4],
+    #[format(R32G32B32A32_SFLOAT)]
+    column1: [f32; 4],
+    #[format(R32G32B32A32_SFLOAT)]
+    column2: [f32; 4],
+    #[format(R32G32B32A32_SFLOAT)]
+    column3: [f32; 4],
+    #[format(R32G32B32A32_SFLOAT)]
+    color: [f32; 4],
+    #[format(R32G32B32A32_SFLOAT)]
+    uv: [f32; 4],
+}
+
 #[repr(C)]
 #[derive(BufferContents, Clone, Copy)]
 struct DebugPushConstants {
@@ -2916,6 +2935,12 @@ impl SceneRenderer {
                 .into_iter()
                 .chain(light_cookies(render_world))
                 .chain(frame_decals(render_world, decal_limit).1)
+                .chain(
+                    render_world
+                        .sprites
+                        .iter()
+                        .filter_map(|sprite| sprite.texture),
+                )
                 .chain(render_world.color_lut.map(|(texture, _)| texture))
                 .collect(),
         )?;
@@ -5322,6 +5347,78 @@ impl SceneRenderer {
                 .map_err(|error| SceneRenderError(error.to_string()))?;
         }
         passes.end(&mut commands)?;
+        if !render_world.sprites.is_empty() {
+            passes.begin(&mut commands, FramePass::Sprites)?;
+            let sprites = &render_world.sprites;
+            let instances = sprites
+                .iter()
+                .map(|sprite| SpriteInstance {
+                    column0: sprite.matrix[0],
+                    column1: sprite.matrix[1],
+                    column2: sprite.matrix[2],
+                    column3: sprite.matrix[3],
+                    color: sprite.color,
+                    uv: sprite.uv,
+                })
+                .collect::<Vec<_>>();
+            let upload = self.frame_contexts[self.frame_index]
+                .transient
+                .allocate_slice::<SpriteInstance>(instances.len() as u64)
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            upload
+                .write()
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .copy_from_slice(&instances);
+            self.counters.upload_bytes += upload.size();
+            let pipeline = active.sprite_pipeline.clone();
+            commands
+                .set_viewport(0, [scene_viewport.clone()].into_iter().collect())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .set_scissor(0, [scene_scissor].into_iter().collect())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .bind_pipeline_graphics(pipeline.clone())
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .push_constants(
+                    pipeline.layout().clone(),
+                    0,
+                    camera.view_projection,
+                )
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .bind_vertex_buffers(0, upload)
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            for batch in crate::runtime::sprite_batches(sprites) {
+                let (view, sampler) = sprites[batch.start]
+                    .texture
+                    .and_then(|image| {
+                        let prepared =
+                            self.prepared_textures.get(&image.key())?;
+                        Some((prepared.view.clone()?, prepared.sampler.clone()))
+                    })
+                    .unwrap_or_else(|| self.white_texture.clone());
+                let set = DescriptorSet::new(
+                    self.descriptor_allocator.clone(),
+                    pipeline.layout().set_layouts()[0].clone(),
+                    [WriteDescriptorSet::image_view_sampler(0, view, sampler)],
+                    [],
+                )
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+                commands
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        pipeline.layout().clone(),
+                        0,
+                        set,
+                    )
+                    .map_err(|error| SceneRenderError(error.to_string()))?;
+                count_work(&recorded, 1, 0, 0);
+                unsafe {
+                    commands
+                        .draw(6, batch.len() as u32, 0, batch.start as u32)
+                        .map_err(|error| SceneRenderError(error.to_string()))?;
+                }
+            }
+            passes.end(&mut commands)?;
+        }
         // Debug geometry is drawn after tone mapping in the same render pass,
         // so it keeps its exact colors and uses the scene depth, camera, and
         // viewport. The optional input is never provided by the game runner.
@@ -9067,6 +9164,8 @@ struct MainPasses {
     reflection_pipeline: Arc<GraphicsPipeline>,
     debug_pipeline: Arc<GraphicsPipeline>,
     debug_on_top_pipeline: Arc<GraphicsPipeline>,
+    /// 2D sprites over the tone-mapped output.
+    sprite_pipeline: Arc<GraphicsPipeline>,
     /// Particles blended by alpha, then added as light.
     particle_pipelines: [Arc<GraphicsPipeline>; 2],
     tonemap_pipeline: Arc<GraphicsPipeline>,
@@ -9101,6 +9200,7 @@ impl MainPasses {
             &*self.debug_on_top_pipeline,
             &format!("Debug lines on top{suffix}"),
         );
+        name_object(&*self.sprite_pipeline, &format!("Sprites{suffix}"));
         name_object(
             &*self.particle_pipelines[0],
             &format!("Particles{suffix}"),
@@ -9261,6 +9361,10 @@ fn create_main_passes(
             queue.clone(),
             render_pass.clone(),
             false,
+        )?,
+        sprite_pipeline: create_sprite_pipeline(
+            queue.clone(),
+            render_pass.clone(),
         )?,
         tonemap_pipeline: create_tonemap_pipeline(
             queue.clone(),
@@ -10320,6 +10424,75 @@ fn create_debug_pipeline(
                 1,
                 ColorBlendAttachmentState {
                     // Line colors carry alpha, for example fading grid lines.
+                    blend: Some(AttachmentBlend::alpha()),
+                    ..Default::default()
+                },
+            )),
+            dynamic_state: [DynamicState::Viewport, DynamicState::Scissor]
+                .into_iter()
+                .collect(),
+            subpass: Some(PipelineSubpassType::BeginRenderPass(subpass)),
+            ..GraphicsPipelineCreateInfo::layout(layout)
+        },
+    )
+    .map_err(|error| SceneRenderError(error.to_string()))
+}
+
+fn create_sprite_pipeline(
+    queue: Arc<Queue>,
+    render_pass: Arc<RenderPass>,
+) -> Result<Arc<GraphicsPipeline>, SceneRenderError> {
+    let entry = |module: Result<Arc<vulkano::shader::ShaderModule>, _>| {
+        module
+            .map_err(|error: vulkano::Validated<vulkano::VulkanError>| {
+                SceneRenderError(error.to_string())
+            })?
+            .entry_point("main")
+            .ok_or_else(|| {
+                SceneRenderError("sprite entry point is missing".into())
+            })
+    };
+    let vertex = entry(sprite_vertex_shader::load(queue.device().clone()))?;
+    let fragment = entry(sprite_fragment_shader::load(queue.device().clone()))?;
+    let stages = [
+        PipelineShaderStageCreateInfo::new(vertex.clone()),
+        PipelineShaderStageCreateInfo::new(fragment),
+    ];
+    let layout = PipelineLayout::new(
+        queue.device().clone(),
+        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+            .into_pipeline_layout_create_info(queue.device().clone())
+            .map_err(|error| SceneRenderError(error.to_string()))?,
+    )
+    .map_err(|error| SceneRenderError(error.to_string()))?;
+    // After tone mapping, so sprite colors stay exact like a 2D canvas.
+    let subpass = Subpass::from(render_pass, 1)
+        .ok_or_else(|| SceneRenderError("sprite subpass is missing".into()))?;
+    GraphicsPipeline::new(
+        queue.device().clone(),
+        None,
+        GraphicsPipelineCreateInfo {
+            stages: stages.into_iter().collect(),
+            vertex_input_state: Some(
+                SpriteInstance::per_instance()
+                    .definition(&vertex)
+                    .map_err(|error| SceneRenderError(error.to_string()))?,
+            ),
+            input_assembly_state: Some(InputAssemblyState {
+                topology: PrimitiveTopology::TriangleList,
+                ..Default::default()
+            }),
+            viewport_state: Some(ViewportState::default()),
+            rasterization_state: Some(RasterizationState {
+                cull_mode: CullMode::None,
+                ..Default::default()
+            }),
+            multisample_state: Some(MultisampleState::default()),
+            // Canvas order alone decides what covers what, so no depth test.
+            depth_stencil_state: Some(DepthStencilState::default()),
+            color_blend_state: Some(ColorBlendState::with_attachment_states(
+                1,
+                ColorBlendAttachmentState {
                     blend: Some(AttachmentBlend::alpha()),
                     ..Default::default()
                 },
@@ -11514,6 +11687,56 @@ mod particle_fragment_shader {
         ty: "fragment",
         include: ["src/shaders"],
         path: "src/shaders/fragment/particle.frag"
+    }
+}
+
+#[rustfmt::skip]
+mod sprite_vertex_shader {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        src: r"
+#version 450
+layout(location = 0) in vec4 column0;
+layout(location = 1) in vec4 column1;
+layout(location = 2) in vec4 column2;
+layout(location = 3) in vec4 column3;
+layout(location = 4) in vec4 color;
+layout(location = 5) in vec4 uv;
+layout(location = 0) out vec4 v_color;
+layout(location = 1) out vec2 v_uv;
+layout(push_constant) uniform Camera {
+    mat4 view_projection;
+} camera;
+const vec2 CORNERS[6] = vec2[](
+    vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(0.5, 0.5),
+    vec2(-0.5, -0.5), vec2(0.5, 0.5), vec2(-0.5, 0.5)
+);
+void main() {
+    vec2 corner = CORNERS[gl_VertexIndex];
+    mat4 model = mat4(column0, column1, column2, column3);
+    gl_Position = camera.view_projection * model * vec4(corner, 0.0, 1.0);
+    // uv is [left, top, right, bottom]; +Y is the top of the image.
+    v_uv = vec2(mix(uv.x, uv.z, corner.x + 0.5), mix(uv.w, uv.y, corner.y + 0.5));
+    v_color = color;
+}
+"
+    }
+}
+
+#[rustfmt::skip]
+mod sprite_fragment_shader {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        src: r"
+#version 450
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_uv;
+layout(location = 0) out vec4 f_color;
+layout(set = 0, binding = 0) uniform sampler2D image;
+void main() {
+    f_color = texture(image, v_uv) * v_color;
+}
+"
     }
 }
 
@@ -23567,6 +23790,80 @@ mod tests {
                 "{what} {pixel:?}: {got:?}"
             );
         }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn sprites_draw_in_canvas_order_with_their_image() {
+        use crate::runtime::ExtractedSprite;
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A 1 m sprite of a 2 x 2 image, red, green on the top row, blue,
+        // white below, flipped horizontally; then a plain yellow square on a higher
+        // layer but farther away, over the bottom-right quadrant.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let image = scene.assets.textures.insert(TextureAsset {
+            size: [2, 2],
+            rgba8: [
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [255, 255, 255, 255],
+            ]
+            .concat(),
+            color_space: TextureColorSpace::Srgb,
+            sampler: TextureSampler::default(),
+        });
+        let at = |x: f32, y: f32, z: f32, size: f32| {
+            let mut matrix = [[0.0; 4]; 4];
+            matrix[0][0] = size;
+            matrix[1][1] = size;
+            matrix[2][2] = 1.0;
+            matrix[3] = [x, y, z, 1.0];
+            matrix
+        };
+        scene.render_world.sprites = vec![
+            ExtractedSprite {
+                matrix: at(0.0, 0.0, 0.5, 1.0),
+                color: [1.0; 4],
+                uv: [1.0, 0.0, 0.0, 1.0],
+                texture: Some(image),
+                layer: 0,
+            },
+            ExtractedSprite {
+                matrix: at(0.25, -0.25, -1.0, 0.25),
+                color: [1.0, 1.0, 0.0, 1.0],
+                // Over the red texel, should the image leak into this batch.
+                uv: [0.0, 0.0, 0.5, 0.5],
+                texture: None,
+                layer: 1,
+            },
+        ];
+        // Pixels are 1/16 m; the quadrant centers sit 0.25 m off center.
+        let probes = [
+            ([12, 12], [false, true, false], "flipped: green top left"),
+            ([19, 12], [true, false, false], "flipped: red top right"),
+            ([12, 19], [true; 3], "flipped: white bottom left"),
+            ([20, 20], [true, true, false], "the higher layer covers"),
+            ([2, 2], [false; 3], "outside the sprites"),
+        ];
+        for (pixel, want, what) in probes {
+            let got = render_pixel(&mut scene, pixel);
+            assert_eq!(
+                [got[0], got[1], got[2]].map(|c| c > 150),
+                want,
+                "{what} {pixel:?}: {got:?}"
+            );
+        }
+        assert!(scene
+            .renderer
+            .last_frame_passes()
+            .contains(&FramePass::Sprites));
     }
 
     #[test]

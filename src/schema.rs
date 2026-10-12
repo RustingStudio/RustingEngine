@@ -911,7 +911,7 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.sprite",
-        summary: "A flat image of size (world units, before the object's scale) in the object's XY plane, centered on it and facing +Z: a 2D character, a pickup, a background card. texture is a path under assets/; empty draws plain color, and color (linear rgba) multiplies the image. region [u0, v0, u1, v1] (v down) picks one frame of a sprite sheet; flip_x and flip_y mirror it. Sprites draw in canvas order: lower layer first, then lower world z, then entity order, so a higher layer covers a lower one whatever its z. Consecutive sprites that share an image draw as one batch.",
+        summary: "A flat image of size (world units, before the object's scale) in the object's XY plane, centered on it and facing +Z: a 2D character, a pickup, a background card. texture is a path under assets/; empty draws plain color, and color (linear rgba) multiplies the image. region [u0, v0, u1, v1] (v down) picks one frame of a sprite sheet; flip_x and flip_y mirror it. Sprites draw in canvas order: lower layer first, then lower world z, then entity order, so a higher layer covers a lower one whatever its z. They draw after tone mapping over the 3D frame, without a depth test, so their colors stay exact and 3D meshes never hide them. Consecutive sprites that share an image draw as one batch.",
         gpu: "one instanced draw per run of sprites sharing an image",
         example: || json!({"texture": "sprites/hero.png", "color": [1.0, 1.0, 1.0, 1.0], "size": [1.0, 1.0], "region": [0.0, 0.0, 0.25, 1.0], "flip_x": false, "flip_y": false, "layer": 0}),
     },

@@ -3460,7 +3460,7 @@ Goal: make RustingEngine a complete 2D engine, not a 3D engine with a flat camer
 
 Depends on: Milestones 3, 4, and 10 (2D physics).
 
-- [ ] 2D renderer with sprites, sprite batching, z-ordering, and canvas layers.
+- [x] 2D renderer with sprites, sprite batching, z-ordering, and canvas layers.
   - [x] Sprite component and extraction. `rusting.sprite` (texture, color,
     size, region, flip_x/flip_y, layer) is registered for scenes, snapshots,
     reflection and the schema; its image loads with the other environment
@@ -3470,8 +3470,15 @@ Depends on: Milestones 3, 4, and 10 (2D physics).
     image. Evidence 2026-10-12: `sprites_draw_in_canvas_order_and_batch_by_image`
     passes; dropping the layer key, the z key, the flip swap, the batch merge
     or the unloaded-image filter each fails it.
-  - [ ] GPU sprite pass: one instanced draw per batch over the lit frame, with
-    a headless render test.
+  - [x] GPU sprite pass: one instanced draw per batch over the lit frame, with
+    a headless render test. The new `FramePass::Sprites` runs after tone
+    mapping in subpass 1 on frames with sprites, uploads one instance per
+    sprite and draws each batch with its image bound (white for plain
+    color), alpha blended and without a depth test. Evidence 2026-10-12:
+    `sprites_draw_in_canvas_order_with_their_image` (gpu-tests) passes;
+    skipping the pass, unflipping u in the shader, binding the first batch's
+    image for every batch, or drawing every batch from instance 0 each fails
+    it.
 - [ ] Sprite sheets and sprite animation.
 - [ ] Tilemaps with multiple layers, autotiling rules, tile collision shapes, and tile navigation data.
 - [ ] 2D lights, shadows from occluder polygons, and normal-mapped sprites.

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Rendering: 2D sprite pass draws `rusting.sprite` in canvas order over the frame, one instanced draw per image batch
 - Rendering: `rusting.sprite` component with canvas-ordered extraction and image batching for the 2D renderer
 - Rendering: the `[rusting] perf` line reports press-to-present input latency
 - Rendering: the FPS limiter keeps its cadence through late wakes and uneven frames instead of drifting slower

@@ -58,6 +58,9 @@ pub enum FramePass {
     Exposure,
     /// HDR target mapped into the output (main render pass, subpass 1).
     ToneMap,
+    /// 2D sprites over the output in canvas order (main render pass,
+    /// subpass 1). Only frames with sprites.
+    Sprites,
     /// Editor debug lines over the output (main render pass, subpass 1).
     DebugOverlay,
 }
@@ -105,7 +108,7 @@ pub struct LayoutTransition {
 }
 
 impl FramePass {
-    pub const ALL: [FramePass; 16] = [
+    pub const ALL: [FramePass; 17] = [
         FramePass::Uploads,
         FramePass::Physics,
         FramePass::Culling,
@@ -121,6 +124,7 @@ impl FramePass {
         FramePass::Bloom,
         FramePass::Exposure,
         FramePass::ToneMap,
+        FramePass::Sprites,
         FramePass::DebugOverlay,
     ];
 
@@ -142,6 +146,7 @@ impl FramePass {
             FramePass::Bloom => "Bloom",
             FramePass::Exposure => "Exposure",
             FramePass::ToneMap => "ToneMap",
+            FramePass::Sprites => "Sprites",
             FramePass::DebugOverlay => "DebugOverlay",
         }
     }
@@ -284,6 +289,14 @@ impl FramePass {
                         read(HdrColor, Some(ShaderReadOnlyOptimal)),
                         read(Bloom, Some(ShaderReadOnlyOptimal)),
                         read(Exposure, None),
+                        write(Target, Some(ColorAttachmentOptimal)),
+                    ]
+                }
+            }
+            FramePass::Sprites => {
+                const {
+                    &[
+                        read(MaterialTextures, Some(ShaderReadOnlyOptimal)),
                         write(Target, Some(ColorAttachmentOptimal)),
                     ]
                 }
@@ -747,7 +760,7 @@ mod tests {
             spans,
             [
                 (ShadowMap, 3, 11),
-                (SceneDepth, 4, 15),
+                (SceneDepth, 4, 16),
                 (AmbientOcclusion, 5, 11),
                 (HdrColor, 6, 14),
                 (DepthPyramid, 7, 11),
