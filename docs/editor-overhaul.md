@@ -441,3 +441,12 @@ record mode and the rest-pose preview. Later:
   search popup) that edits a material's graph and writes the compiled
   source to its `shader` through snapshot undo. Shader errors already show
   in Render Settings.
+
+## Deferred: collider editing
+
+- Collider gizmos: handles in the viewport for `Collider` box half
+  extents, sphere radius and capsule height and radius, editing through
+  snapshot undo. A "Generate convex colliders" action on a `MeshRenderer`
+  object adds `ConvexDecomposition` and sets the collider to `ConvexMesh`;
+  draw the decomposed hulls (`runtime::decompose`) as wireframes so the
+  settings can be tuned by eye.
