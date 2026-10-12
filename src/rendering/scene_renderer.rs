@@ -19435,6 +19435,87 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn tone_mapping_matches_its_golden_images() {
+        use crate::assets::{procedural_primitive_mesh, PrimitiveShape};
+        use crate::runtime::{ToneMapper, ToneMapping};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Two emissive HDR ramps, doubling every two steps from 1/16 to
+        // about 11: grey on top, a saturated orange below, where curves
+        // that clip one channel early shift the hue. One golden image per
+        // mapper, so each curve's shape and its highlight rolloff are pinned.
+        let mut scene = SlabScene::with_extent(&[], [128, 32]);
+        if let Some(camera) = &mut scene.render_world.active_camera {
+            camera.projection = Projection::Orthographic {
+                vertical_size: 4.0,
+                near: 0.1,
+                far: 100.0,
+            };
+        }
+        scene.render_world.ambient_light = None;
+        let quad = scene
+            .assets
+            .meshes
+            .insert(procedural_primitive_mesh(PrimitiveShape::Quad));
+        for index in 0..32u32 {
+            let column = index % 16;
+            let row = index / 16;
+            let value = 2f32.powf(column as f32 * 0.5 - 4.0);
+            let tint = [[1.0, 1.0, 1.0], [1.0, 0.3, 0.05]][row as usize];
+            let material = scene.assets.materials.insert(MaterialAsset {
+                base_color: [0.0, 0.0, 0.0, 1.0],
+                emissive: tint.map(|channel| channel * value),
+                ..MaterialAsset::default()
+            });
+            scene.render_world.renderables.push(
+                crate::runtime::ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(index + 1)
+                        .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: (Matrix4::new_translation(&Vector3::new(
+                            column as f32 - 7.5,
+                            1.0 - row as f32 * 2.0,
+                            0.0,
+                        )) * Matrix4::new_nonuniform_scaling(
+                            &Vector3::new(1.0, 2.0, 1.0),
+                        ))
+                        .into(),
+                    },
+                    mesh: quad,
+                    material,
+                    cast_shadows: false,
+                    receive_shadows: false,
+                    bounds: None,
+                },
+            );
+        }
+        for (mapper, name) in [
+            (ToneMapper::Linear, "tone_mapping_linear"),
+            (ToneMapper::Reinhard, "tone_mapping_reinhard"),
+            (ToneMapper::Aces, "tone_mapping_aces"),
+        ] {
+            scene.render_world.tone_mapping = Some(ToneMapping {
+                mapper,
+                exposure: 1.0,
+            });
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            assert_golden(&scene, name, 8);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn a_screen_material_shows_what_its_camera_sees() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");

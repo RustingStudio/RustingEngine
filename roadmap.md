@@ -4598,7 +4598,16 @@ Depends on: Milestones 3, 4, and 21.
   Schlick Fresnel term (difference 47; the back light was added after the
   head-on sun alone let that pass). Full check: workspace lib 964
   passed, gpu-tests run 1123 passed.
-- [ ] Tone mapping.
+- [x] Tone mapping.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::tone_mapping_matches_its_golden_images` renders
+  two emissive HDR ramps, 1/16 to about 11, grey over a saturated orange,
+  once per mapper; compared with `src/rendering/golden/tone_mapping_linear.png`,
+  `tone_mapping_reinhard.png` and `tone_mapping_aces.png` (tolerance 8).
+  Reinhard on the largest channel instead of per channel fails it
+  (difference 101), and so does an ACES denominator constant of 0.2
+  instead of 0.14 (difference 11). Full check: workspace lib 964
+  passed, gpu-tests run 1124 passed.
 - [ ] Editor compositing.
 
 ### Physics tests

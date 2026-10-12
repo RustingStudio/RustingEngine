@@ -10,6 +10,7 @@
 - Tests: a golden-image test of alpha mask and blend modes
 - Tests: a golden-image test of directional shadow depth
 - Tests: a golden-image test of PBR reference spheres
+- Tests: golden-image tests of the Linear, Reinhard and ACES tone mappers
 
 ## [2.4.1] - 2026-10-10
 
