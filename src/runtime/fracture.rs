@@ -44,15 +44,14 @@ use nalgebra::Vector3;
 
 use super::cpu_physics::next_spawn_order;
 use super::hierarchy;
-use crate::Transform;
 use crate::assets::{AssetServer, MeshAsset, MeshVertex};
 use crate::runtime::{
-    Children, Collider, ColliderShape, CollisionLayers, Decal, EventQueue,
-    FrameTime, GpuStateMirror, Heightfield, MeshRenderer, Name,
+    sim_math, Children, Collider, ColliderShape, CollisionLayers, Decal,
+    EventQueue, FrameTime, GpuStateMirror, Heightfield, MeshRenderer, Name,
     ParticleEmitter, PhysicsBody, PhysicsSyncMode, PhysicsWorld, RandomSeed,
     RigidBody, RigidBodyKind, SceneId, SimulationClass, Sleeping, SpawnOrder,
-    sim_math,
 };
+use crate::Transform;
 
 /// Most pieces one fracture makes, Voronoi cells and slice halves
 /// together. Fracture settings come from scene files, and cutting costs
@@ -1290,7 +1289,7 @@ fn promote(
                 seed: pattern,
                 ..Fracture::default()
             };
-            cut.fracture(&piece_mesh(&box_cell(-half, half)))
+            cut.fracture(&piece_mesh(&box_cell(-half, half), None))
                 .pieces
                 .into_iter()
                 .map(centred)
@@ -1743,7 +1742,7 @@ mod tests {
 
     #[test]
     fn pieces_keep_the_normals_and_uvs_of_the_surface_they_came_from() {
-        use crate::assets::{PrimitiveShape, procedural_primitive_mesh};
+        use crate::assets::{procedural_primitive_mesh, PrimitiveShape};
         let fracture = Fracture {
             pieces: 6,
             slices: vec![[1.0, 0.0, 0.0, 0.1]],
@@ -1979,11 +1978,9 @@ mod tests {
             assert_eq!(alive_before, 0, "nothing before the break");
             assert_eq!(breaks.len(), 1);
             let world = app.world();
-            assert!(
-                world
-                    .get::<Debris>(world.get::<Parent>(emitter).unwrap().0)
-                    .is_some()
-            );
+            assert!(world
+                .get::<Debris>(world.get::<Parent>(emitter).unwrap().0)
+                .is_some());
             let system = world.get::<ParticleSystem>(emitter).unwrap();
             (breaks[0].point, system.particles.clone())
         };
@@ -2102,12 +2099,10 @@ mod tests {
         // The pieces it names are the debris now in the world.
         let world = app.world_mut();
         assert_eq!(event.pieces.len(), 6);
-        assert!(
-            event
-                .pieces
-                .iter()
-                .all(|&e| world.get::<Debris>(e).is_some())
-        );
+        assert!(event
+            .pieces
+            .iter()
+            .all(|&e| world.get::<Debris>(e).is_some()));
         assert!(world.get_entity(hard).is_err());
     }
 
@@ -2239,12 +2234,10 @@ mod tests {
         }
         .fracture(&box_mesh([1.0; 3]));
         assert!(broken.pieces.len() <= MAX_FRACTURE_PIECES);
-        assert!(
-            Fracture::default()
-                .fracture(&MeshAsset::default())
-                .pieces
-                .is_empty()
-        );
+        assert!(Fracture::default()
+            .fracture(&MeshAsset::default())
+            .pieces
+            .is_empty());
     }
 
     /// An 8 by 8 m flat heightfield at the origin, in 4-cell chunks that
@@ -2388,22 +2381,18 @@ mod tests {
         },));
         run(&mut app, 60);
         let world = app.world();
-        assert!(
-            world
-                .get::<TerrainFracture>(terrain)
-                .unwrap()
-                .broken
-                .is_empty()
-        );
-        assert!(
-            world
-                .get::<Heightfield>(terrain)
-                .unwrap()
-                .heights
-                .iter()
-                .flatten()
-                .all(|&h| h == 0.0)
-        );
+        assert!(world
+            .get::<TerrainFracture>(terrain)
+            .unwrap()
+            .broken
+            .is_empty());
+        assert!(world
+            .get::<Heightfield>(terrain)
+            .unwrap()
+            .heights
+            .iter()
+            .flatten()
+            .all(|&h| h == 0.0));
     }
 
     #[test]
