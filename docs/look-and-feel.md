@@ -251,6 +251,15 @@ it and stays on that piece's surface. Set `survive_fracture` to false for a
 mark that belongs to the whole object, such as a label, and it is removed
 with the object.
 
+## Broken objects
+
+The pieces of a broken object (`rusting.fracture`) use the object's
+material. Their outer faces keep the object's normals and texture
+coordinates, so on the tick it breaks the pieces look like the object did.
+The new cut faces inside get flat normals and the texture laid flat on
+them at one repeat per meter. A curved object breaks into flat-sided
+pieces, because each piece is convex.
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,

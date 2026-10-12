@@ -200,9 +200,13 @@ impl Fracture {
             }
             cells = halves;
         }
+        let surface = Surface::new(mesh);
         FracturedMesh {
             links: links(&cells, size * size * 1e-6),
-            pieces: cells.iter().map(piece_mesh).collect(),
+            pieces: cells
+                .iter()
+                .map(|cell| piece_mesh(cell, Some(&surface)))
+                .collect(),
         }
     }
 }
@@ -892,7 +896,11 @@ fn overlap(a: &[V], b: &[V]) -> f32 {
 }
 
 /// Flat-shaded triangles of a cell's faces.
-fn piece_mesh(cell: &Cell) -> MeshAsset {
+/// The mesh of `cell`. Faces on the source surface take the normal, UV
+/// and tangent of `source` where they lie, so a piece looks like the part
+/// of the object it was; cut faces get flat normals and planar UVs in
+/// meters.
+fn piece_mesh(cell: &Cell, source: Option<&Surface>) -> MeshAsset {
     let mut mesh = MeshAsset::default();
     for face in cell {
         let normal = face_normal(&face.points);
@@ -901,12 +909,21 @@ fn piece_mesh(cell: &Cell) -> MeshAsset {
             .unwrap_or_else(V::x);
         let v = normal.cross(&u);
         let first = mesh.vertices.len() as u32;
-        mesh.vertices.extend(face.points.iter().map(|p| MeshVertex {
-            position: (*p).into(),
-            normal: normal.into(),
-            uv: [p.dot(&u), p.dot(&v)],
-            tangent: [u.x, u.y, u.z, 1.0],
-            color: [1.0; 4],
+        let facing = source
+            .filter(|_| face.cut == SURFACE)
+            .map(|source| (source, source.facing(normal)));
+        mesh.vertices.extend(face.points.iter().map(|p| {
+            let cut = MeshVertex {
+                position: (*p).into(),
+                normal: normal.into(),
+                uv: [p.dot(&u), p.dot(&v)],
+                tangent: [u.x, u.y, u.z, 1.0],
+                color: [1.0; 4],
+            };
+            facing
+                .as_ref()
+                .and_then(|(source, near)| source.vertex(near, *p, normal))
+                .unwrap_or(cut)
         }));
         for k in 1..face.points.len() as u32 - 1 {
             mesh.indices.extend([first, first + k, first + k + 1]);
@@ -915,12 +932,133 @@ fn piece_mesh(cell: &Cell) -> MeshAsset {
     mesh
 }
 
+/// The triangles of a source mesh with their unit normals.
+struct Surface<'a> {
+    vertices: &'a [MeshVertex],
+    triangles: Vec<([usize; 3], [V; 3], V)>,
+}
+
+impl<'a> Surface<'a> {
+    fn new(mesh: &'a MeshAsset) -> Self {
+        let indices: Vec<usize> = if mesh.indices.is_empty() {
+            (0..mesh.vertices.len()).collect()
+        } else {
+            mesh.indices.iter().map(|&i| i as usize).collect()
+        };
+        let triangles = indices
+            .chunks_exact(3)
+            .filter(|t| t.iter().all(|&i| i < mesh.vertices.len()))
+            .filter_map(|t| {
+                let corners = [t[0], t[1], t[2]];
+                let points =
+                    corners.map(|i| V::from(mesh.vertices[i].position));
+                let [a, b, c] = points;
+                let normal = (b - a).cross(&(c - a)).try_normalize(1e-12)?;
+                Some((corners, points, normal))
+            })
+            .collect();
+        Self {
+            vertices: &mesh.vertices,
+            triangles,
+        }
+    }
+
+    /// The triangles facing along `normal`: hull faces lie on triangle
+    /// planes, so only these can hold a face's points.
+    // ponytail: scans every triangle per face; a normal-binned index if
+    // meshes of many thousand triangles break often.
+    fn facing(&self, normal: V) -> Vec<usize> {
+        let within = |cos: f32| -> Vec<usize> {
+            (0..self.triangles.len())
+                .filter(|&k| self.triangles[k].2.dot(&normal) >= cos)
+                .collect()
+        };
+        // A face on the plane of some triangle; else a box side near one.
+        Some(within(0.999))
+            .filter(|near| !near.is_empty())
+            .unwrap_or_else(|| within(0.9))
+    }
+
+    /// The source vertex at `p`, read from the nearest of the `facing`
+    /// triangles, with `p` as its position.
+    fn vertex(&self, facing: &[usize], p: V, normal: V) -> Option<MeshVertex> {
+        let mut best: Option<(f32, [usize; 3], [f32; 3])> = None;
+        for (corners, points, n) in facing.iter().map(|&k| &self.triangles[k]) {
+            let plane = n.dot(&(p - points[0]));
+            if best.as_ref().is_some_and(|(d, ..)| plane * plane >= *d) {
+                continue;
+            }
+            let (distance, weights) = closest_on_triangle(p, *points, *n);
+            if best.as_ref().is_none_or(|(d, ..)| distance < *d) {
+                best = Some((distance, *corners, weights));
+            }
+        }
+        let (_, corners, w) = best?;
+        let corners = corners.map(|i| &self.vertices[i]);
+        let mix = |f: &dyn Fn(&MeshVertex) -> V| {
+            (0..3).map(|k| f(corners[k]) * w[k]).sum::<V>()
+        };
+        let mut shade = mix(&|x| V::from(x.normal))
+            .try_normalize(1e-12)
+            .unwrap_or(normal);
+        if shade.dot(&normal) < 0.0 {
+            shade = normal;
+        }
+        let tangent =
+            mix(&|x| V::new(x.tangent[0], x.tangent[1], x.tangent[2]))
+                .try_normalize(1e-12)
+                .unwrap_or_else(V::x);
+        let uv = (0..3).fold([0.0; 2], |uv, k| {
+            [
+                uv[0] + corners[k].uv[0] * w[k],
+                uv[1] + corners[k].uv[1] * w[k],
+            ]
+        });
+        Some(MeshVertex {
+            position: p.into(),
+            normal: shade.into(),
+            uv,
+            tangent: [tangent.x, tangent.y, tangent.z, corners[0].tangent[3]],
+            color: corners[0].color,
+        })
+    }
+}
+
+/// Squared distance from `p` to the triangle and the barycentric weights
+/// of its closest point.
+fn closest_on_triangle(p: V, [a, b, c]: [V; 3], n: V) -> (f32, [f32; 3]) {
+    let q = p - n * n.dot(&(p - a));
+    let whole = (b - a).cross(&(c - a)).dot(&n);
+    let w = [
+        (c - b).cross(&(q - b)).dot(&n) / whole,
+        (a - c).cross(&(q - c)).dot(&n) / whole,
+        (b - a).cross(&(q - a)).dot(&n) / whole,
+    ];
+    if w.iter().all(|&x| x >= 0.0) {
+        return ((p - q).norm_squared(), w);
+    }
+    let mut best = (f32::INFINITY, w);
+    for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+        let [from, to] = [[a, b, c][i], [a, b, c][j]];
+        let edge = to - from;
+        let t = ((p - from).dot(&edge) / edge.norm_squared()).clamp(0.0, 1.0);
+        let distance = (p - (from + edge * t)).norm_squared();
+        if distance < best.0 {
+            let mut weights = [0.0; 3];
+            weights[i] = 1.0 - t;
+            weights[j] = t;
+            best = (distance, weights);
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn box_mesh(half: [f32; 3]) -> MeshAsset {
-        piece_mesh(&box_cell(-V::from(half), V::from(half)))
+        piece_mesh(&box_cell(-V::from(half), V::from(half)), None)
     }
 
     fn volume(mesh: &MeshAsset) -> f32 {
@@ -952,6 +1090,48 @@ mod tests {
         reached.iter().all(|&r| r)
     }
 
+    #[test]
+    fn pieces_keep_the_normals_and_uvs_of_the_surface_they_came_from() {
+        use crate::assets::{procedural_primitive_mesh, PrimitiveShape};
+        let fracture = Fracture {
+            pieces: 6,
+            slices: vec![[1.0, 0.0, 0.0, 0.1]],
+            ..Fracture::default()
+        };
+        for shape in [PrimitiveShape::Cube, PrimitiveShape::Sphere] {
+            let source = procedural_primitive_mesh(shape);
+            let pieces = fracture.fracture(&source).pieces;
+            assert!(pieces.len() > 2, "{shape:?}");
+            let all: Vec<&MeshVertex> =
+                pieces.iter().flat_map(|piece| &piece.vertices).collect();
+            // Every source vertex the cut kept is a piece corner with the
+            // source's own normal and UV (one of them on a UV seam).
+            let mut matched = 0;
+            for vertex in &source.vertices {
+                let p = V::from(vertex.position);
+                let at = |x: &MeshVertex| {
+                    (V::from(x.position) - p).norm() < 1e-4
+                        && V::from(x.normal).dot(&V::from(vertex.normal))
+                            > 0.999
+                };
+                for piece in all.iter().filter(|piece| at(piece)) {
+                    matched += 1;
+                    let near = |x: &&MeshVertex| {
+                        (0..2).all(|k| (piece.uv[k] - x.uv[k]).abs() < 1e-3)
+                    };
+                    assert!(
+                        source
+                            .vertices
+                            .iter()
+                            .filter(|x| at(x))
+                            .any(|x| near(&x)),
+                        "{shape:?}: {vertex:?} became {piece:?}"
+                    );
+                }
+            }
+            assert!(matched >= 8, "{shape:?}: only {matched} corners kept");
+        }
+    }
     #[test]
     fn two_slices_quarter_a_box_and_link_only_face_neighbours() {
         let fracture = Fracture {

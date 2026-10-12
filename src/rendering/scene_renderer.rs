@@ -22453,6 +22453,86 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn fractured_pieces_draw_like_the_object_they_came_from() {
+        use crate::assets::{procedural_primitive_mesh, PrimitiveShape};
+        use crate::runtime::{ExtractedRenderable, Fracture};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A lit, textured sphere 1.8 m across, then its pieces in place: the
+        // same smooth shading and texture, the cut faces hidden inside.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let checker: Vec<u8> = (0..16)
+            .flat_map(|k| {
+                let level = |bit: u32| if k >> bit & 1 == 1 { 255 } else { 40 };
+                [level(0), level(1), level(2), 255]
+            })
+            .collect();
+        let image = scene.assets.textures.insert(TextureAsset {
+            size: [4, 4],
+            rgba8: checker,
+            color_space: TextureColorSpace::Srgb,
+            sampler: TextureSampler::default(),
+        });
+        let material = scene.assets.materials.insert(MaterialAsset {
+            base_color_texture: Some(image),
+            ..Default::default()
+        });
+        let mut sphere = procedural_primitive_mesh(PrimitiveShape::Sphere);
+        for vertex in &mut sphere.vertices {
+            vertex.position = vertex.position.map(|x| x * 1.8);
+        }
+        let pieces = Fracture {
+            pieces: 6,
+            slices: vec![[0.0, 1.0, 0.0, 0.2]],
+            ..Fracture::default()
+        }
+        .fracture(&sphere)
+        .pieces;
+        assert!(pieces.len() > 4);
+        let mut draw = |meshes: Vec<MeshAsset>| {
+            scene.render_world.renderables = meshes
+                .into_iter()
+                .enumerate()
+                .map(|(k, mesh)| ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(
+                        k as u32 + 1,
+                    )
+                    .unwrap(),
+                    transform: crate::runtime::GlobalTransform::default(),
+                    mesh: scene.assets.meshes.insert(mesh),
+                    material,
+                    cast_shadows: false,
+                    receive_shadows: false,
+                    bounds: None,
+                })
+                .collect();
+            scene.render_world.renderables_revision += 1;
+            render_pixel(&mut scene, [0, 0]);
+            scene.pixels()
+        };
+        let whole = draw(vec![sphere]);
+        let broken = draw(pieces);
+        let covered = whole
+            .chunks_exact(4)
+            .filter(|p| p[..3] != whole[..3])
+            .count();
+        let differ = whole
+            .chunks_exact(4)
+            .zip(broken.chunks_exact(4))
+            .filter(|(a, b)| (0..3).any(|c| a[c].abs_diff(b[c]) > 8))
+            .count();
+        eprintln!("covered {covered} differ {differ}");
+        assert!(covered > 500, "the sphere covers only {covered} pixels");
+        assert!(differ <= 8, "{differ} of 1024 pixels changed");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn cloth_textures_land_upright_and_unmirrored() {
         use crate::runtime::cloth::{cloth_mesh, Cloth};
         use crate::runtime::ExtractedRenderable;

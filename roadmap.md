@@ -3049,9 +3049,22 @@ Depends on: Milestones 3 and 4.
   surfaces do each tick). Mutation (v flipped) fails the UV and GPU tests.
   Full check: fmt, clippy x3, `cargo test --workspace` (lib 887) and the
   gpu-tests run (lib 1021) pass.
-  Not done: debris (the engine has no fracture yet), soft-body skin
-  textures, fluid surface shading beyond its material, UVs for cloth
-  curved at rest.
+  Debris: fracture pieces keep the object's material; their outer faces
+  now take the source mesh's normal, UV and tangent from the nearest
+  triangle facing the same way (`Surface` in `src/runtime/fracture.rs`),
+  and cut faces keep flat normals and planar UVs in meters. Docs:
+  `docs/look-and-feel.md` "Broken objects". Evidence: unit test
+  `pieces_keep_the_normals_and_uvs_of_the_surface_they_came_from` (cube
+  and sphere: every kept source vertex keeps its normal and UV); GPU test
+  `fractured_pieces_draw_like_the_object_they_came_from` (a lit, textured
+  sphere and its 6+ pieces in place: 688 pixels covered, at most 8 of
+  1024 differ, 2 measured). It failed with the transfer off (683 differ)
+  and with flat normals (47 differ). Sphere fracture time in a debug build
+  went from 0.40 s to 0.50 s. Full check: fmt, clippy x3,
+  `cargo test --workspace` (lib 968) and the gpu-tests run (lib 1131)
+  pass.
+  Not done: soft-body skin textures, fluid surface shading beyond its
+  material, UVs for cloth curved at rest.
 - [x] Effect budget and quality-profile scaling for particles and decals.
   `particle_budget` and `decal_budget` (`src/rendering/scene_renderer.rs`,
   next to `light_budget`) cap each frame by the resolved quality profile:

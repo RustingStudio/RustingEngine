@@ -16,6 +16,7 @@
 - Tests: a culled CPU rigid body keeps falling off view and is drawn once it enters the view
 - Decals: `survive_fracture` moves a decal onto the nearest debris piece when its parent breaks, or removes it with the object
 - Particles: `on_fracture` bursts `impact_count` particles at the break point when an emitter's parent object fractures
+- Fracture: debris pieces keep the broken object's normals and texture coordinates on their outer faces
 
 ## [2.4.1] - 2026-10-10
 
