@@ -67,7 +67,8 @@ were run against this version of the engine.
 - [Effects](effects.md): particle emitters and ready-made presets.
 - [Procedural content](procedural.md): seeded random streams, noise, point
   scattering, caves, dungeons and wave function collapse that give the same
-  level on every machine, and generated scenes cached by seed and inputs.
+  level on every machine, meshes extruded and lofted along splines or cut
+  with solid operations, and generated scenes cached by seed and inputs.
 - [Look and feel](look-and-feel.md): art presets, color grading, and a
   polish checklist.
 - [Cameras](cameras.md), [Audio](audio.md), and

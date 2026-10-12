@@ -1,7 +1,8 @@
 # Procedural content
 
 `rusting_engine::procgen` generates content from a seed: random streams,
-gradient noise, evenly spread points, and tile maps and 3D grids, and
+gradient noise, evenly spread points, and tile maps and 3D grids;
+`rusting_engine::meshgen` builds meshes from splines and solids; and
 `rusting scene generate` keeps scenes made by your own generators up to date. The same seed gives the same
 result on every machine, so a generated level can be saved as its seed,
 shared between players, or checked in a scenario.
@@ -101,6 +102,39 @@ let shore = |a: usize, b: usize, _axis: usize| a.abs_diff(b) < 2;
 let tiles = wave_function_collapse(seed, [32, 32, 1], &[1.0, 0.5, 1.0], shore)
     .expect("these rules always fit");
 ```
+
+## Meshes
+
+`rusting_engine::meshgen` builds closed meshes for level geometry:
+
+- `spline(controls, steps)` gives points along a Catmull-Rom curve through
+  the control points.
+- `extrude(profile, path)` sweeps a closed 2D profile along those points,
+  `x` sideways and `y` up, without twisting: a road, a rail or a pipe. The
+  ends are capped; the profile must be star-shaped around its centre (any
+  convex shape is).
+- `loft(sections)` skins rings with the same number of points, such as
+  circles of changing radius for a vase, and caps both ends.
+- `a.union(&b)`, `a.subtract(&b)` and `a.intersect(&b)` combine closed
+  meshes: cut a doorway out of a wall, or a pit out of a floor.
+
+```rust
+use rusting_engine::meshgen::{extrude, spline};
+
+let path = spline(&[[0.0, 0.0, 0.0], [10.0, 2.0, 0.0], [20.0, 0.0, 8.0]], 12);
+let road = extrude(&[[-2.0, -0.2], [2.0, -0.2], [2.0, 0.0], [-2.0, 0.0]], &path);
+std::fs::write("assets/road.glb", road.glb("road", [0.3, 0.3, 0.32]))?;
+```
+
+Point an entity's `mesh_renderer` at the saved `.glb`, or insert
+`road.asset()` into the `AssetServer` at run time. A `TriangleMesh` collider
+on the same entity collides with the exact surface (for fixed geometry); a
+`ConvexMesh` collider uses its convex hull (for bodies that move).
+
+The solid operations split polygons by planes (the csg.js method). The
+result renders and collides, but its edges can meet in T-junctions, so a
+further operation on it can leave small cracks. Curved shapes follow
+their facets.
 
 ## Generated scenes
 

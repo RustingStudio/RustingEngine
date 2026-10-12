@@ -42,7 +42,9 @@ aim), `core_defense` (top-down, mouse), `lantern_grid` (click puzzle),
    For a level made from a seed, list a generator binary under
    `scene_generators` in `project.json` and run `rusting scene generate .`;
    its `checks` scenarios (an `explore` run that must reach every goal)
-   reject a broken level (`rusting docs show guide/procedural`).
+   reject a broken level. `meshgen::extrude`, `loft` and `ProcMesh::subtract`
+   build roads, pipes and cut walls as `.glb` meshes with mesh colliders
+   (`rusting docs show guide/procedural`).
 4. Write game code in `src/main.rs`. `rusting check` builds it and
    validates the scene.
 5. Write scenarios in `tests/` and run `rusting test` until they pass.
