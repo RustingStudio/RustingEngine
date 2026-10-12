@@ -21,11 +21,29 @@ fn main() {
         (SuiteScene::RagdollPile, 100, 300),
         (SuiteScene::ArticulatedChain, 20, 600),
         (SuiteScene::CharacterStairs, 10, 240),
+        (SuiteScene::BuoyancySort, 16, 300),
+        (SuiteScene::SheetCatch, 16, 300),
+        (SuiteScene::JellyRaft, 16, 300),
     ] {
         let score = scene.run(size, steps);
         println!(
             "{:<20} size {:>4}  step {:>9.3?}  {} {:.4}",
             scene.name(),
+            size,
+            score.mean_step,
+            scene.error_unit(),
+            score.error
+        );
+    }
+    for (scene, size, steps) in [
+        (SuiteScene::StackingStability, 20, 600),
+        (SuiteScene::JointChain, 20, 600),
+        (SuiteScene::CcdBullets, 400, 60),
+    ] {
+        let score = scene.run_2d(size, steps).expect("scene has a 2D form");
+        println!(
+            "{:<20} size {:>4}  step {:>9.3?}  {} {:.4}",
+            format!("{} 2d", scene.name()),
             size,
             score.mean_step,
             scene.error_unit(),

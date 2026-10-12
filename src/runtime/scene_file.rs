@@ -1241,6 +1241,9 @@ pub const INPUT_ACTION_COMPONENT: &str = "rusting.input_action";
 /// Registry name of the built-in side-view platformer controller.
 pub const PLATFORMER_CONTROLLER_COMPONENT: &str =
     "rusting.platformer_controller";
+/// Registry name of the built-in breakable terrain chunks.
+pub const TERRAIN_FRACTURE_COMPONENT: &str = "rusting.terrain_fracture";
+pub const CONVEX_DECOMPOSITION_COMPONENT: &str = "rusting.convex_decomposition";
 
 impl Default for SceneComponentRegistry {
     fn default() -> Self {
@@ -1477,6 +1480,14 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::Articulation>(ARTICULATION_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::TerrainFracture>(TERRAIN_FRACTURE_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::ConvexDecomposition>(
+                CONVEX_DECOMPOSITION_COMPONENT,
+            )
             .expect("empty registry has no duplicates");
         registry
     }

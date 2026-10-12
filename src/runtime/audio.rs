@@ -497,9 +497,17 @@ pub struct SlideSound {
     pub min_speed: f32,
     /// Empty is the main output.
     pub bus: String,
+    /// Clips for sliding on a named `PhysicsMaterial` (or heightfield or
+    /// triangle surface); other surfaces play `clip`. An empty clip is
+    /// silent there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub by_material: Vec<SurfaceClip>,
     /// The loop while it plays.
     #[serde(skip)]
     pub playing: Option<SoundId>,
+    /// The clip that loop plays.
+    #[serde(skip)]
+    pub playing_clip: String,
     /// Volume last sent.
     #[serde(skip)]
     pub level: f32,
@@ -513,10 +521,22 @@ impl Default for SlideSound {
             full_volume_speed: 4.0,
             min_speed: 0.2,
             bus: String::new(),
+            by_material: Vec::new(),
             playing: None,
+            playing_clip: String::new(),
             level: 0.0,
         }
     }
+}
+
+/// One [`SlideSound::by_material`] entry.
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(default)]
+pub struct SurfaceClip {
+    pub material: String,
+    pub clip: String,
 }
 
 /// Starts, turns and stops each [`SlideSound`] loop from the last fixed
@@ -537,16 +557,28 @@ fn route_slide_sounds(world: &mut World, tick: u64) {
                 body.linear_velocity.into()
             })
     };
-    // Fastest speed across a touching contact, per body.
-    let mut speeds = std::collections::BTreeMap::<Entity, f32>::new();
+    // Fastest speed across a touching contact, per body, and the material
+    // name of what it slides on there (the first contact wins a tie).
+    let mut speeds =
+        std::collections::BTreeMap::<Entity, (f32, Option<String>)>::new();
     if let Some(physics) = world.get_resource::<super::PhysicsWorld>() {
         for contact in physics.contacts().iter().filter(|c| !c.sensor) {
             let normal = nalgebra::Vector3::from(contact.normal);
             let relative = velocity(contact.a) - velocity(contact.b);
             let slide = (relative - normal * relative.dot(&normal)).norm();
-            for body in [contact.a, contact.b] {
-                let speed = speeds.entry(body).or_default();
-                *speed = speed.max(slide);
+            for (body, other) in
+                [(contact.a, contact.b), (contact.b, contact.a)]
+            {
+                let fastest = speeds.entry(body).or_default();
+                if slide > fastest.0 {
+                    let name = super::game_feel::surface_name(
+                        contact.surface,
+                        world.get(other),
+                        world.get(other),
+                        world.get(other),
+                    );
+                    *fastest = (slide, name.map(str::to_owned));
+                }
             }
         }
     }
@@ -555,35 +587,46 @@ fn route_slide_sounds(world: &mut World, tick: u64) {
         return;
     };
     for (entity, slide) in slides {
-        let speed = speeds.get(&entity).copied().unwrap_or(0.0);
-        let level = if speed < slide.min_speed {
+        let (speed, material) = speeds.remove(&entity).unwrap_or_default();
+        let clip = material
+            .and_then(|name| {
+                slide
+                    .by_material
+                    .iter()
+                    .find(|entry| entry.material == name)
+            })
+            .map_or(&slide.clip, |entry| &entry.clip);
+        let level = if speed < slide.min_speed || clip.is_empty() {
             0.0
         } else {
             slide.volume * (speed / slide.full_volume_speed.max(1e-3)).min(1.0)
         };
         let mut next = slide.clone();
-        match slide.playing {
-            None if level > 0.0 => {
-                let sound = Sound {
-                    volume: level,
-                    bus: slide.bus.clone(),
-                    looped: true,
-                    follow: Some(entity),
-                    ..Sound::default()
-                };
-                next.playing = Some(queue.play(&slide.clip, &sound, tick));
-            }
-            Some(id) if level == 0.0 => {
+        if let Some(id) = slide.playing {
+            if level == 0.0 || *clip != slide.playing_clip {
                 queue.stop(id);
                 next.playing = None;
-            }
-            Some(id) if (level - slide.level).abs() > 0.01 => {
+                next.level = 0.0;
+            } else if (level - slide.level).abs() > 0.01 {
                 queue.set_volume(id, level, SLIDE_FADE_SECONDS);
+                next.level = level;
             }
-            _ => continue,
         }
-        next.level = level;
-        changed.push((entity, next));
+        if next.playing.is_none() && level > 0.0 {
+            let sound = Sound {
+                volume: level,
+                bus: slide.bus.clone(),
+                looped: true,
+                follow: Some(entity),
+                ..Sound::default()
+            };
+            next.playing = Some(queue.play(clip, &sound, tick));
+            next.playing_clip.clone_from(clip);
+            next.level = level;
+        }
+        if next != slide {
+            changed.push((entity, next));
+        }
     }
     for (entity, slide) in changed {
         world.entity_mut(entity).insert(slide);

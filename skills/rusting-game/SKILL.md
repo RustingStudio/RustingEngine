@@ -280,6 +280,8 @@ each one's fields, defaults and an example:
 - `rusting.mesh_surfaces`: Per-triangle surfaces for a collider with shape "TriangleMesh" on the same object.
 - `rusting.polygon`: A 2D outline for a collider with shape "Polygon" or "Chain" on the same object.
 - `rusting.fracture`: How the object's mesh breaks: pieces Voronoi cells around points picked by seed, then every piece cut by each of slices (planes [x, y, z, d] in the object's frame, cutting where [x, y, z] · p = d).
+- `rusting.terrain_fracture`: Makes the Heightfield on the same object break in square chunks of chunk_cells cells.
+- `rusting.convex_decomposition`: Lets a ConvexMesh collider on the same object follow a concave MeshRenderer mesh: the CPU solver collides it as up to max_hulls (at most 256) convex hulls of the mesh instead of the one hull around it, so a bowl or an L-shaped prop can be dynamic and still hold things.
 - `rusting.heightfield`: A grid of ground heights for a collider with shape "Heightfield" on the same object (static only, like TriangleMesh).
 - `rusting.axis_lock`: Freezes a dynamic CPU body's movement along world axes (linear) and its turning around them (angular), like Godot's axis locks.
 - `rusting.force_field`: Pushes dynamic CPU bodies overlapping this object's sensor collider (it needs a CPU physics body, usually Fixed, with sensor true) with an acceleration of strength m/s², the same for any mass: Directional along direction, Radial out from the object's centre (negative strength pulls in), Vortex around the direction axis through the centre, Wind along direction in gusts of turbulence times strength, Custom with the Rust function the game registered under the name in function (App::add_force_field_function; CPU bodies only), scaled by strength.

@@ -12,6 +12,7 @@ mod click;
 pub mod cloth;
 mod components;
 mod cpu_physics;
+pub mod decompose;
 mod determinism;
 mod effect_presets;
 mod events;
@@ -66,8 +67,8 @@ pub use animation::*;
 pub use audio::{
     active_camera, end_tick, route_sound_events, spatialize, ActiveSound,
     AudioCommand, AudioQueue, BeatClock, BusEffect, Caption, CaptionSettings,
-    Falloff, ReverbZone, SlideSound, Sound, SoundId, DEFAULT_VOICE_LIMIT,
-    MAX_VOICE_LIMIT, QUEUE_LIMIT,
+    Falloff, ReverbZone, SlideSound, Sound, SoundId, SurfaceClip,
+    DEFAULT_VOICE_LIMIT, MAX_VOICE_LIMIT, QUEUE_LIMIT,
 };
 pub use classes::ClassIndex;
 pub use cloth::{Cloth, ClothSettings, ClothSheet, ClothVolume};
@@ -83,6 +84,7 @@ pub use cpu_physics::{
     PhysicsMaterial, PhysicsWorld, Polygon2d, RayHit, Sleeping, SpawnOrder,
     SLEEP_STEPS,
 };
+pub use decompose::{decompose, ConvexDecomposition};
 pub use determinism::*;
 pub use effect_presets::*;
 pub use events::EventQueue;
@@ -91,8 +93,8 @@ pub use fluid::{
     FluidSettings, FluidSolver, FluidSurface, FluidVolume,
 };
 pub use fracture::{
-    Debris, DebrisBudget, Fracture, Fractured, FracturedMesh,
-    MAX_FRACTURE_PIECES,
+    Debris, DebrisAggregation, DebrisBudget, Fracture, Fractured,
+    FracturedMesh, Refrozen, TerrainFracture, MAX_FRACTURE_PIECES,
 };
 pub use game_feel::*;
 pub use hierarchy::{propagate_transforms, HierarchyDiagnostics};
@@ -288,6 +290,7 @@ impl Default for App {
         app.add_event::<JointBroken>();
         app.add_event::<FellOut>();
         app.add_event::<Fractured>();
+        app.add_event::<Refrozen>();
         app.add_event::<AnimationEvent>();
         // One chain: these systems all write `Transform`, and unordered
         // systems would run in whatever order threads finish.
@@ -299,7 +302,9 @@ impl Default for App {
                     rope::build_ropes,
                     cpu_physics::step_cpu_physics,
                     fracture::break_fractures,
+                    fracture::break_terrain,
                     fracture::manage_debris,
+                    fracture::refreeze_debris,
                 )
                     .chain(),
                 player::player_move,

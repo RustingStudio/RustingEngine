@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ConvexDecomposition` (`rusting.convex_decomposition`) makes a `ConvexMesh` collider follow a concave mesh as decomposed hulls on the CPU solver, so concave props can be dynamic; scene-file settings are clamped to 128 voxels per axis and 256 hulls.
+- `runtime::decompose::decompose` splits a concave closed mesh into convex hulls (V-HACD-class approximate convex decomposition) for `ConvexMesh` colliders.
+- Physics suite scenes `BuoyancySort`, `SheetCatch` and `JellyRaft` check two-way coupling between rigid bodies, cloth, soft bodies and fluid
+- `SuiteScene::run_2d` runs 2D forms of the stacking, joint chain and CCD bullet suite scenes on plane-locked polygon bodies
+- `SlideSound::by_material` picks a slide or roll loop by the physics material or surface the body slides on
+- `TerrainFracture` digs a struck heightfield chunk out as a dynamic GPU slab
+- `TerrainFracture::pieces` cracks dug-out slabs into Voronoi pieces seeded by the scene's `RandomSeed` at the tick
+- GPU debris put to sleep by the GPU solver now counts as asleep, so the `DebrisBudget` can free dug terrain slabs at the cap
+- `TerrainFracture::refreeze` freezes debris that rests asleep on the terrain back into its heights and sends a `Refrozen` event
+- `DebrisAggregation` merges small sleeping debris into one static body per grid cell
+
+### Fixed
+
+- A body that loses its `PhysicsBody` component no longer keeps a stale `PhysicsId`, and a `PhysicsId` slot is retired at its last generation instead of wrapping, so old GPU events can never reach a newer body
+
 ## [2.4.1] - 2026-10-10
 
 Fixes 2.4.0 builds: without the Vulkan SDK the cloth shader failed to compile, and the crates.io package needed a newer `rusting-core` than the one published.

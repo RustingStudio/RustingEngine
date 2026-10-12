@@ -8,6 +8,7 @@ use bevy_ecs::entity::Entity;
 use super::TypeRegistry;
 use crate::assets::{AlphaMode, MaterialAsset, MaterialModel};
 use crate::runtime::ClothSheet;
+use crate::runtime::ConvexDecomposition;
 use crate::runtime::Rope;
 use crate::runtime::{
     AmbientLight, AmbientOcclusion, Antialiasing, Articulation, AutoExposure,
@@ -25,9 +26,9 @@ use crate::runtime::{
     QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
     ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
     SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, Terrain, TerrainLayer, TileKind, TileMap,
-    ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle,
-    WaterBody, Wheel,
+    StateAction, StateTransition, SurfaceClip, Terrain, TerrainFracture,
+    TerrainLayer, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
+    TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -297,8 +298,17 @@ crate::reflect! {
         full_volume_speed: f32 { unit: "m/s", min: 0.0, doc: "sliding this fast plays at full volume" },
         min_speed: f32 { unit: "m/s", min: 0.0, doc: "slower is silent" },
         bus: String { doc: "empty for the main output" },
+        by_material: Vec<SurfaceClip> { doc: "clips for sliding on a named physics_material or surface; others play clip" },
         #[skip] playing: Option<SoundId>,
+        #[skip] playing_clip: String,
         #[skip] level: f32,
+    }
+}
+
+crate::reflect! {
+    struct SurfaceClip {
+        material: String { doc: "physics_material or surface name" },
+        clip: String { unit: "asset path", doc: "empty is silent on it" },
     }
 }
 
@@ -826,6 +836,28 @@ crate::reflect! {
         break_energy: f32 { unit: "J", min: 0.0, doc: "impact energy within one fixed tick that breaks the object during play; 0 never breaks it" },
         debris_lifetime: f32 { unit: "s", min: 0.0, doc: "seconds a piece stays once it sleeps; 0 keeps pieces" },
         merge_debris: bool { doc: "once every piece of a break sleeps, they merge into one static body" },
+    }
+}
+
+crate::reflect! {
+    struct TerrainFracture {
+        chunk_cells: u32 { min: 1.0, doc: "height cells along each side of a breakable chunk" },
+        pieces: u32 { min: 0.0, max: 256.0, doc: "Voronoi pieces a dug-out slab breaks into, around points drawn from the scene's RandomSeed at the tick; 0 or 1 keeps one box" },
+        break_energy: f32 { unit: "J", min: 0.0, doc: "impact energy on one chunk within one fixed tick that digs it out; 0 never breaks" },
+        depth: f32 { unit: "m", min: 0.0, doc: "how far the chunk's ground drops; the slab's thickness" },
+        density: f32 { unit: "kg/m³", min: 0.0, doc: "density of the dug-out slab" },
+        debris_lifetime: f32 { unit: "s", min: 0.0, doc: "seconds a slab stays once it sleeps; 0 keeps it" },
+        refreeze: f32 { unit: "s", min: 0.0, doc: "seconds any debris resting on this terrain sleeps before it freezes back into the heights; 0 never refreezes" },
+        broken: Vec<u32> { doc: "chunks already dug out, row * chunk columns + column, sorted" },
+    }
+}
+
+crate::reflect! {
+    struct ConvexDecomposition {
+        resolution: u32 { min: 1.0, max: 128.0, doc: "voxels along the mesh's longest side" },
+        max_hulls: u32 { min: 1.0, max: 256.0, doc: "most hulls the mesh splits into" },
+        concavity: f32 { min: 0.0, doc: "a part stops splitting once its hull exceeds the solid inside it by less than this share of the mesh's volume" },
+        candidates: u32 { min: 1.0, doc: "split planes tried per axis; resolution or more tries every voxel plane" },
     }
 }
 

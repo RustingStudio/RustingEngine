@@ -10,9 +10,11 @@ use std::time::{Duration, Instant};
 use bevy_ecs::entity::Entity;
 
 use super::{
-    Cloth, ClothSettings, Collider, ColliderShape, Debris, Fluid,
-    FluidSettings, Fracture, Joint, JointKind, MeshRenderer, Name, PhysicsBody,
-    Ragdoll, RagdollBone, RagdollState, RigidBody, RigidBodyKind, Vehicle,
+    AxisLock, Cloth, ClothSettings, ClothVolume, Collider, ColliderShape,
+    Debris, Fluid, FluidSettings, Fracture, Joint, JointKind, MeshRenderer,
+    Name, PhysicsBody, Polygon2d, Ragdoll, RagdollBone, RagdollState,
+    RigidBody, RigidBodyKind, SoftBody, SoftBodySettings, SoftBodyVolume,
+    Vehicle,
 };
 use crate::{App, Transform};
 
@@ -61,6 +63,20 @@ pub enum SuiteScene {
     /// the top one 20 m deep, starting 1 m before the first; the error is
     /// how far below the top step's surface its feet end, in metres.
     CharacterStairs,
+    /// Rigid with fluid: `size` 0.15 m balls, each dropped into its own
+    /// water pool, alternating 7 kg (half as dense as water) and 50 kg;
+    /// the error is the share that ended on the wrong side of 0.2 m (a
+    /// light ball not floating or a heavy one not on the floor).
+    BuoyancySort,
+    /// Rigid with deformable: `size` balls of 1, 2, 3, ... kg dropped 1 m
+    /// onto their own 1 m cloth sheets pinned at the edges; the error is
+    /// the share that ended under the sheet or off it.
+    SheetCatch,
+    /// Deformable with fluid: `size` 0.3 m jelly cubes, each dropped into
+    /// its own pool, alternating 300 and 5000 kg/m³; the error is the
+    /// share on the wrong side (a light jelly's bottom under 0.12 m or a
+    /// heavy one's over 0.1 m).
+    JellyRaft,
 }
 
 /// What one run of a [`SuiteScene`] measured.
@@ -76,7 +92,7 @@ pub struct SuiteScore {
 const DT: f64 = 1.0 / 60.0;
 
 impl SuiteScene {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::StackingStability,
         Self::JointChain,
         Self::CcdBullets,
@@ -87,6 +103,9 @@ impl SuiteScene {
         Self::RagdollPile,
         Self::ArticulatedChain,
         Self::CharacterStairs,
+        Self::BuoyancySort,
+        Self::SheetCatch,
+        Self::JellyRaft,
     ];
 
     #[must_use]
@@ -102,6 +121,9 @@ impl SuiteScene {
             Self::RagdollPile => "ragdoll_pile",
             Self::ArticulatedChain => "articulated_chain",
             Self::CharacterStairs => "character_stairs",
+            Self::BuoyancySort => "buoyancy_sort",
+            Self::SheetCatch => "sheet_catch",
+            Self::JellyRaft => "jelly_raft",
         }
     }
 
@@ -119,6 +141,9 @@ impl SuiteScene {
             Self::RagdollPile => "max joint gap (m)",
             Self::ArticulatedChain => "max joint gap (m)",
             Self::CharacterStairs => "height short (m)",
+            Self::BuoyancySort | Self::SheetCatch | Self::JellyRaft => {
+                "wrong share"
+            }
         }
     }
 
@@ -257,6 +282,137 @@ impl SuiteScene {
                 }
                 // The default capsule is 1.8 m tall around its centre.
                 size as f32 * RISE - (position(&app, player)[1] - 0.9)
+            }
+            Self::BuoyancySort => {
+                body(
+                    &mut app,
+                    [0.0, -0.5, 0.0],
+                    ColliderShape::Box {
+                        half_extents: [size as f32 + 1.0, 0.5, 1.0],
+                    },
+                    RigidBodyKind::Fixed,
+                );
+                let balls: Vec<_> = (0..size)
+                    .map(|index| {
+                        let x = 2.0 * index as f32;
+                        pool(&mut app, x);
+                        let ball = body(
+                            &mut app,
+                            [x, 0.6, 0.0],
+                            ColliderShape::Sphere { radius: 0.15 },
+                            RigidBodyKind::Dynamic,
+                        );
+                        let light = index % 2 == 0;
+                        app.world_mut()
+                            .get_mut::<RigidBody>(ball)
+                            .unwrap()
+                            .mass = if light { 7.0 } else { 50.0 };
+                        (ball, light)
+                    })
+                    .collect();
+                for _ in 0..steps {
+                    step(&mut app, &mut elapsed);
+                }
+                let wrong = balls
+                    .iter()
+                    .filter(|&&(ball, light)| {
+                        (position(&app, ball)[1] > 0.2) != light
+                    })
+                    .count();
+                wrong as f32 / size.max(1) as f32
+            }
+            Self::SheetCatch => {
+                let balls: Vec<_> = (0..size)
+                    .map(|index| {
+                        let x = 2.0 * index as f32;
+                        let mut sheet = Cloth::grid(
+                            [x - 0.5, 1.0, -0.5],
+                            [1.0, 0.0, 0.0],
+                            [0.0, 0.0, 1.0],
+                            [10, 10],
+                            0.1,
+                            10.0,
+                        )
+                        .unwrap();
+                        for i in 0..121 {
+                            let (u, v) = (i % 11, i / 11);
+                            if u == 0 || u == 10 || v == 0 || v == 10 {
+                                sheet.pin(i);
+                            }
+                        }
+                        app.spawn(ClothVolume::new(
+                            ClothSettings::default(),
+                            sheet,
+                        ));
+                        let ball = body(
+                            &mut app,
+                            [x, 2.0, 0.0],
+                            ColliderShape::Sphere { radius: 0.15 },
+                            RigidBodyKind::Dynamic,
+                        );
+                        app.world_mut()
+                            .get_mut::<RigidBody>(ball)
+                            .unwrap()
+                            .mass = 1.0 + index as f32;
+                        (ball, x)
+                    })
+                    .collect();
+                for _ in 0..steps {
+                    step(&mut app, &mut elapsed);
+                }
+                let wrong = balls
+                    .iter()
+                    .filter(|&&(ball, x)| {
+                        let [bx, by, bz] = position(&app, ball);
+                        // On the sheet: above where it sags to, inside it.
+                        !(by > 0.5 && (bx - x).abs() < 0.5 && bz.abs() < 0.5)
+                    })
+                    .count();
+                wrong as f32 / size.max(1) as f32
+            }
+            Self::JellyRaft => {
+                let jellies: Vec<_> = (0..size)
+                    .map(|index| {
+                        let x = 2.0 * index as f32;
+                        pool(&mut app, x);
+                        let light = index % 2 == 0;
+                        let jelly = SoftBody::block(
+                            [x - 0.15, 0.6, -0.15],
+                            [3; 3],
+                            0.1,
+                            if light { 300.0 } else { 5000.0 },
+                        )
+                        .unwrap();
+                        let jelly = app.spawn(SoftBodyVolume::new(
+                            SoftBodySettings::default(),
+                            jelly,
+                        ));
+                        (jelly, light)
+                    })
+                    .collect();
+                for _ in 0..steps {
+                    step(&mut app, &mut elapsed);
+                }
+                let wrong = jellies
+                    .iter()
+                    .filter(|&&(jelly, light)| {
+                        let bottom = app
+                            .world()
+                            .get::<SoftBodyVolume>(jelly)
+                            .unwrap()
+                            .body
+                            .positions
+                            .iter()
+                            .map(|p| p[1])
+                            .fold(f32::INFINITY, f32::min);
+                        if light {
+                            bottom < 0.12
+                        } else {
+                            bottom > 0.1
+                        }
+                    })
+                    .count();
+                wrong as f32 / size.max(1) as f32
             }
             Self::CcdBullets => {
                 body(
@@ -511,6 +667,168 @@ impl SuiteScene {
             error,
         }
     }
+
+    /// The scenes [`Self::run_2d`] has a 2D form of.
+    pub const ALL_2D: [Self; 3] =
+        [Self::StackingStability, Self::JointChain, Self::CcdBullets];
+
+    /// Runs the 2D mirror of this scene, or `None` for a scene not in
+    /// [`Self::ALL_2D`]. Bodies are `Polygon` outlines (circles for the
+    /// bullets) kept in the XY plane by `AxisLock::PLANE_XY`, on a `Chain`
+    /// floor or wall; the error means the same as in 3D. A body that leaves
+    /// its plane makes the error infinite.
+    #[must_use]
+    pub fn run_2d(self, size: usize, steps: u32) -> Option<SuiteScore> {
+        let mut app = App::new();
+        let mut elapsed = Duration::ZERO;
+        let mut bodies = Vec::new();
+        let error = match self {
+            Self::StackingStability => {
+                chain(&mut app, [[-5.0, 0.0], [5.0, 0.0]]);
+                let boxes: Vec<_> = (0..size)
+                    .map(|level| {
+                        let start = [0.0, 0.5 + level as f32, 0.0];
+                        (body_2d(&mut app, start, 0.5, 0.5), start)
+                    })
+                    .collect();
+                bodies.extend(boxes.iter().map(|&(entity, _)| entity));
+                run_steps(&mut app, steps, &mut elapsed);
+                boxes
+                    .iter()
+                    .map(|&(entity, start)| {
+                        distance(position(&app, entity), start)
+                    })
+                    .fold(0.0, f32::max)
+            }
+            Self::JointChain => {
+                const HALF: f32 = 0.25;
+                let mut links: Vec<(Entity, Option<Entity>)> = Vec::new();
+                for index in 0..size {
+                    let x = HALF * (2 * index + 1) as f32;
+                    let link = body_2d(&mut app, [x, 10.0, 0.0], HALF, 0.05);
+                    let previous = links.last().map(|&(link, _)| link);
+                    // A ball socket on a plane-locked body is a 2D pin.
+                    let joint = Joint::new(
+                        JointKind::BallSocket,
+                        previous.unwrap_or(Entity::PLACEHOLDER),
+                        [-HALF, 0.0, 0.0],
+                        if previous.is_some() {
+                            [HALF, 0.0, 0.0]
+                        } else {
+                            [0.0, 10.0, 0.0]
+                        },
+                    );
+                    app.world_mut().entity_mut(link).insert(joint);
+                    links.push((link, previous));
+                }
+                bodies.extend(links.iter().map(|&(link, _)| link));
+                let mut widest = 0.0_f32;
+                for _ in 0..steps {
+                    run_steps(&mut app, 1, &mut elapsed);
+                    for &(link, previous) in &links {
+                        let anchor = point(&app, link, [-HALF, 0.0, 0.0]);
+                        let target = previous.map_or([0.0, 10.0, 0.0], |p| {
+                            point(&app, p, [HALF, 0.0, 0.0])
+                        });
+                        widest = widest.max(distance(anchor, target));
+                    }
+                }
+                widest
+            }
+            Self::CcdBullets => {
+                // A vertical wall at x 0, shot from x 5 at 300 m/s. Each
+                // bullet has its own lane up the wall, as each has its own
+                // spot on the 3D wall.
+                let top = 1.0 + 0.15 * size as f32;
+                chain(&mut app, [[0.0, 0.0], [0.0, top]]);
+                let bullets: Vec<_> = (0..size)
+                    .map(|index| {
+                        let y = 0.5 + 0.15 * index as f32;
+                        let bullet = body(
+                            &mut app,
+                            [5.0, y, 0.0],
+                            ColliderShape::Sphere { radius: 0.05 },
+                            RigidBodyKind::Dynamic,
+                        );
+                        let world = app.world_mut();
+                        world.entity_mut(bullet).insert(AxisLock::PLANE_XY);
+                        world
+                            .get_mut::<RigidBody>(bullet)
+                            .unwrap()
+                            .linear_velocity = [-300.0, 0.0, 0.0];
+                        bullet
+                    })
+                    .collect();
+                bodies.extend(&bullets);
+                run_steps(&mut app, steps, &mut elapsed);
+                let through = bullets
+                    .iter()
+                    .filter(|&&bullet| position(&app, bullet)[0] < -0.05)
+                    .count();
+                through as f32 / size.max(1) as f32
+            }
+            _ => return None,
+        };
+        let in_plane = bodies.iter().all(|&entity| {
+            let transform = app.world().get::<Transform>(entity).unwrap();
+            let [x, y, _] = transform.rotation;
+            transform.position[2] == 0.0 && x == 0.0 && y == 0.0
+        });
+        Some(SuiteScore {
+            scene: self,
+            size,
+            steps,
+            mean_step: elapsed / steps.max(1),
+            error: if in_plane { error } else { f32::INFINITY },
+        })
+    }
+}
+
+fn run_steps(app: &mut App, steps: u32, elapsed: &mut Duration) {
+    for _ in 0..steps {
+        let start = Instant::now();
+        app.update(Duration::from_secs_f64(DT)).unwrap();
+        *elapsed += start.elapsed();
+    }
+}
+
+/// A dynamic `half_x` by `half_y` polygon box locked to the XY plane.
+fn body_2d(
+    app: &mut App,
+    position: [f32; 3],
+    half_x: f32,
+    half_y: f32,
+) -> Entity {
+    let entity = body(
+        app,
+        position,
+        ColliderShape::Polygon,
+        RigidBodyKind::Dynamic,
+    );
+    app.world_mut().entity_mut(entity).insert((
+        Polygon2d {
+            points: vec![
+                [-half_x, -half_y],
+                [half_x, -half_y],
+                [half_x, half_y],
+                [-half_x, half_y],
+            ],
+            ..Polygon2d::default()
+        },
+        AxisLock::PLANE_XY,
+    ));
+    entity
+}
+
+/// A fixed open `Chain` segment.
+fn chain(app: &mut App, points: [[f32; 2]; 2]) {
+    let entity =
+        body(app, [0.0; 3], ColliderShape::Chain, RigidBodyKind::Fixed);
+    app.world_mut().entity_mut(entity).insert(Polygon2d {
+        points: points.to_vec(),
+        closed: false,
+        ..Polygon2d::default()
+    });
 }
 
 fn body(
@@ -593,6 +911,17 @@ fn ragdoll(app: &mut App, at: [f32; 3]) -> Entity {
     hero
 }
 
+/// A 0.8 m square water pool centred on `x`, 0.4 m deep, 1 kg drops.
+fn pool(app: &mut App, x: f32) {
+    let settings = FluidSettings {
+        bounds: ([x - 0.4, 0.0, -0.4], [x + 0.4, 2.0, 0.4]),
+        particle_mass: 1.0,
+        ..FluidSettings::default()
+    };
+    let fluid = Fluid::block([x - 0.35, 0.0, -0.35], [8, 4, 8], 0.1);
+    app.spawn(super::FluidVolume::new(settings, fluid));
+}
+
 fn position(app: &App, entity: Entity) -> [f32; 3] {
     app.world().get::<Transform>(entity).unwrap().position
 }
@@ -656,6 +985,9 @@ mod tests {
             (SuiteScene::CharacterStairs, 4, 180, -4.085_898_4e-4),
             (SuiteScene::VehicleStress, 1, 240, 0.068_611_324),
             (SuiteScene::RagdollPile, 1, 120, 0.015_326_262),
+            (SuiteScene::BuoyancySort, 4, 240, 0.0),
+            (SuiteScene::SheetCatch, 4, 180, 0.0),
+            (SuiteScene::JellyRaft, 4, 240, 0.0),
         ] {
             let first = scene.run(size, steps);
             let second = scene.run(size, steps);
@@ -670,5 +1002,18 @@ mod tests {
                 scene.name()
             );
         }
+    }
+
+    #[test]
+    fn the_2d_scenes_stay_in_their_plane_and_within_the_3d_bounds() {
+        let stack = SuiteScene::StackingStability.run_2d(10, 300).unwrap();
+        assert!(stack.error < 0.05, "{stack:?}");
+        let chain = SuiteScene::JointChain.run_2d(20, 300).unwrap();
+        assert!(chain.error < 0.5, "{chain:?}");
+        let bullets = SuiteScene::CcdBullets.run_2d(25, 30).unwrap();
+        assert_eq!(bullets.error, 0.0, "{bullets:?}");
+        assert!(SuiteScene::ClothHang.run_2d(4, 10).is_none());
+        let again = SuiteScene::StackingStability.run_2d(10, 300).unwrap();
+        assert_eq!(stack.error.to_bits(), again.error.to_bits());
     }
 }

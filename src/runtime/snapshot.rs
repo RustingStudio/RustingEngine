@@ -451,6 +451,8 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::Heightfield>();
     types.register::<super::Polygon2d>();
     types.register::<super::Fracture>();
+    types.register::<super::TerrainFracture>();
+    types.register::<super::ConvexDecomposition>();
     types.register::<super::MeshSurfaces>();
     types.register::<super::PhysicsMaterial>();
     types.register::<super::WaterMesh>();
@@ -542,6 +544,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<EventQueue<JointBroken>>();
     types.register::<EventQueue<FellOut>>();
     types.register::<EventQueue<super::Fractured>>();
+    types.register::<EventQueue<super::Refrozen>>();
     types.register::<EventQueue<GpuPhysicsEvent>>();
     types.register::<EventQueue<GpuPhysicsEventsLost>>();
     types.register::<EventQueue<HudButtonPressed>>();

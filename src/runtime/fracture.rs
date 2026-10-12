@@ -23,9 +23,11 @@
 //! flight: a piece asleep for its fracture's `debris_lifetime` despawns,
 //! and with `merge_debris` the pieces of one break, once all asleep, become
 //! one static triangle-mesh body. At the [`DebrisBudget`] a new break first
-//! removes the longest-sleeping debris to make room; if too little debris
-//! sleeps, the object stays whole this tick rather than dropping moving
-//! pieces.
+//! removes the longest-sleeping debris to make room, oldest sleep tick
+//! first, then lowest [`SpawnOrder`]; if too little debris sleeps, the
+//! object stays whole this tick rather than dropping moving pieces. GPU
+//! debris counts as asleep once its read-back [`GpuStateMirror`] shows the
+//! GPU solver stopped it, from the tick of that state.
 //!
 //! Determinism: Voronoi seeds come from [`RandomSeed`] streams of the
 //! fracture's own seed, cells are cut in index order, objects break in
@@ -44,8 +46,9 @@ use super::cpu_physics::next_spawn_order;
 use crate::assets::{AssetServer, MeshAsset, MeshVertex};
 use crate::runtime::{
     sim_math, Collider, ColliderShape, CollisionLayers, EventQueue, FrameTime,
-    MeshRenderer, Name, PhysicsBody, PhysicsWorld, RandomSeed, RigidBody,
-    RigidBodyKind, SceneId, Sleeping, SpawnOrder,
+    GpuStateMirror, Heightfield, MeshRenderer, Name, PhysicsBody,
+    PhysicsSyncMode, PhysicsWorld, RandomSeed, RigidBody, RigidBodyKind,
+    SceneId, SimulationClass, Sleeping, SpawnOrder,
 };
 use crate::Transform;
 
@@ -76,7 +79,9 @@ pub struct Fracture {
     pub merge_debris: bool,
 }
 
-/// Most [`Debris`] bodies alive at once; 0 is no cap.
+/// Most [`Debris`] bodies alive at once; 0 is no cap. At the cap a break
+/// removes the longest-sleeping debris (by sleep tick, then [`SpawnOrder`])
+/// or, when too little sleeps, waits; moving debris is never dropped.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DebrisBudget(pub u32);
 
@@ -86,11 +91,33 @@ impl Default for DebrisBudget {
     }
 }
 
+/// Merges small sleeping [`Debris`] into one fixed triangle-mesh body per
+/// grid cell, so a long match leaves few bodies however much breaks. Each
+/// tick, the sleeping pieces no wider than `max_size` metres, and earlier
+/// aggregates, are grouped by the `cell`-metre cube their box centre is in;
+/// a cube with two or more becomes one body. Pieces merge in
+/// [`SpawnOrder`], and the body takes the first one's look and spawn
+/// order. A `cell` of 0 turns this off.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct DebrisAggregation {
+    pub cell: f32,
+    pub max_size: f32,
+}
+
+impl Default for DebrisAggregation {
+    fn default() -> Self {
+        Self {
+            cell: 0.0,
+            max_size: 0.5,
+        }
+    }
+}
+
 /// Sent in the fixed step an object with a [`Fracture`] broke, after it
 /// was despawned and its pieces spawned. Breaks send in `SceneId` order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fractured {
-    /// The despawned object.
+    /// The despawned object, or the terrain a chunk was dug out of.
     pub entity: Entity,
     pub name: Option<String>,
     /// The new [`Debris`] bodies, in spawn order.
@@ -102,6 +129,16 @@ pub struct Fractured {
     pub mass: f32,
     /// World box `[min, max]` the object filled before it broke, for
     /// navigation and other spatial caches to rebuild.
+    pub bounds: [[f32; 3]; 2],
+}
+
+/// Sent in the fixed step sleeping [`Debris`] froze back into a terrain
+/// ([`TerrainFracture::refreeze`]), one per terrain and tick.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refrozen {
+    pub terrain: Entity,
+    /// World box `[min, max]` of the frozen pieces, for navigation and other
+    /// spatial caches to rebuild.
     pub bounds: [[f32; 3]; 2],
 }
 
@@ -466,18 +503,34 @@ pub(super) fn manage_debris(world: &mut World) {
             Has<Sleeping>,
             Option<&RigidBody>,
             Option<&SpawnOrder>,
+            Option<&PhysicsBody>,
+            Option<&GpuStateMirror>,
         )>()
         .iter_mut(world)
-        .map(|(entity, mut debris, sleeping, body, order)| {
-            let still = sleeping
-                || body.is_some_and(|b| b.kind != RigidBodyKind::Dynamic);
-            if !still {
-                debris.asleep_since = None;
-            } else if debris.asleep_since.is_none() {
-                debris.asleep_since = Some(tick);
-            }
-            (order.map(|o| o.0), entity.to_bits(), entity, *debris)
-        })
+        .map(
+            |(entity, mut debris, sleeping, body, order, physics, mirror)| {
+                // The GPU solver zeroes a body's velocities when it puts it to
+                // sleep, and a falling body never reads back exactly zero.
+                let gpu_asleep = physics
+                    .is_some_and(|p| p.simulation == SimulationClass::Gpu)
+                    .then_some(mirror)
+                    .flatten()
+                    .filter(|m| {
+                        m.linear_velocity == [0.0; 3]
+                            && m.angular_velocity == [0.0; 3]
+                    })
+                    .map(|m| m.tick);
+                let still = sleeping
+                    || gpu_asleep.is_some()
+                    || body.is_some_and(|b| b.kind != RigidBodyKind::Dynamic);
+                if !still {
+                    debris.asleep_since = None;
+                } else if debris.asleep_since.is_none() {
+                    debris.asleep_since = Some(gpu_asleep.unwrap_or(tick));
+                }
+                (order.map(|o| o.0), entity.to_bits(), entity, *debris)
+            },
+        )
         .collect();
     pieces.sort_unstable_by_key(|&(order, bits, ..)| (order, bits));
     let step = step.as_secs_f32();
@@ -506,6 +559,56 @@ pub(super) fn manage_debris(world: &mut World) {
             merge(world, &members);
         }
     }
+    let aggregation = world
+        .get_resource::<DebrisAggregation>()
+        .copied()
+        .unwrap_or_default();
+    if aggregation.cell > 0.0 {
+        aggregate(world, aggregation);
+    }
+}
+
+/// Merges sleeping debris per [`DebrisAggregation`] cell.
+fn aggregate(world: &mut World, settings: DebrisAggregation) {
+    let mut pieces: Vec<_> = world
+        .query::<(
+            Entity,
+            &Debris,
+            Option<&SpawnOrder>,
+            Option<&Collider>,
+            Option<&RigidBody>,
+        )>()
+        .iter(world)
+        .filter(|(_, debris, ..)| debris.asleep_since.is_some())
+        .map(|(entity, _, order, collider, body)| {
+            // What `merge` makes: a fixed triangle mesh.
+            let merged = collider
+                .is_some_and(|c| c.shape == ColliderShape::TriangleMesh)
+                && body.is_some_and(|b| b.kind == RigidBodyKind::Fixed);
+            (order.map(|o| o.0), entity, merged)
+        })
+        .collect();
+    pieces
+        .sort_unstable_by_key(|&(order, entity, _)| (order, entity.to_bits()));
+    let mut cells = BTreeMap::<[i64; 3], Vec<Entity>>::new();
+    for (_, entity, merged) in pieces {
+        let Some(points) = world_points(world, entity) else {
+            continue;
+        };
+        let low = points.iter().fold(points[0], |m, p| m.inf(p));
+        let high = points.iter().fold(points[0], |m, p| m.sup(p));
+        if !merged && (high - low).max() > settings.max_size {
+            continue;
+        }
+        let centre = 0.5 * (low + high) / settings.cell;
+        let key = [0, 1, 2].map(|axis| centre[axis].floor() as i64);
+        cells.entry(key).or_default().push(entity);
+    }
+    for members in cells.into_values() {
+        if members.len() > 1 {
+            merge(world, &members);
+        }
+    }
 }
 
 /// Replaces sleeping pieces with one fixed triangle-mesh body in world
@@ -515,7 +618,7 @@ fn merge(world: &mut World, members: &[Entity]) {
     let mut mass = 0.0;
     for &entity in members {
         let (Some(transform), Some(renderer)) = (
-            world.get::<Transform>(entity).copied(),
+            pose(world, entity),
             world.get::<MeshRenderer>(entity).copied(),
         ) else {
             continue;
@@ -873,9 +976,557 @@ fn piece_mesh(cell: &Cell) -> MeshAsset {
     mesh
 }
 
+/// Makes a [`Heightfield`] break in square chunks of `chunk_cells` cells.
+/// A chunk whose contacts in one fixed tick bring `break_energy` joules is
+/// promoted: its height samples drop `depth` metres and the dug-out slab
+/// becomes one dynamic GPU box body ([`Debris`]), resting in the hole and
+/// thrown up by the energy beyond `break_energy`.
+#[derive(
+    Component, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(default)]
+pub struct TerrainFracture {
+    pub chunk_cells: u32,
+    /// Voronoi pieces a dug-out slab breaks into, around points drawn from
+    /// the scene's [`RandomSeed`] at the tick; 0 or 1 keeps one box.
+    pub pieces: u32,
+    /// Joules within one fixed tick; 0 never breaks.
+    pub break_energy: f32,
+    /// Metres the chunk's ground drops; the slab's thickness.
+    pub depth: f32,
+    /// kg per cubic metre of the slab.
+    pub density: f32,
+    /// Seconds a slab stays once it sleeps; 0 keeps it.
+    pub debris_lifetime: f32,
+    /// Seconds any [`Debris`] resting on this terrain sleeps before it
+    /// freezes back into the heights; 0 never refreezes.
+    pub refreeze: f32,
+    /// Chunks already promoted, as `row * chunk_columns + column`, sorted.
+    /// A chunk is promoted once.
+    pub broken: Vec<u32>,
+}
+
+impl Default for TerrainFracture {
+    fn default() -> Self {
+        Self {
+            chunk_cells: 4,
+            pieces: 1,
+            break_energy: 0.0,
+            depth: 0.5,
+            density: 2000.0,
+            debris_lifetime: 0.0,
+            refreeze: 0.0,
+            broken: Vec::new(),
+        }
+    }
+}
+
+/// Promotes struck [`TerrainFracture`] chunks, after [`break_fractures`].
+/// Terrains go in `SceneId` order (then `SpawnOrder`), chunks in index
+/// order, and the throw is drawn from the scene's [`RandomSeed`] at the
+/// fixed tick. At the [`DebrisBudget`] a chunk stays whole that tick, as an
+/// object does.
+// ponytail: the GPU solver sees a heightfield as its bounding box, so a slab
+// lifted inside that box is pushed onto its top; give the GPU heightfield
+// contacts if slabs must settle back into their holes.
+pub(super) fn break_terrain(world: &mut World) {
+    let mut struck = BTreeMap::<(Entity, u32), Impact>::new();
+    {
+        let Some(physics) = world.get_resource::<PhysicsWorld>() else {
+            return;
+        };
+        for contact in physics.contacts() {
+            if contact.sensor || contact.speed <= 0.0 {
+                continue;
+            }
+            for (terrain, other) in
+                [(contact.a, contact.b), (contact.b, contact.a)]
+            {
+                let (Some(fracture), Some(field), Some(transform)) = (
+                    world.get::<TerrainFracture>(terrain),
+                    world.get::<Heightfield>(terrain),
+                    world.get::<Transform>(terrain),
+                ) else {
+                    continue;
+                };
+                let Some(mass) = world
+                    .get::<RigidBody>(other)
+                    .filter(|body| body.kind == RigidBodyKind::Dynamic)
+                    .map(|body| body.mass)
+                else {
+                    continue;
+                };
+                let point = V::from(contact.point);
+                let Some(chunk) = chunk_at(fracture, field, transform, point)
+                else {
+                    continue;
+                };
+                let energy = 0.5 * mass * contact.speed * contact.speed;
+                let impact = struck.entry((terrain, chunk)).or_default();
+                impact.energy += energy;
+                if energy > impact.hardest {
+                    impact.hardest = energy;
+                    impact.point = point;
+                }
+            }
+        }
+    }
+    let mut breaking: Vec<_> = struck
+        .into_iter()
+        .filter(|((terrain, chunk), impact)| {
+            world.get::<TerrainFracture>(*terrain).is_some_and(|f| {
+                f.break_energy > 0.0
+                    && impact.energy >= f.break_energy
+                    && f.broken.binary_search(chunk).is_err()
+            })
+        })
+        .map(|((terrain, chunk), impact)| {
+            let id = world.get::<SceneId>(terrain).map(|id| id.0.as_u128());
+            let order = world.get::<SpawnOrder>(terrain).map(|o| o.0);
+            (id, order, terrain, chunk, impact)
+        })
+        .collect();
+    breaking.sort_unstable_by_key(|(id, order, terrain, chunk, _)| {
+        (*id, *order, terrain.to_bits(), *chunk)
+    });
+    let tick = world
+        .get_resource::<FrameTime>()
+        .map_or(0, |t| t.fixed_tick);
+    let seed = world
+        .get_resource::<RandomSeed>()
+        .copied()
+        .unwrap_or_default();
+    for (id, order, terrain, chunk, impact) in breaking {
+        let key = match (id, order) {
+            (Some(id), _) => id as u64 ^ (id >> 64) as u64,
+            (None, Some(order)) => order,
+            // Never the entity id, which shifts with unrelated spawns.
+            (None, None) => 0,
+        };
+        let stream =
+            RandomSeed::stream("terrain_fracture", key) ^ u64::from(chunk);
+        // The Voronoi points and the throws are new each tick, so two
+        // chunks never crack alike, yet a replay cracks them the same.
+        let pattern = seed.value(tick, stream ^ u64::MAX);
+        promote(world, terrain, chunk, impact, pattern, |k| {
+            seed.unit(tick, stream ^ k)
+        });
+    }
+}
+
+/// Columns and rows of chunks over `field`'s cells.
+fn chunk_grid(fracture: &TerrainFracture, field: &Heightfield) -> [usize; 2] {
+    let cells = fracture.chunk_cells.max(1) as usize;
+    let rows = field.heights.len().saturating_sub(1);
+    let columns = field
+        .heights
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(1);
+    [columns.div_ceil(cells), rows.div_ceil(cells)]
+}
+
+/// The chunk under the world point `point`, if it is over the field.
+fn chunk_at(
+    fracture: &TerrainFracture,
+    field: &Heightfield,
+    transform: &Transform,
+    point: V,
+) -> Option<u32> {
+    let [roll, pitch, yaw] = transform.rotation;
+    let turn = sim_math::rotation_from_euler(roll, pitch, yaw);
+    let local = (turn.inverse() * (point - V::from(transform.position)))
+        .component_div(&V::from(transform.scale));
+    let [columns, rows] = chunk_grid(fracture, field);
+    let size = fracture.chunk_cells.max(1) as f32 * field.spacing;
+    let column = (local.x + 0.5 * cells_x(field) as f32 * field.spacing) / size;
+    let row = (local.z + 0.5 * cells_z(field) as f32 * field.spacing) / size;
+    let inside = |at: f32, count: usize| at >= 0.0 && at < count as f32;
+    (inside(column, columns) && inside(row, rows))
+        .then(|| (row as usize * columns + column as usize) as u32)
+}
+
+fn cells_x(field: &Heightfield) -> usize {
+    field
+        .heights
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(1)
+}
+
+fn cells_z(field: &Heightfield) -> usize {
+    field.heights.len().saturating_sub(1)
+}
+
+/// Digs `chunk` out of `terrain` and spawns it as dynamic GPU debris, cut
+/// into `pieces` Voronoi cells around points picked by `pattern`; `draw(k)`
+/// in [0, 1) scales piece k's throw.
+fn promote(
+    world: &mut World,
+    terrain: Entity,
+    chunk: u32,
+    impact: Impact,
+    pattern: u64,
+    draw: impl Fn(u64) -> f32,
+) {
+    let (Some(fracture), Some(mut field), Some(transform)) = (
+        world.get::<TerrainFracture>(terrain).cloned(),
+        world.get::<Heightfield>(terrain).cloned(),
+        world.get::<Transform>(terrain).copied(),
+    ) else {
+        return;
+    };
+    let [columns, _] = chunk_grid(&fracture, &field);
+    let cells = fracture.chunk_cells.max(1) as usize;
+    let (row, column) = (chunk as usize / columns, chunk as usize % columns);
+    let first = [column * cells, row * cells];
+    let last = [
+        ((column + 1) * cells).min(cells_x(&field)),
+        ((row + 1) * cells).min(cells_z(&field)),
+    ];
+    // Every sample of the chunk, edges included, drops by `depth`; short
+    // rows count as 0 past their end, as in `Heightfield::mesh`.
+    let mut top = 0.0;
+    let mut samples = 0.0;
+    for z in first[1]..=last[1] {
+        let heights = &mut field.heights[z];
+        if heights.len() <= last[0] {
+            heights.resize(last[0] + 1, 0.0);
+        }
+        for height in &mut heights[first[0]..=last[0]] {
+            top += *height;
+            samples += 1.0;
+            *height -= fracture.depth;
+        }
+    }
+    let top = top / samples;
+    let spacing = field.spacing;
+    let local = V::new(
+        (0.5 * (first[0] + last[0]) as f32 - 0.5 * cells_x(&field) as f32)
+            * spacing,
+        top - 0.5 * fracture.depth,
+        (0.5 * (first[1] + last[1]) as f32 - 0.5 * cells_z(&field) as f32)
+            * spacing,
+    );
+    let size = V::new(
+        (last[0] - first[0]) as f32 * spacing,
+        fracture.depth,
+        (last[1] - first[1]) as f32 * spacing,
+    )
+    .component_mul(&V::from(transform.scale));
+    let [roll, pitch, yaw] = transform.rotation;
+    let turn = sim_math::rotation_from_euler(roll, pitch, yaw);
+    let position = V::from(transform.position)
+        + turn * local.component_mul(&V::from(transform.scale));
+    let half = 0.5 * size;
+    // (mesh, offset from the slab centre, scale, shape, volume) per piece.
+    let pieces: Vec<(Option<MeshAsset>, V, V, ColliderShape, f32)> =
+        if fracture.pieces > 1 {
+            let cut = Fracture {
+                pieces: fracture.pieces,
+                seed: pattern,
+                ..Fracture::default()
+            };
+            cut.fracture(&piece_mesh(&box_cell(-half, half)))
+                .pieces
+                .into_iter()
+                .map(centred)
+                .map(|(mesh, center, volume)| {
+                    let shape = ColliderShape::ConvexMesh;
+                    (Some(mesh), center, V::repeat(1.0), shape, volume)
+                })
+                .collect()
+        } else {
+            let shape = ColliderShape::Box {
+                half_extents: [0.5; 3],
+            };
+            vec![(None, V::zeros(), size, shape, size.x * size.y * size.z)]
+        };
+    if pieces.is_empty() || !make_room(world, pieces.len()) {
+        return;
+    }
+    let mass = fracture.density * size.x * size.y * size.z;
+    let excess = (impact.energy - fracture.break_energy).max(0.0);
+    let throw = (excess / mass.max(1e-6)).sqrt();
+    let up = turn * V::y();
+    let mut broken = fracture.broken.clone();
+    if let Err(at) = broken.binary_search(&chunk) {
+        broken.insert(at, chunk);
+    }
+    let layers = world.get::<CollisionLayers>(terrain).copied();
+    let name = world.get::<Name>(terrain).map(|name| name.0.clone());
+    world.entity_mut(terrain).insert((
+        field,
+        TerrainFracture {
+            broken,
+            ..fracture.clone()
+        },
+    ));
+    let mut group = None;
+    let mut spawned = Vec::with_capacity(pieces.len());
+    for (k, (mesh, center, scale, shape, volume)) in
+        pieces.into_iter().enumerate()
+    {
+        let Some((mesh, material)) =
+            world.get_resource_mut::<AssetServer>().map(|mut assets| {
+                // Its own mesh, so removing the debris frees only that.
+                let mesh = mesh.or_else(|| {
+                    assets.meshes.get(assets.fallback_mesh).cloned()
+                });
+                (
+                    assets.meshes.insert(mesh.unwrap_or_default()),
+                    assets.fallback_material,
+                )
+            })
+        else {
+            return;
+        };
+        let order = next_spawn_order(world);
+        let group = *group.get_or_insert(order.0);
+        let mut piece = world.spawn((
+            Transform {
+                position: (position + turn * center).into(),
+                rotation: transform.rotation,
+                scale: scale.into(),
+            },
+            MeshRenderer {
+                mesh,
+                material,
+                cast_shadows: true,
+                receive_shadows: true,
+            },
+            Collider {
+                shape,
+                ..Collider::default()
+            },
+            PhysicsBody {
+                simulation: SimulationClass::Gpu,
+                ..PhysicsBody::default()
+            },
+            // Reads state back so the budget can tell when the slab sleeps.
+            PhysicsSyncMode::SelectedState,
+            RigidBody {
+                kind: RigidBodyKind::Dynamic,
+                mass: fracture.density * volume,
+                linear_velocity: (up * throw * (0.5 + 0.5 * draw(k as u64)))
+                    .into(),
+                ..RigidBody::default()
+            },
+            order,
+            Debris {
+                group,
+                lifetime: fracture.debris_lifetime,
+                merge: false,
+                asleep_since: None,
+            },
+        ));
+        if let Some(layers) = layers {
+            piece.insert(layers);
+        }
+        spawned.push(piece.id());
+    }
+    let mut bounds = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
+    for corner in 0..8 {
+        let sign = |bit: u32| if corner & bit == 0 { -1.0 } else { 1.0 };
+        let p = position
+            + turn
+                * V::new(sign(1) * half.x, sign(2) * half.y, sign(4) * half.z);
+        for axis in 0..3 {
+            bounds[0][axis] = bounds[0][axis].min(p[axis]);
+            bounds[1][axis] = bounds[1][axis].max(p[axis]);
+        }
+    }
+    if let Some(mut events) = world.get_resource_mut::<EventQueue<Fractured>>()
+    {
+        events.send(Fractured {
+            entity: terrain,
+            name,
+            pieces: spawned,
+            point: impact.point.into(),
+            energy: impact.energy,
+            mass,
+            bounds,
+        });
+    }
+}
+
+/// Per fixed step, after [`manage_debris`]: [`Debris`] asleep for a
+/// terrain's [`TerrainFracture::refreeze`] seconds, with its bottom within
+/// one sample spacing of the ground under it, is despawned and its top
+/// stamped into the heightfield. Every sample nearest the piece's footprint
+/// rises to the piece's top, so the ground restores the piece's collision
+/// (a little more volume than the piece had, never less). Pieces go in
+/// [`SpawnOrder`], terrains in `SceneId` then `SpawnOrder` order, and a
+/// piece freezes into the first terrain that takes it.
+pub(super) fn refreeze_debris(world: &mut World) {
+    let (tick, step) =
+        world.get_resource::<FrameTime>().map_or((0, 0.0), |time| {
+            (time.fixed_tick, time.fixed_delta.as_secs_f32())
+        });
+    let mut terrains: Vec<_> = world
+        .query::<(
+            Entity,
+            &TerrainFracture,
+            &Heightfield,
+            &Transform,
+            Option<&SceneId>,
+            Option<&SpawnOrder>,
+        )>()
+        .iter(world)
+        .filter(|(_, fracture, ..)| fracture.refreeze > 0.0)
+        .map(|(entity, fracture, field, transform, scene, order)| {
+            let key = (scene.map(|s| s.0), order.map(|o| o.0));
+            (key, entity, fracture.refreeze, field.clone(), *transform)
+        })
+        .collect();
+    if terrains.is_empty() {
+        return;
+    }
+    terrains.sort_by(|a, b| (&a.0, a.1.to_bits()).cmp(&(&b.0, b.1.to_bits())));
+    let mut pieces: Vec<_> = world
+        .query::<(Entity, &Debris, Option<&SpawnOrder>)>()
+        .iter(world)
+        .filter_map(|(entity, debris, order)| {
+            let asleep =
+                tick.saturating_sub(debris.asleep_since?) as f32 * step;
+            Some((order.map(|o| o.0), entity, asleep))
+        })
+        .collect();
+    pieces
+        .sort_unstable_by_key(|&(order, entity, ..)| (order, entity.to_bits()));
+    let mut changed = vec![None::<[[f32; 3]; 2]>; terrains.len()];
+    for (_, entity, asleep) in pieces {
+        let Some(points) = world_points(world, entity) else {
+            continue;
+        };
+        if points.is_empty() {
+            continue;
+        }
+        for (index, (_, _, refreeze, field, transform)) in
+            terrains.iter_mut().enumerate()
+        {
+            if asleep < *refreeze || !stamp(field, transform, &points) {
+                continue;
+            }
+            let bounds = changed[index]
+                .get_or_insert([[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]]);
+            for p in &points {
+                for axis in 0..3 {
+                    bounds[0][axis] = bounds[0][axis].min(p[axis]);
+                    bounds[1][axis] = bounds[1][axis].max(p[axis]);
+                }
+            }
+            remove_debris(world, entity);
+            break;
+        }
+    }
+    for ((_, terrain, _, field, _), bounds) in terrains.into_iter().zip(changed)
+    {
+        let Some(bounds) = bounds else {
+            continue;
+        };
+        if let Some(mut heights) = world.get_mut::<Heightfield>(terrain) {
+            *heights = field;
+        }
+        if let Some(mut events) =
+            world.get_resource_mut::<EventQueue<Refrozen>>()
+        {
+            events.send(Refrozen { terrain, bounds });
+        }
+    }
+}
+
+/// Where `entity` is: a GPU body's own `Transform` is its spawn pose, so
+/// its read-back [`GpuStateMirror`] wins.
+fn pose(world: &World, entity: Entity) -> Option<Transform> {
+    world
+        .get::<GpuStateMirror>(entity)
+        .map(|mirror| mirror.transform)
+        .or_else(|| world.get::<Transform>(entity).copied())
+}
+
+/// The world-space vertices of `entity`'s mesh at its [`pose`]; `None`
+/// without a mesh or with an empty one.
+fn world_points(world: &World, entity: Entity) -> Option<Vec<V>> {
+    let pose = pose(world, entity)?;
+    let renderer = world.get::<MeshRenderer>(entity)?;
+    let mesh = world
+        .get_resource::<AssetServer>()?
+        .meshes
+        .get(renderer.mesh)?;
+    let [roll, pitch, yaw] = pose.rotation;
+    let turn = sim_math::rotation_from_euler(roll, pitch, yaw);
+    let points: Vec<_> = mesh
+        .vertices
+        .iter()
+        .map(|v| {
+            V::from(pose.position)
+                + turn * V::from(v.position).component_mul(&V::from(pose.scale))
+        })
+        .collect();
+    (!points.is_empty()).then_some(points)
+}
+
+/// Raises the samples nearest the footprint of `points` (world space) to
+/// their top, if their bottom rests within one spacing of that ground.
+fn stamp(field: &mut Heightfield, transform: &Transform, points: &[V]) -> bool {
+    let spacing = field.spacing;
+    let (columns, rows) = (cells_x(field), cells_z(field));
+    if spacing <= 0.0 || columns == 0 || rows == 0 {
+        return false;
+    }
+    let [roll, pitch, yaw] = transform.rotation;
+    let back = sim_math::rotation_from_euler(roll, pitch, yaw).inverse();
+    let mut low = V::repeat(f32::INFINITY);
+    let mut high = V::repeat(f32::NEG_INFINITY);
+    for p in points {
+        let local = (back * (p - V::from(transform.position)))
+            .component_div(&V::from(transform.scale));
+        low = low.inf(&local);
+        high = high.sup(&local);
+    }
+    // Nearest sample index along an axis of `cells` cells.
+    let index =
+        |x: f32, cells: usize| (x / spacing + 0.5 * cells as f32).round();
+    let range = |low: f32, high: f32, cells: usize| {
+        let first = index(low, cells).max(0.0);
+        let last = index(high, cells).min(cells as f32);
+        (first <= last).then_some(first as usize..=last as usize)
+    };
+    let (Some(xs), Some(zs)) =
+        (range(low.x, high.x, columns), range(low.z, high.z, rows))
+    else {
+        return false;
+    };
+    let height = |row: &Vec<f32>, x: usize| row.get(x).copied().unwrap_or(0.0);
+    let ground = zs
+        .clone()
+        .flat_map(|z| xs.clone().map(move |x| (z, x)))
+        .map(|(z, x)| height(&field.heights[z], x))
+        .fold(f32::NEG_INFINITY, f32::max);
+    if low.y > ground + spacing {
+        return false;
+    }
+    for z in zs {
+        let row = &mut field.heights[z];
+        if row.len() <= *xs.end() {
+            row.resize(xs.end() + 1, 0.0);
+        }
+        for h in &mut row[xs.clone()] {
+            *h = h.max(high.y);
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_ecs::prelude::With;
 
     fn box_mesh(half: [f32; 3]) -> MeshAsset {
         piece_mesh(&box_cell(-V::from(half), V::from(half)))
@@ -1234,5 +1885,443 @@ mod tests {
             .fracture(&MeshAsset::default())
             .pieces
             .is_empty());
+    }
+
+    /// An 8 by 8 m flat heightfield at the origin, in 4-cell chunks that
+    /// break at 200 J, and a 10 kg crate dropped from `height` at `x, z`.
+    fn terrain_and_crate(
+        padding: usize,
+        x: f32,
+        z: f32,
+        height: f32,
+    ) -> (crate::runtime::App, Entity) {
+        let mut app = crate::runtime::App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        for _ in 0..padding {
+            app.world_mut().spawn_empty();
+        }
+        let terrain = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                PhysicsBody::default(),
+                RigidBody {
+                    kind: RigidBodyKind::Fixed,
+                    ..RigidBody::default()
+                },
+                Collider {
+                    shape: ColliderShape::Heightfield,
+                    ..Collider::default()
+                },
+                Heightfield {
+                    heights: vec![vec![0.0; 9]; 9],
+                    ..Heightfield::default()
+                },
+                TerrainFracture {
+                    break_energy: 200.0,
+                    ..TerrainFracture::default()
+                },
+            ))
+            .id();
+        let world = app.world_mut();
+        let order = next_spawn_order(world);
+        world.spawn((
+            Transform::new([x, 0.5 + height, z]),
+            PhysicsBody::default(),
+            RigidBody {
+                mass: 10.0,
+                ..RigidBody::default()
+            },
+            Collider::default(),
+            order,
+        ));
+        (app, terrain)
+    }
+
+    #[test]
+    fn a_hard_hit_digs_its_terrain_chunk_out_as_a_gpu_slab() {
+        let (mut app, terrain) = terrain_and_crate(0, 2.0, 2.0, 3.0);
+        // A soft landing on another chunk breaks nothing.
+        let world = app.world_mut();
+        world.spawn((
+            Transform::new([-2.0, 0.7, -2.0]),
+            PhysicsBody::default(),
+            RigidBody {
+                mass: 10.0,
+                ..RigidBody::default()
+            },
+            Collider::default(),
+        ));
+        let mut seen = Vec::new();
+        for _ in 0..60 {
+            run(&mut app, 1);
+            let events = app.world_mut().resource::<EventQueue<Fractured>>();
+            seen.extend(events.iter().cloned());
+        }
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        let event = &seen[0];
+        assert_eq!(event.entity, terrain);
+        assert!(event.energy > 200.0 && event.energy < 400.0, "{event:?}");
+        assert_eq!(event.mass, 2000.0 * 4.0 * 0.5 * 4.0);
+        assert_eq!(event.bounds, [[0.0, -0.5, 0.0], [4.0, 0.0, 4.0]]);
+        let world = app.world();
+        let fracture = world.get::<TerrainFracture>(terrain).unwrap();
+        // Chunk row 1, column 1 of a 2 by 2 grid.
+        assert_eq!(fracture.broken, [3]);
+        let field = world.get::<Heightfield>(terrain).unwrap();
+        for (row, heights) in field.heights.iter().enumerate() {
+            for (column, &height) in heights.iter().enumerate() {
+                let dug = row >= 4 && column >= 4;
+                assert_eq!(
+                    height,
+                    if dug { -0.5 } else { 0.0 },
+                    "{row} {column}"
+                );
+            }
+        }
+        let slab = event.pieces[0];
+        let transform = world.get::<Transform>(slab).unwrap();
+        assert_eq!(transform.position, [2.0, -0.25, 2.0]);
+        assert_eq!(transform.scale, [4.0, 0.5, 4.0]);
+        let body = world.get::<RigidBody>(slab).unwrap();
+        assert_eq!(body.kind, RigidBodyKind::Dynamic);
+        assert_eq!(body.mass, event.mass);
+        let [vx, vy, vz] = body.linear_velocity;
+        assert!(vx == 0.0 && vy > 0.0 && vz == 0.0, "{body:?}");
+        let physics = world.get::<PhysicsBody>(slab).unwrap();
+        assert_eq!(physics.simulation, SimulationClass::Gpu);
+        assert!(world.get::<Debris>(slab).is_some());
+    }
+
+    #[test]
+    fn terrain_breaks_do_not_depend_on_entity_ids_and_hold_at_the_budget() {
+        let slab = |padding: usize| {
+            let (mut app, terrain) = terrain_and_crate(padding, -2.0, 2.0, 3.0);
+            run(&mut app, 60);
+            let world = app.world_mut();
+            let broken = world
+                .get::<TerrainFracture>(terrain)
+                .unwrap()
+                .broken
+                .clone();
+            let mut slabs = world
+                .query_filtered::<(&Transform, &RigidBody), With<Debris>>();
+            let slabs: Vec<_> = slabs
+                .iter(world)
+                .map(|(t, b)| (t.position, b.linear_velocity.map(f32::to_bits)))
+                .collect();
+            (broken, slabs)
+        };
+        let base = slab(0);
+        // Column 0, row 1.
+        assert_eq!(base.0, [2]);
+        assert_eq!(base.1.len(), 1);
+        assert_eq!(slab(7), base);
+        // With no room for debris the chunk stays whole.
+        let (mut app, terrain) = terrain_and_crate(0, -2.0, 2.0, 3.0);
+        app.world_mut().insert_resource(DebrisBudget(1));
+        app.world_mut().spawn((Debris {
+            group: 0,
+            lifetime: 0.0,
+            merge: false,
+            asleep_since: None,
+        },));
+        run(&mut app, 60);
+        let world = app.world();
+        assert!(world
+            .get::<TerrainFracture>(terrain)
+            .unwrap()
+            .broken
+            .is_empty());
+        assert!(world
+            .get::<Heightfield>(terrain)
+            .unwrap()
+            .heights
+            .iter()
+            .flatten()
+            .all(|&h| h == 0.0));
+    }
+
+    #[test]
+    fn gpu_debris_stopped_by_the_gpu_solver_makes_room_at_the_budget() {
+        // One GPU slab fills the budget; a dig waits until it has slept.
+        let dig = |velocity: [f32; 3]| {
+            let (mut app, terrain) = terrain_and_crate(0, -2.0, 2.0, 3.0);
+            app.world_mut().insert_resource(DebrisBudget(1));
+            let old = app
+                .world_mut()
+                .spawn((
+                    PhysicsBody {
+                        simulation: SimulationClass::Gpu,
+                        ..PhysicsBody::default()
+                    },
+                    RigidBody::default(),
+                    GpuStateMirror {
+                        tick: 3,
+                        transform: Transform::new([9.0, 0.0, 9.0]),
+                        linear_velocity: velocity,
+                        angular_velocity: [0.0; 3],
+                        custom_values: None,
+                    },
+                    Debris {
+                        group: 0,
+                        lifetime: 0.0,
+                        merge: false,
+                        asleep_since: None,
+                    },
+                ))
+                .id();
+            run(&mut app, 60);
+            let world = app.world();
+            let broken = world.get::<TerrainFracture>(terrain).unwrap();
+            (world.get_entity(old).is_ok(), broken.broken.clone())
+        };
+        assert_eq!(dig([0.0; 3]), (false, vec![2]));
+        assert_eq!(dig([0.0, -0.01, 0.0]), (true, vec![]));
+    }
+
+    #[test]
+    fn resting_debris_refreezes_into_the_terrain_it_sleeps_on() {
+        let (mut app, terrain) = terrain_and_crate(0, -2.0, 2.0, 100.0);
+        app.world_mut()
+            .get_mut::<TerrainFracture>(terrain)
+            .unwrap()
+            .refreeze = 1.0;
+        let piece = |app: &mut crate::runtime::App, at: [f32; 3], gpu: bool| {
+            let world = app.world_mut();
+            let order = next_spawn_order(world);
+            let (mesh, material) = {
+                let mut assets = world.resource_mut::<AssetServer>();
+                let material = assets.fallback_material;
+                (assets.meshes.insert(box_mesh([0.5; 3])), material)
+            };
+            let mut entity = world.spawn((
+                Transform::new(at),
+                PhysicsBody::default(),
+                RigidBody::default(),
+                Collider {
+                    shape: ColliderShape::ConvexMesh,
+                    ..Collider::default()
+                },
+                MeshRenderer {
+                    mesh,
+                    material,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                },
+                order,
+                Debris {
+                    group: order.0,
+                    lifetime: 0.0,
+                    merge: false,
+                    asleep_since: None,
+                },
+            ));
+            if gpu {
+                // Asleep on the GPU at x -1, z -1, its spawn pose far above.
+                entity.insert((
+                    PhysicsBody {
+                        simulation: SimulationClass::Gpu,
+                        ..PhysicsBody::default()
+                    },
+                    GpuStateMirror {
+                        tick: 1,
+                        transform: Transform::new([-1.0, 0.5, -1.0]),
+                        linear_velocity: [0.0; 3],
+                        angular_velocity: [0.0; 3],
+                        custom_values: None,
+                    },
+                ));
+            }
+            entity.id()
+        };
+        // Falls onto the terrain, sleeps, then freezes into it.
+        let falling = piece(&mut app, [1.0, 1.0, 1.0], false);
+        let gpu = piece(&mut app, [0.0, 50.0, 0.0], true);
+        // Sleeps on nothing far above the ground, so never freezes.
+        let floating = piece(&mut app, [3.0, 5.0, 3.0], false);
+        app.world_mut().get_mut::<RigidBody>(floating).unwrap().kind =
+            RigidBodyKind::Fixed;
+        let mut frozen = Vec::new();
+        for _ in 0..300 {
+            run(&mut app, 1);
+            let events = app.world().resource::<EventQueue<Refrozen>>();
+            frozen.extend(events.iter().cloned());
+        }
+        let world = app.world();
+        assert!(world.get_entity(falling).is_err());
+        assert!(world.get_entity(gpu).is_err());
+        assert!(world.get_entity(floating).is_ok());
+        let heights = &world.get::<Heightfield>(terrain).unwrap().heights;
+        // Sample 5 is at 1 m, sample 3 at -1 m; the pieces are 1 m tall.
+        for [z, x] in [[5, 5], [3, 3]] {
+            assert!((heights[z][x] - 1.0).abs() < 0.05, "{:?}", heights[z]);
+        }
+        // Far from both, and under the floating piece at 3 m.
+        for [z, x] in [[0, 0], [8, 8], [7, 7], [0, 8]] {
+            assert_eq!(heights[z][x], 0.0);
+        }
+        assert!(!frozen.is_empty());
+        assert!(frozen.iter().all(|e| e.terrain == terrain));
+    }
+
+    #[test]
+    fn small_sleeping_debris_merges_into_one_static_body_per_cell() {
+        let mut app = ground();
+        app.world_mut().insert_resource(DebrisAggregation {
+            cell: 4.0,
+            max_size: 0.5,
+        });
+        let piece = |app: &mut crate::runtime::App, x: f32, half: f32| {
+            let world = app.world_mut();
+            let order = next_spawn_order(world);
+            let (mesh, material) = {
+                let mut assets = world.resource_mut::<AssetServer>();
+                let material = assets.fallback_material;
+                (assets.meshes.insert(box_mesh([half; 3])), material)
+            };
+            world.spawn((
+                Transform::new([x, half + 0.05, 0.5]),
+                PhysicsBody::default(),
+                RigidBody {
+                    mass: 1.0,
+                    ..RigidBody::default()
+                },
+                Collider {
+                    shape: ColliderShape::ConvexMesh,
+                    ..Collider::default()
+                },
+                MeshRenderer {
+                    mesh,
+                    material,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                },
+                order,
+                Debris {
+                    group: order.0,
+                    lifetime: 0.0,
+                    merge: false,
+                    asleep_since: None,
+                },
+            ));
+        };
+        // Cell x -4..0 holds two small pieces and one too big to merge;
+        // cell 0..4 one small piece alone.
+        piece(&mut app, -1.0, 0.2);
+        piece(&mut app, -3.0, 0.2);
+        piece(&mut app, -2.0, 0.5);
+        piece(&mut app, 1.0, 0.2);
+        run(&mut app, 300);
+        let bodies = |app: &mut crate::runtime::App| {
+            let world = app.world_mut();
+            let mut bodies: Vec<_> = world
+                .query_filtered::<(&RigidBody, &Collider), With<Debris>>()
+                .iter(world)
+                .map(|(body, collider)| {
+                    (
+                        body.kind == RigidBodyKind::Fixed,
+                        collider.shape,
+                        body.mass,
+                    )
+                })
+                .collect();
+            bodies.sort_by(|a, b| a.2.total_cmp(&b.2));
+            bodies
+        };
+        let merged = (true, ColliderShape::TriangleMesh, 2.0);
+        let piece_body = |mass| (false, ColliderShape::ConvexMesh, mass);
+        assert_eq!(
+            bodies(&mut app),
+            [piece_body(1.0), piece_body(1.0), merged]
+        );
+        // A later piece joins the cell's aggregate.
+        piece(&mut app, -0.5, 0.2);
+        run(&mut app, 300);
+        assert_eq!(
+            bodies(&mut app),
+            [
+                piece_body(1.0),
+                piece_body(1.0),
+                (true, ColliderShape::TriangleMesh, 3.0)
+            ]
+        );
+    }
+
+    /// Pieces of each dig, as (offset from the dug chunk's centre, mass
+    /// bits), with the crates at `xs` (z 2) and the scene seeded `seed`.
+    fn cracked(
+        padding: usize,
+        seed: u64,
+        xs: &[f32],
+    ) -> Vec<Vec<([u32; 3], u32)>> {
+        let (mut app, terrain) = terrain_and_crate(padding, xs[0], 2.0, 3.0);
+        let world = app.world_mut();
+        world.insert_resource(RandomSeed(seed));
+        world.get_mut::<TerrainFracture>(terrain).unwrap().pieces = 6;
+        for &x in &xs[1..] {
+            let order = next_spawn_order(world);
+            world.spawn((
+                Transform::new([x, 3.5, 2.0]),
+                PhysicsBody::default(),
+                RigidBody {
+                    mass: 10.0,
+                    ..RigidBody::default()
+                },
+                Collider::default(),
+                order,
+            ));
+        }
+        let mut digs = Vec::new();
+        for _ in 0..60 {
+            run(&mut app, 1);
+            let events = app.world_mut().resource::<EventQueue<Fractured>>();
+            digs.extend(events.iter().cloned());
+        }
+        let world = app.world();
+        digs.iter()
+            .map(|dig| {
+                let [low, high] = dig.bounds;
+                let centre = [0, 1, 2].map(|a| 0.5 * (low[a] + high[a]));
+                let mut pieces: Vec<_> = dig
+                    .pieces
+                    .iter()
+                    .map(|&piece| {
+                        let at =
+                            world.get::<Transform>(piece).unwrap().position;
+                        let body = world.get::<RigidBody>(piece).unwrap();
+                        assert_eq!(body.kind, RigidBodyKind::Dynamic);
+                        let physics = world.get::<PhysicsBody>(piece).unwrap();
+                        assert_eq!(physics.simulation, SimulationClass::Gpu);
+                        let shape = world.get::<Collider>(piece).unwrap().shape;
+                        assert_eq!(shape, ColliderShape::ConvexMesh);
+                        (
+                            [0, 1, 2].map(|a| (at[a] - centre[a]).to_bits()),
+                            body.mass.to_bits(),
+                        )
+                    })
+                    .collect();
+                pieces.sort_unstable();
+                let mass: f32 =
+                    pieces.iter().map(|&(_, m)| f32::from_bits(m)).sum();
+                assert!(
+                    (mass - dig.mass).abs() < 1e-3 * dig.mass,
+                    "{mass} {dig:?}"
+                );
+                pieces
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dug_slabs_crack_in_seeded_patterns_that_differ_per_chunk() {
+        let base = cracked(0, 1, &[-2.0, 2.0]);
+        assert_eq!(base.len(), 2);
+        assert!(base.iter().all(|dig| dig.len() == 6), "{base:?}");
+        // Two chunks dug in the same tick crack differently.
+        assert_ne!(base[0], base[1]);
+        // Unrelated entities change nothing; another scene seed does.
+        assert_eq!(cracked(7, 1, &[-2.0, 2.0]), base);
+        assert_ne!(cracked(0, 2, &[-2.0, 2.0]), base);
     }
 }

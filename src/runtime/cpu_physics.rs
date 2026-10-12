@@ -819,7 +819,9 @@ impl MeshData {
 
 /// Mesh colliders built by the last step, keyed by mesh, revision, scale
 /// and kind, so unchanged meshes are not rebuilt every step.
-type MeshCache = HashMap<(u64, u64, [u32; 3], bool), Arc<MeshData>>;
+/// Collision meshes by owner, revision, scale and kind: 0 triangles, 1 hull,
+/// 2 + n the nth hull of a [`super::ConvexDecomposition`].
+type MeshCache = HashMap<(u64, u64, [u32; 3], u32), Arc<MeshData>>;
 
 #[derive(Clone, Debug)]
 struct Body {
@@ -2304,7 +2306,7 @@ fn gather_bodies(world: &mut World, meshes: &mut MeshCache) -> Vec<Body> {
                             entity.to_bits(),
                             u64::from(field.last_changed().get()),
                             pose.scale.map(f32::to_bits),
-                            false,
+                            0,
                         );
                         let mesh = match meshes.get(&key) {
                             Some(mesh) => mesh.clone(),
@@ -2335,7 +2337,7 @@ fn gather_bodies(world: &mut World, meshes: &mut MeshCache) -> Vec<Body> {
                             entity.to_bits(),
                             u64::from(outline.last_changed().get()),
                             pose.scale.map(f32::to_bits),
-                            convex,
+                            u32::from(convex),
                         );
                         let mesh = match meshes.get(&key) {
                             Some(mesh) => mesh.clone(),
@@ -2351,6 +2353,25 @@ fn gather_bodies(world: &mut World, meshes: &mut MeshCache) -> Vec<Body> {
                         } else {
                             Shape::Triangles(mesh)
                         }
+                    }
+                    None if collider.shape == ColliderShape::ConvexMesh
+                        && world
+                            .entity(entity)
+                            .contains::<super::ConvexDecomposition>() =>
+                    {
+                        let assets = assets?;
+                        let handle = renderer?.mesh;
+                        decomposed_shape(
+                            meshes,
+                            &mut used,
+                            entity,
+                            world
+                                .entity(entity)
+                                .get_ref::<super::ConvexDecomposition>()?,
+                            assets.meshes.get(handle)?,
+                            assets.meshes.revision(handle)?,
+                            pose.scale,
+                        )
                     }
                     None => {
                         let handle = renderer?.mesh;
@@ -2370,13 +2391,13 @@ fn gather_bodies(world: &mut World, meshes: &mut MeshCache) -> Vec<Body> {
                                 revision << 32
                                     | u64::from(tags.last_changed().get()),
                                 pose.scale.map(f32::to_bits),
-                                false,
+                                0,
                             ),
                             None => (
                                 handle.key(),
                                 revision,
                                 pose.scale.map(f32::to_bits),
-                                convex,
+                                u32::from(convex),
                             ),
                         };
                         let mesh = match meshes.get(&key) {
@@ -2479,6 +2500,55 @@ fn gather_bodies(world: &mut World, meshes: &mut MeshCache) -> Vec<Body> {
     )
 }
 
+/// The hulls of `entity`'s mesh under its [`super::ConvexDecomposition`]
+/// as one compound, cached per entity and settings change; one hull of the
+/// mesh when it spans no volume.
+// ponytail: every entity decomposes its own copy of a shared mesh; key the
+// cache by mesh and settings if many props share one.
+fn decomposed_shape(
+    meshes: &MeshCache,
+    used: &mut MeshCache,
+    entity: Entity,
+    settings: bevy_ecs::change_detection::Ref<super::ConvexDecomposition>,
+    mesh: &MeshAsset,
+    revision: u64,
+    scale: [f32; 3],
+) -> Shape {
+    let key = |kind: u32| {
+        (
+            entity.to_bits(),
+            revision << 32 | u64::from(settings.last_changed().get()),
+            scale.map(f32::to_bits),
+            kind,
+        )
+    };
+    let mut hulls: Vec<Arc<MeshData>> = (2..)
+        .map_while(|kind| meshes.get(&key(kind)).cloned())
+        .collect();
+    if hulls.is_empty() {
+        hulls = super::decompose::decompose(mesh, *settings)
+            .iter()
+            .map(|hull| Arc::new(MeshData::new(hull, scale, true)))
+            .collect();
+    }
+    if hulls.is_empty() {
+        hulls.push(Arc::new(MeshData::new(mesh, scale, true)));
+    }
+    for (kind, hull) in (2..).zip(&hulls) {
+        used.insert(key(kind), hull.clone());
+    }
+    Shape::Compound(
+        hulls
+            .into_iter()
+            .map(|hull| Part {
+                offset: Vector3::zeros(),
+                rotation: Rotation3::identity(),
+                shape: Shape::Hull(hull),
+            })
+            .collect(),
+    )
+}
+
 /// Folds the solid collider children of each dynamic CPU body into that
 /// body as a [`Shape::Compound`], so they move with it (Godot's compound
 /// rigid body). Contacts and ray hits on a child report the parent.
@@ -2515,16 +2585,21 @@ fn merge_compounds(
             continue;
         };
         merged[index] = true;
-        parts.entry(host).or_default().push(Part {
-            offset: Vector3::from(local.position)
-                .component_mul(&Vector3::from(host_pose.scale)),
-            rotation: sim_math::rotation_from_euler(
-                local.rotation[0],
-                local.rotation[1],
-                local.rotation[2],
-            ),
-            shape: body.shape.clone(),
-        });
+        let offset = Vector3::from(local.position)
+            .component_mul(&Vector3::from(host_pose.scale));
+        let rotation = sim_math::rotation_from_euler(
+            local.rotation[0],
+            local.rotation[1],
+            local.rotation[2],
+        );
+        // Compounds stay one level deep: a decomposed child adds its hulls.
+        parts.entry(host).or_default().extend(
+            flat_parts(&body.shape).into_iter().map(|part| Part {
+                offset: offset + rotation * part.offset,
+                rotation: rotation * part.rotation,
+                shape: part.shape,
+            }),
+        );
     }
     bodies
         .into_iter()
@@ -2532,13 +2607,11 @@ fn merge_compounds(
         .filter(|(index, _)| !merged[*index])
         .map(|(index, (_, mut body))| {
             if let Some(children) = parts.remove(&index) {
-                let own = Part {
-                    offset: Vector3::zeros(),
-                    rotation: Rotation3::identity(),
-                    shape: body.shape.clone(),
-                };
                 body.shape = Shape::Compound(
-                    std::iter::once(own).chain(children).collect(),
+                    flat_parts(&body.shape)
+                        .into_iter()
+                        .chain(children)
+                        .collect(),
                 );
                 if body.inverse_inertia != Vector3::zeros() {
                     body.inverse_inertia =
@@ -2548,6 +2621,18 @@ fn merge_compounds(
             body
         })
         .collect()
+}
+
+/// The parts of a compound, or the shape as its one part.
+fn flat_parts(shape: &Shape) -> Vec<Part> {
+    match shape {
+        Shape::Compound(parts) => parts.to_vec(),
+        shape => vec![Part {
+            offset: Vector3::zeros(),
+            rotation: Rotation3::identity(),
+            shape: shape.clone(),
+        }],
+    }
 }
 
 /// Candidates from a three-dimensional bounding-sphere broad phase. Sweep

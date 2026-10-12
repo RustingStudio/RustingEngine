@@ -1313,3 +1313,257 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod deformable_scenarios {
+    use std::time::Duration;
+
+    use super::HeadlessCapture;
+    use crate::runtime::gpu_cloth::{GpuCloth, GpuSoftBody};
+    use crate::runtime::{
+        Cloth, ClothSettings, ClothVolume, Collider, ColliderShape, Debris,
+        Fluid, FluidSettings, FluidSolver, FluidVolume, Fracture, FrameTime,
+        MeshRenderer, PhysicsBody, RigidBody, RigidBodyKind, Rope, SoftBody,
+        SoftBodySettings, SoftBodyVolume,
+    };
+    use crate::{App, AssetPlugin, AssetServer, Transform};
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn every_deformable_kind_runs_its_scenario_in_one_gpu_frame_loop() {
+        let mut app = App::new();
+        app.add_plugin(AssetPlugin).unwrap();
+        app.add_plugin(crate::runtime::RenderExtractPlugin).unwrap();
+        let body = |app: &mut App, at, shape, kind| {
+            app.spawn((
+                Transform::new(at),
+                PhysicsBody::default(),
+                RigidBody {
+                    kind,
+                    ..RigidBody::default()
+                },
+                Collider {
+                    shape,
+                    ..Collider::default()
+                },
+            ))
+        };
+        body(
+            &mut app,
+            [0.0, -0.5, 0.0],
+            ColliderShape::Box {
+                half_extents: [40.0, 0.5, 40.0],
+            },
+            RigidBodyKind::Fixed,
+        );
+        // GPU cloth: a sheet hung by its top row.
+        let mut sheet = Cloth::grid(
+            [-20.0, 2.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [6, 6],
+            0.125,
+            0.3,
+        )
+        .unwrap();
+        for i in 0..7 {
+            sheet.pin(i);
+        }
+        let rests: Vec<f32> = sheet
+            .edges()
+            .iter()
+            .map(|&[a, b]| {
+                distance(
+                    sheet.positions[a as usize],
+                    sheet.positions[b as usize],
+                )
+            })
+            .collect();
+        let cloth = app.spawn((
+            ClothVolume::new(
+                ClothSettings {
+                    substeps: 8,
+                    ..ClothSettings::default()
+                },
+                sheet,
+            ),
+            GpuCloth::default(),
+        ));
+        // GPU soft body: a block dropped onto the floor.
+        let block =
+            SoftBody::block([-12.0, 0.5, -0.5], [3, 3, 3], 0.25, 1000.0)
+                .unwrap();
+        let rest_volume = block.rest_volume();
+        let soft = app.spawn((
+            SoftBodyVolume::new(SoftBodySettings::default(), block),
+            GpuSoftBody::default(),
+        ));
+        // Rope: a 5 kg weight on a 3 m rope from a hook 6 m up.
+        let weight = body(
+            &mut app,
+            [-4.0, 4.0, 0.0],
+            ColliderShape::Box {
+                half_extents: [0.25; 3],
+            },
+            RigidBodyKind::Dynamic,
+        );
+        app.world_mut().get_mut::<RigidBody>(weight).unwrap().mass = 5.0;
+        app.world_mut().entity_mut(weight).insert(Rope {
+            target_anchor: [-4.0, 6.0, 0.0],
+            length: 3.0,
+            ..Rope::default()
+        });
+        // Fluid and sand: one block of each dropped into its own box.
+        let pour = |app: &mut App, x: f32, solver| {
+            let spacing = FluidSettings::default().spacing;
+            let settings = FluidSettings {
+                bounds: ([x, 0.0, 0.0], [x + 0.6, 2.0, 0.6]),
+                solver,
+                ..FluidSettings::default()
+            };
+            let fluid = Fluid::block([x + 0.1, 0.5, 0.1], [5, 5, 5], spacing);
+            app.spawn(FluidVolume::new(settings, fluid))
+        };
+        let water = pour(&mut app, 4.0, FluidSolver::Particles);
+        let sand = pour(&mut app, 8.0, FluidSolver::Granular);
+        // Fracture: a 10 kg crate that breaks into 6 pieces dropped 3 m.
+        let renderer = {
+            let mut assets = app.world_mut().resource_mut::<AssetServer>();
+            MeshRenderer {
+                mesh: assets.meshes.insert(
+                    crate::assets::procedural_primitive_mesh(
+                        crate::assets::PrimitiveShape::Cube,
+                    ),
+                ),
+                material: assets.fallback_material,
+                cast_shadows: true,
+                receive_shadows: true,
+            }
+        };
+        app.spawn((
+            Transform::new([14.0, 3.5, 0.0]),
+            PhysicsBody::default(),
+            RigidBody {
+                mass: 10.0,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::ConvexMesh,
+                ..Collider::default()
+            },
+            renderer,
+            Fracture {
+                pieces: 6,
+                break_energy: 100.0,
+                ..Fracture::default()
+            },
+        ));
+
+        let mut capture = HeadlessCapture::new([16, 16]).unwrap();
+        let mut lowest_weight = f32::MAX;
+        for _ in 0..120 {
+            capture
+                .frame(&mut app, Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+            let at = app.world().get::<Transform>(weight).unwrap().position;
+            lowest_weight = lowest_weight.min(at[1]);
+        }
+        let world = app.world();
+        let now = world.resource::<FrameTime>().fixed_tick;
+        assert_eq!(now, 120);
+
+        // The cloth kept up with the fixed tick, hangs without stretching
+        // and its free edge swung down.
+        let reached = world.get::<GpuCloth>(cloth).unwrap().tick.unwrap();
+        assert!(now - reached <= 4, "cloth at {reached} of {now}");
+        let sheet = &world.get::<ClothVolume>(cloth).unwrap().cloth;
+        let strain = sheet
+            .edges()
+            .iter()
+            .zip(&rests)
+            .map(|(&[a, b], rest)| {
+                let [a, b] = [a, b].map(|i| sheet.positions[i as usize]);
+                distance(a, b) / rest - 1.0
+            })
+            .fold(0.0_f32, f32::max);
+        assert!(strain < 0.05, "cloth stretched {strain}");
+        assert!(sheet.positions[45][1] < 1.5, "{:?}", sheet.positions[45]);
+
+        // The soft block landed on the floor and kept its volume.
+        let reached = world.get::<GpuSoftBody>(soft).unwrap().tick.unwrap();
+        assert!(now - reached <= 4, "soft body at {reached} of {now}");
+        let block = &world.get::<SoftBodyVolume>(soft).unwrap().body;
+        let lowest = block
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::MAX, f32::min);
+        assert!((-1e-3..0.05).contains(&lowest), "soft body low at {lowest}");
+        let kept = block.volume() / rest_volume;
+        assert!((kept - 1.0).abs() < 0.02, "soft body volume {kept}");
+
+        // The rope caught the weight at its length below the hook.
+        assert!(
+            (2.7..3.1).contains(&lowest_weight),
+            "weight fell to {lowest_weight}"
+        );
+
+        // Water and sand fell, stayed in their boxes and came to rest.
+        for (volume, top_below, still) in [(water, 0.5, 0.5), (sand, 0.5, 0.05)]
+        {
+            let volume = world.get::<FluidVolume>(volume).unwrap();
+            let (min, max) = volume.settings.bounds;
+            for p in &volume.fluid.positions {
+                let inside = (0..3).all(|i| {
+                    p[i].is_finite()
+                        && p[i] >= min[i] - 1e-4
+                        && p[i] <= max[i] + 1e-4
+                });
+                assert!(inside, "{p:?} left {min:?}..{max:?}");
+            }
+            let top = volume
+                .fluid
+                .positions
+                .iter()
+                .map(|p| p[1])
+                .fold(0.0, f32::max);
+            assert!(
+                top < top_below,
+                "{:?} top at {top}",
+                volume.settings.solver
+            );
+            let speed = volume
+                .fluid
+                .velocities
+                .iter()
+                .map(|&v| distance(v, [0.0; 3]))
+                .sum::<f32>()
+                / volume.fluid.velocities.len() as f32;
+            assert!(
+                speed < still,
+                "{:?} at {speed} m/s",
+                volume.settings.solver
+            );
+        }
+
+        // The crate broke into its six pieces, all resting on the floor.
+        let world = app.world_mut();
+        let pieces: Vec<f32> = world
+            .query::<(&Transform, &Debris)>()
+            .iter(world)
+            .map(|(transform, _)| transform.position[1])
+            .collect();
+        assert_eq!(pieces.len(), 6, "{pieces:?}");
+        assert!(
+            pieces.iter().all(|&y| (0.0..1.0).contains(&y)),
+            "{pieces:?}"
+        );
+    }
+
+    fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+        (nalgebra::Vector3::from(a) - nalgebra::Vector3::from(b)).norm()
+    }
+}

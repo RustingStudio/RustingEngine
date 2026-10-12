@@ -37,7 +37,8 @@ use crate::runtime::{
     REFLECTION_PROBE_COMPONENT, RENDER_BOUNDS_COMPONENT, REVERB_ZONE_COMPONENT,
     ROPE_COMPONENT, SCENE_INSTANCE_COMPONENT, SKIN_COMPONENT,
     SLIDE_SOUND_COMPONENT, SOFT_BLOCK_COMPONENT, SOUND_CUE_COMPONENT,
-    TERRAIN_COMPONENT, TWEEN_COMPONENT, VEHICLE_COMPONENT, WATER_COMPONENT,
+    TERRAIN_COMPONENT, TERRAIN_FRACTURE_COMPONENT, TWEEN_COMPONENT,
+    VEHICLE_COMPONENT, WATER_COMPONENT,
 };
 use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
@@ -303,6 +304,14 @@ pub(in crate::editor) fn component_help(
         MESH_SURFACES_COMPONENT => (
             "Gives each triangle of this Triangle Mesh collider its own surface.",
             "Ice patches, mud and metal grates inside one level mesh.",
+        ),
+        TERRAIN_FRACTURE_COMPONENT => (
+            "Digs a chunk of this heightfield out as a dynamic GPU slab when hit hard enough.",
+            "Craters, collapsing ground and terrain that shells and vehicles break up.",
+        ),
+        crate::runtime::CONVEX_DECOMPOSITION_COMPONENT => (
+            "Lets this Convex Mesh collider follow a concave mesh as several convex hulls.",
+            "Dynamic bowls, crates with open tops, chairs and L-shaped props.",
         ),
         FRACTURE_COMPONENT => (
             "Breaks this object's mesh into Voronoi pieces and slices, with the graph of which pieces touch.",
