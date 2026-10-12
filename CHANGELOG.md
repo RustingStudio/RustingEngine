@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-12
+
+Concave dynamic colliders, terrain destruction and debris budgets, decals and physics-driven particles, 2D rendering in the scene, world-space text, golden-image tests, packed asset archives, mods, and procedural generation. Needs `rusting-core` 0.2.1.
+
 ### Added
 
 - `ConvexDecomposition` (`rusting.convex_decomposition`) makes a `ConvexMesh` collider follow a concave mesh as decomposed hulls on the CPU solver, so concave props can be dynamic; scene-file settings are clamped to 128 voxels per axis and 256 hulls.
@@ -67,6 +71,7 @@
 
 ### Fixed
 
+- `rusting-core` 0.2.1: transforms with mirrored or flattened scale decompose without losing their matrix, and hierarchy cycle rejection is tested for deep, self and pre-existing cycles.
 - A body that loses its `PhysicsBody` component no longer keeps a stale `PhysicsId`, and a `PhysicsId` slot is retired at its last generation instead of wrapping, so old GPU events can never reach a newer body
 
 ## [2.4.1] - 2026-10-10

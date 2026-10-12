@@ -1,6 +1,6 @@
 [package]
 name = "rusting-core"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Vasyl Trefilov <drenfor228@gmail.com>"]
 edition = "2021"
 description = "Core ECS components, transforms, hierarchy, time, input, events, and schedule stages for RustingEngine"

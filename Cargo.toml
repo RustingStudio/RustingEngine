@@ -1,6 +1,6 @@
 [package]
 name = "rusting_engine"
-version = "2.4.1"
+version = "2.5.0"
 authors = ["Vasyl Trefilov <drenfor228@gmail.com>"]
 edition = "2021"
 description = "Vulkan 3D game engine with GPU-accelerated physics for massive physics-heavy scenes"
@@ -70,7 +70,7 @@ gpu-tests = []
 steam = []
 
 [dependencies]
-rusting-core = { version = "0.2.0", path = "crates/rusting-core" }
+rusting-core = { version = "0.2.1", path = "crates/rusting-core" }
 bytemuck = "1.25.0"
 nalgebra = "0.34.2"
 rand = "0.10.0"
