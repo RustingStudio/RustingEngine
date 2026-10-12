@@ -22533,6 +22533,65 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn soft_block_textures_land_upright_and_unmirrored() {
+        use crate::runtime::soft_body::{skin_uv_mesh, SoftBody};
+        use crate::runtime::ExtractedRenderable;
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A 1 m soft block centered on the origin with a 2 x 2 image: red,
+        // green on the top row, blue, white below, on the side facing the
+        // camera.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let image = scene.assets.textures.insert(TextureAsset {
+            size: [2, 2],
+            rgba8: [
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [255, 255, 255, 255],
+            ]
+            .concat(),
+            color_space: TextureColorSpace::Srgb,
+            sampler: TextureSampler::default(),
+        });
+        let material = scene.assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color_texture: Some(image),
+            ..Default::default()
+        });
+        let body = SoftBody::block([-0.5; 3], [2, 2, 2], 0.5, 1000.0).unwrap();
+        let rest = body.positions.clone();
+        let mesh = scene.assets.meshes.insert(skin_uv_mesh(&body, &rest));
+        scene.render_world.renderables = vec![ExtractedRenderable {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+            transform: crate::runtime::GlobalTransform::default(),
+            mesh,
+            material,
+            cast_shadows: false,
+            receive_shadows: false,
+            bounds: None,
+        }];
+        scene.render_world.renderables_revision += 1;
+        // Pixels are 1/16 m; the quadrant centers sit 0.25 m off center.
+        let quadrants = [
+            ([12, 12], [true, false, false]),
+            ([20, 12], [false, true, false]),
+            ([12, 20], [false, false, true]),
+            ([20, 20], [true; 3]),
+        ];
+        for (pixel, want) in quadrants {
+            let got = render_pixel(&mut scene, pixel);
+            assert_eq!(got.map(|c| c > 150), want, "pixel {pixel:?}: {got:?}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn cloth_textures_land_upright_and_unmirrored() {
         use crate::runtime::cloth::{cloth_mesh, Cloth};
         use crate::runtime::ExtractedRenderable;

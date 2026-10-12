@@ -260,6 +260,16 @@ The new cut faces inside get flat normals and the texture laid flat on
 them at one repeat per meter. A curved object breaks into flat-sided
 pieces, because each piece is convex.
 
+## Cloth and soft blocks
+
+`rusting.cloth` and `rusting.soft_block` take a `color` (linear RGBA) and
+a `texture` (asset path), and the color is multiplied into the image. A
+cloth sheet shows the image once across the sheet, with its top row along
+the top edge. A soft block shows the image once on each side, upright on
+the four walls. The image is fixed to the particles, so it stretches,
+squashes and tears with the body. Blocks or sheets that leave both unset
+share one plain material.
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,

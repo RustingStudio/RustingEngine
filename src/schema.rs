@@ -1091,9 +1091,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.soft_block",
-        summary: "XPBD soft body: a block of count_x by count_y by count_z cubes of spacing metres centered on the entity, each cut into six tetrahedra that keep their edge lengths and volumes. softness (edge compliance) 0 is rigid and 1e-3 a wobbly jelly; squash lets the volume change; tear_strain above 0 tears edges stretched past rest times 1 + tear_strain. It falls under gravity every fixed tick, keeps out of sphere, box and capsule colliders and pushes dynamic bodies back. visible draws its outer faces (and the cuts once torn). CPU only, deterministic; at most 4096 particles.",
+        summary: "XPBD soft body: a block of count_x by count_y by count_z cubes of spacing metres centered on the entity, each cut into six tetrahedra that keep their edge lengths and volumes. softness (edge compliance) 0 is rigid and 1e-3 a wobbly jelly; squash lets the volume change; tear_strain above 0 tears edges stretched past rest times 1 + tear_strain. It falls under gravity every fixed tick, keeps out of sphere, box and capsule colliders and pushes dynamic bodies back. visible draws its outer faces (and the cuts once torn) in color (linear RGBA) times texture, an image laid once on each side of the block, upright on the walls, that squashes and tears with it. CPU only, deterministic; at most 4096 particles.",
         gpu: NO_GPU,
-        example: || json!({"spacing": 0.1, "count_x": 4, "count_y": 4, "count_z": 4, "density": 1000.0, "softness": 0.0001, "squash": 0.0, "damping": 1.0, "tear_strain": 0.0, "substeps": 10, "visible": true}),
+        example: || json!({"spacing": 0.1, "count_x": 4, "count_y": 4, "count_z": 4, "density": 1000.0, "softness": 0.0001, "squash": 0.0, "damping": 1.0, "tear_strain": 0.0, "substeps": 10, "visible": true, "color": [0.35, 0.8, 0.3, 1.0], "texture": ""}),
     },
     ComponentSection {
         key: "rusting.cloth",

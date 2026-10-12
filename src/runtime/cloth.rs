@@ -630,22 +630,13 @@ fn sheet_material(
     if sheet.color == CLOTH_COLOR && sheet.texture.as_os_str().is_empty() {
         return named_material(assets, "Cloth", CLOTH_COLOR, 0.8);
     }
-    let texture = (!sheet.texture.as_os_str().is_empty())
-        .then(|| assets.load_texture(&sheet.texture))
-        .and_then(|loaded| {
-            loaded
-                .map_err(|error| {
-                    eprintln!("cloth texture {:?}: {error}", sheet.texture);
-                })
-                .ok()
-        });
-    assets.materials.insert(crate::assets::MaterialAsset {
-        name: "Cloth".into(),
-        base_color: sheet.color,
-        base_color_texture: texture,
-        roughness: 0.8,
-        ..crate::assets::MaterialAsset::default()
-    })
+    super::soft_body::textured_material(
+        assets,
+        "Cloth",
+        sheet.color,
+        &sheet.texture,
+        0.8,
+    )
 }
 
 /// Both sides of a cloth's triangles, each side with its own smooth

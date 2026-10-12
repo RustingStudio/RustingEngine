@@ -6493,7 +6493,7 @@ fn soft_blocks_round_trip_through_scenes_and_land_on_a_box() {
     };
     let mut app = App::new();
     app.add_plugin(crate::assets::AssetPlugin).unwrap();
-    app.spawn((Transform::new([0.0, 1.0, 0.0]), block));
+    app.spawn((Transform::new([0.0, 1.0, 0.0]), block.clone()));
     app.spawn((
         Transform::new([0.0, -0.5, 0.0]),
         PhysicsBody::default(),

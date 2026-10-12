@@ -3063,8 +3063,22 @@ Depends on: Milestones 3 and 4.
   went from 0.40 s to 0.50 s. Full check: fmt, clippy x3,
   `cargo test --workspace` (lib 968) and the gpu-tests run (lib 1131)
   pass.
-  Not done: soft-body skin textures, fluid surface shading beyond its
-  material, UVs for cloth curved at rest.
+  Soft blocks: `rusting.soft_block` gains `color` and `texture` (shared
+  `textured_material` with cloth), and `skin_uv_mesh` gives the skin a
+  vertex per triangle corner with box-projected UVs from the rest
+  particles (each side filled once, upright on the walls). Docs:
+  `docs/look-and-feel.md` "Cloth and soft blocks". Evidence: unit tests
+  `soft_skin_uvs_fill_each_side_once_and_stay_on_the_particles` (8
+  triangles per side of a 2x2x2 block, each corner at its expected UV,
+  unchanged after squashing and moving) and
+  `soft_blocks_draw_in_their_color_and_plain_ones_share_the_jelly`; GPU
+  test `soft_block_textures_land_upright_and_unmirrored` (a 2x2 image's
+  quadrants land on the matching screen quadrants). It failed with v
+  flipped on the walls and with the skin built without UVs. Full check:
+  fmt, clippy x3, `cargo test --workspace` (lib 970) and the gpu-tests
+  run (lib 1134) pass.
+  Not done: fluid surface shading beyond its material, UVs for cloth
+  curved at rest.
 - [x] Effect budget and quality-profile scaling for particles and decals.
   `particle_budget` and `decal_budget` (`src/rendering/scene_renderer.rs`,
   next to `light_budget`) cap each frame by the resolved quality profile:

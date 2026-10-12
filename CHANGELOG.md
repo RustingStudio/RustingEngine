@@ -17,6 +17,7 @@
 - Decals: `survive_fracture` moves a decal onto the nearest debris piece when its parent breaks, or removes it with the object
 - Particles: `on_fracture` bursts `impact_count` particles at the break point when an emitter's parent object fractures
 - Fracture: debris pieces keep the broken object's normals and texture coordinates on their outer faces
+- Soft blocks: `color` and `texture`, laid once on each side of the block and fixed to the particles
 
 ## [2.4.1] - 2026-10-10
 

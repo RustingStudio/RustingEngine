@@ -742,6 +742,8 @@ crate::reflect! {
         tear_strain: f32 { unit: "factor", min: 0.0, doc: "edges stretched past rest times 1 + this tear; 0 never" },
         substeps: u32 { unit: "substeps", min: 1.0, max: 64.0 },
         visible: bool { doc: "draw the outer faces" },
+        color: [f32; 4] { unit: "linear RGBA", doc: "block color, multiplied into texture" },
+        texture: PathBuf { unit: "asset path", doc: "image laid once on each side of the block, upright on the walls; empty for plain color" },
     }
 }
 
