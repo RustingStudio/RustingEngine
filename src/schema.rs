@@ -1129,9 +1129,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.terrain_fracture",
-        summary: "Makes the Heightfield on the same object break in square chunks of chunk_cells cells. During play, contacts on one chunk bringing break_energy joules or more within one fixed tick (0 never breaks) dig it out: every height sample of the chunk drops depth metres and the slab becomes one dynamic GPU Box body (Debris, density kg/m³) resting in the hole, thrown up by the energy beyond break_energy times a draw from the scene's RandomSeed at the tick. A chunk breaks once; broken lists the dug-out chunks (row * chunk columns + column). The DebrisBudget applies: at the cap with too little sleeping debris the chunk stays whole that tick. Each dig sends a Fractured event naming the terrain and the slab.",
+        summary: "Makes the Heightfield on the same object break in square chunks of chunk_cells cells. During play, contacts on one chunk bringing break_energy joules or more within one fixed tick (0 never breaks) dig it out: every height sample of the chunk drops depth metres and the slab becomes one dynamic GPU Box body (Debris, density kg/m³) resting in the hole, thrown up by the energy beyond break_energy times a draw from the scene's RandomSeed at the tick. With pieces above 1 the slab cracks into that many Voronoi ConvexMesh pieces around points drawn from the RandomSeed at the tick and chunk, so every dig cracks differently and a replay cracks the same. A chunk breaks once; broken lists the dug-out chunks (row * chunk columns + column). The DebrisBudget applies: at the cap with too little sleeping debris the chunk stays whole that tick. Each dig sends a Fractured event naming the terrain and the slab.",
         gpu: NO_GPU,
-        example: || json!({"chunk_cells": 4, "break_energy": 500.0, "depth": 0.5, "density": 2000.0, "debris_lifetime": 0.0, "broken": []}),
+        example: || json!({"chunk_cells": 4, "pieces": 6, "break_energy": 500.0, "depth": 0.5, "density": 2000.0, "debris_lifetime": 0.0, "broken": []}),
     },
     ComponentSection {
         key: "rusting.heightfield",

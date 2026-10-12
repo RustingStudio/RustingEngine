@@ -841,6 +841,7 @@ crate::reflect! {
 crate::reflect! {
     struct TerrainFracture {
         chunk_cells: u32 { min: 1.0, doc: "height cells along each side of a breakable chunk" },
+        pieces: u32 { min: 0.0, max: 256.0, doc: "Voronoi pieces a dug-out slab breaks into, around points drawn from the scene's RandomSeed at the tick; 0 or 1 keeps one box" },
         break_energy: f32 { unit: "J", min: 0.0, doc: "impact energy on one chunk within one fixed tick that digs it out; 0 never breaks" },
         depth: f32 { unit: "m", min: 0.0, doc: "how far the chunk's ground drops; the slab's thickness" },
         density: f32 { unit: "kg/m³", min: 0.0, doc: "density of the dug-out slab" },

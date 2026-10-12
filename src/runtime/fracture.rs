@@ -884,6 +884,9 @@ fn piece_mesh(cell: &Cell) -> MeshAsset {
 #[serde(default)]
 pub struct TerrainFracture {
     pub chunk_cells: u32,
+    /// Voronoi pieces a dug-out slab breaks into, around points drawn from
+    /// the scene's [`RandomSeed`] at the tick; 0 or 1 keeps one box.
+    pub pieces: u32,
     /// Joules within one fixed tick; 0 never breaks.
     pub break_energy: f32,
     /// Metres the chunk's ground drops; the slab's thickness.
@@ -901,6 +904,7 @@ impl Default for TerrainFracture {
     fn default() -> Self {
         Self {
             chunk_cells: 4,
+            pieces: 1,
             break_energy: 0.0,
             depth: 0.5,
             density: 2000.0,
@@ -994,7 +998,12 @@ pub(super) fn break_terrain(world: &mut World) {
         };
         let stream =
             RandomSeed::stream("terrain_fracture", key) ^ u64::from(chunk);
-        promote(world, terrain, chunk, impact, seed.unit(tick, stream));
+        // The Voronoi points and the throws are new each tick, so two
+        // chunks never crack alike, yet a replay cracks them the same.
+        let pattern = seed.value(tick, stream ^ u64::MAX);
+        promote(world, terrain, chunk, impact, pattern, |k| {
+            seed.unit(tick, stream ^ k)
+        });
     }
 }
 
@@ -1046,14 +1055,16 @@ fn cells_z(field: &Heightfield) -> usize {
     field.heights.len().saturating_sub(1)
 }
 
-/// Digs `chunk` out of `terrain` and spawns it as a dynamic GPU slab;
-/// `draw` in [0, 1) scales the throw.
+/// Digs `chunk` out of `terrain` and spawns it as dynamic GPU debris, cut
+/// into `pieces` Voronoi cells around points picked by `pattern`; `draw(k)`
+/// in [0, 1) scales piece k's throw.
 fn promote(
     world: &mut World,
     terrain: Entity,
     chunk: u32,
     impact: Impact,
-    draw: f32,
+    pattern: u64,
+    draw: impl Fn(u64) -> f32,
 ) {
     let (Some(fracture), Some(mut field), Some(transform)) = (
         world.get::<TerrainFracture>(terrain).cloned(),
@@ -1062,9 +1073,6 @@ fn promote(
     ) else {
         return;
     };
-    if !make_room(world, 1) {
-        return;
-    }
     let [columns, _] = chunk_grid(&fracture, &field);
     let cells = fracture.chunk_cells.max(1) as usize;
     let (row, column) = (chunk as usize / columns, chunk as usize % columns);
@@ -1107,22 +1115,37 @@ fn promote(
     let turn = sim_math::rotation_from_euler(roll, pitch, yaw);
     let position = V::from(transform.position)
         + turn * local.component_mul(&V::from(transform.scale));
+    let half = 0.5 * size;
+    // (mesh, offset from the slab centre, scale, shape, volume) per piece.
+    let pieces: Vec<(Option<MeshAsset>, V, V, ColliderShape, f32)> =
+        if fracture.pieces > 1 {
+            let cut = Fracture {
+                pieces: fracture.pieces,
+                seed: pattern,
+                ..Fracture::default()
+            };
+            cut.fracture(&piece_mesh(&box_cell(-half, half)))
+                .pieces
+                .into_iter()
+                .map(centred)
+                .map(|(mesh, center, volume)| {
+                    let shape = ColliderShape::ConvexMesh;
+                    (Some(mesh), center, V::repeat(1.0), shape, volume)
+                })
+                .collect()
+        } else {
+            let shape = ColliderShape::Box {
+                half_extents: [0.5; 3],
+            };
+            vec![(None, V::zeros(), size, shape, size.x * size.y * size.z)]
+        };
+    if pieces.is_empty() || !make_room(world, pieces.len()) {
+        return;
+    }
     let mass = fracture.density * size.x * size.y * size.z;
     let excess = (impact.energy - fracture.break_energy).max(0.0);
-    let throw = (excess / mass.max(1e-6)).sqrt() * (0.5 + 0.5 * draw);
+    let throw = (excess / mass.max(1e-6)).sqrt();
     let up = turn * V::y();
-    let Some((mesh, material)) =
-        world.get_resource_mut::<AssetServer>().map(|mut assets| {
-            // Its own copy, so removing the debris frees only its mesh.
-            let cube = assets.meshes.get(assets.fallback_mesh).cloned();
-            (
-                assets.meshes.insert(cube.unwrap_or_default()),
-                assets.fallback_material,
-            )
-        })
-    else {
-        return;
-    };
     let mut broken = fracture.broken.clone();
     if let Err(at) = broken.binary_search(&chunk) {
         broken.insert(at, chunk);
@@ -1136,49 +1159,67 @@ fn promote(
             ..fracture.clone()
         },
     ));
-    let order = next_spawn_order(world);
-    let group = order.0;
-    let mut slab = world.spawn((
-        Transform {
-            position: position.into(),
-            rotation: transform.rotation,
-            scale: size.into(),
-        },
-        MeshRenderer {
-            mesh,
-            material,
-            cast_shadows: true,
-            receive_shadows: true,
-        },
-        Collider {
-            shape: ColliderShape::Box {
-                half_extents: [0.5; 3],
+    let mut group = None;
+    let mut spawned = Vec::with_capacity(pieces.len());
+    for (k, (mesh, center, scale, shape, volume)) in
+        pieces.into_iter().enumerate()
+    {
+        let Some((mesh, material)) =
+            world.get_resource_mut::<AssetServer>().map(|mut assets| {
+                // Its own mesh, so removing the debris frees only that.
+                let mesh = mesh.or_else(|| {
+                    assets.meshes.get(assets.fallback_mesh).cloned()
+                });
+                (
+                    assets.meshes.insert(mesh.unwrap_or_default()),
+                    assets.fallback_material,
+                )
+            })
+        else {
+            return;
+        };
+        let order = next_spawn_order(world);
+        let group = *group.get_or_insert(order.0);
+        let mut piece = world.spawn((
+            Transform {
+                position: (position + turn * center).into(),
+                rotation: transform.rotation,
+                scale: scale.into(),
             },
-            ..Collider::default()
-        },
-        PhysicsBody {
-            simulation: SimulationClass::Gpu,
-            ..PhysicsBody::default()
-        },
-        RigidBody {
-            kind: RigidBodyKind::Dynamic,
-            mass,
-            linear_velocity: (up * throw).into(),
-            ..RigidBody::default()
-        },
-        order,
-        Debris {
-            group,
-            lifetime: fracture.debris_lifetime,
-            merge: false,
-            asleep_since: None,
-        },
-    ));
-    if let Some(layers) = layers {
-        slab.insert(layers);
+            MeshRenderer {
+                mesh,
+                material,
+                cast_shadows: true,
+                receive_shadows: true,
+            },
+            Collider {
+                shape,
+                ..Collider::default()
+            },
+            PhysicsBody {
+                simulation: SimulationClass::Gpu,
+                ..PhysicsBody::default()
+            },
+            RigidBody {
+                kind: RigidBodyKind::Dynamic,
+                mass: fracture.density * volume,
+                linear_velocity: (up * throw * (0.5 + 0.5 * draw(k as u64)))
+                    .into(),
+                ..RigidBody::default()
+            },
+            order,
+            Debris {
+                group,
+                lifetime: fracture.debris_lifetime,
+                merge: false,
+                asleep_since: None,
+            },
+        ));
+        if let Some(layers) = layers {
+            piece.insert(layers);
+        }
+        spawned.push(piece.id());
     }
-    let slab = slab.id();
-    let half = 0.5 * size;
     let mut bounds = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
     for corner in 0..8 {
         let sign = |bit: u32| if corner & bit == 0 { -1.0 } else { 1.0 };
@@ -1195,7 +1236,7 @@ fn promote(
         events.send(Fractured {
             entity: terrain,
             name,
-            pieces: vec![slab],
+            pieces: spawned,
             point: impact.point.into(),
             energy: impact.energy,
             mass,
@@ -1721,5 +1762,82 @@ mod tests {
             .iter()
             .flatten()
             .all(|&h| h == 0.0));
+    }
+
+    /// Pieces of each dig, as (offset from the dug chunk's centre, mass
+    /// bits), with the crates at `xs` (z 2) and the scene seeded `seed`.
+    fn cracked(
+        padding: usize,
+        seed: u64,
+        xs: &[f32],
+    ) -> Vec<Vec<([u32; 3], u32)>> {
+        let (mut app, terrain) = terrain_and_crate(padding, xs[0], 2.0, 3.0);
+        let world = app.world_mut();
+        world.insert_resource(RandomSeed(seed));
+        world.get_mut::<TerrainFracture>(terrain).unwrap().pieces = 6;
+        for &x in &xs[1..] {
+            let order = next_spawn_order(world);
+            world.spawn((
+                Transform::new([x, 3.5, 2.0]),
+                PhysicsBody::default(),
+                RigidBody {
+                    mass: 10.0,
+                    ..RigidBody::default()
+                },
+                Collider::default(),
+                order,
+            ));
+        }
+        let mut digs = Vec::new();
+        for _ in 0..60 {
+            run(&mut app, 1);
+            let events = app.world_mut().resource::<EventQueue<Fractured>>();
+            digs.extend(events.iter().cloned());
+        }
+        let world = app.world();
+        digs.iter()
+            .map(|dig| {
+                let [low, high] = dig.bounds;
+                let centre = [0, 1, 2].map(|a| 0.5 * (low[a] + high[a]));
+                let mut pieces: Vec<_> = dig
+                    .pieces
+                    .iter()
+                    .map(|&piece| {
+                        let at =
+                            world.get::<Transform>(piece).unwrap().position;
+                        let body = world.get::<RigidBody>(piece).unwrap();
+                        assert_eq!(body.kind, RigidBodyKind::Dynamic);
+                        let physics = world.get::<PhysicsBody>(piece).unwrap();
+                        assert_eq!(physics.simulation, SimulationClass::Gpu);
+                        let shape = world.get::<Collider>(piece).unwrap().shape;
+                        assert_eq!(shape, ColliderShape::ConvexMesh);
+                        (
+                            [0, 1, 2].map(|a| (at[a] - centre[a]).to_bits()),
+                            body.mass.to_bits(),
+                        )
+                    })
+                    .collect();
+                pieces.sort_unstable();
+                let mass: f32 =
+                    pieces.iter().map(|&(_, m)| f32::from_bits(m)).sum();
+                assert!(
+                    (mass - dig.mass).abs() < 1e-3 * dig.mass,
+                    "{mass} {dig:?}"
+                );
+                pieces
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dug_slabs_crack_in_seeded_patterns_that_differ_per_chunk() {
+        let base = cracked(0, 1, &[-2.0, 2.0]);
+        assert_eq!(base.len(), 2);
+        assert!(base.iter().all(|dig| dig.len() == 6), "{base:?}");
+        // Two chunks dug in the same tick crack differently.
+        assert_ne!(base[0], base[1]);
+        // Unrelated entities change nothing; another scene seed does.
+        assert_eq!(cracked(7, 1, &[-2.0, 2.0]), base);
+        assert_ne!(cracked(0, 2, &[-2.0, 2.0]), base);
     }
 }
