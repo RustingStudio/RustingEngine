@@ -658,13 +658,15 @@ struct SpritePush {
     light_count: u32,
     /// How many entries of the occluder edge buffer to use.
     edge_count: u32,
+    /// 1 when the batch has a normal map bound.
+    normal_mapped: u32,
 }
 
 /// One 2D light as the sprite shader reads it.
 #[repr(C)]
 #[derive(BufferContents, Clone, Copy)]
 struct SpriteLight {
-    /// XY center in world units, radius in w.
+    /// XY center and height in world units, radius in w.
     position_radius: [f32; 4],
     /// Color times intensity in rgb.
     color: [f32; 4],
@@ -2970,6 +2972,12 @@ impl SceneRenderer {
                         .sprites
                         .iter()
                         .filter_map(|sprite| sprite.texture),
+                )
+                .chain(
+                    render_world
+                        .sprites
+                        .iter()
+                        .filter_map(|sprite| sprite.normal_map),
                 )
                 .chain(render_world.color_lut.map(|(texture, _)| texture))
                 .collect(),
@@ -5409,7 +5417,7 @@ impl SceneRenderer {
                     position_radius: [
                         light.position[0],
                         light.position[1],
-                        0.0,
+                        light.height,
                         light.radius,
                     ],
                     color: [
@@ -5458,6 +5466,7 @@ impl SceneRenderer {
                 ambient: [ambient[0], ambient[1], ambient[2], 0.0],
                 light_count: lights_2d.len() as u32,
                 edge_count: edges_2d.len() as u32,
+                normal_mapped: 0,
             };
             let pipeline = active.sprite_pipeline.clone();
             commands
@@ -5467,19 +5476,22 @@ impl SceneRenderer {
                 .map_err(|error| SceneRenderError(error.to_string()))?
                 .bind_pipeline_graphics(pipeline.clone())
                 .map_err(|error| SceneRenderError(error.to_string()))?
-                .push_constants(pipeline.layout().clone(), 0, push)
-                .map_err(|error| SceneRenderError(error.to_string()))?
                 .bind_vertex_buffers(0, upload)
                 .map_err(|error| SceneRenderError(error.to_string()))?;
             for batch in crate::runtime::sprite_batches(sprites) {
-                let (view, sampler) = sprites[batch.start]
-                    .texture
-                    .and_then(|image| {
-                        let prepared =
-                            self.prepared_textures.get(&image.key())?;
-                        Some((prepared.view.clone()?, prepared.sampler.clone()))
-                    })
+                let prepared = |image: Option<Handle<TextureAsset>>| {
+                    let prepared = self.prepared_textures.get(&image?.key())?;
+                    Some((prepared.view.clone()?, prepared.sampler.clone()))
+                };
+                let (view, sampler) = prepared(sprites[batch.start].texture)
                     .unwrap_or_else(|| self.white_texture.clone());
+                let normal = prepared(sprites[batch.start].normal_map);
+                let push = SpritePush {
+                    normal_mapped: u32::from(normal.is_some()),
+                    ..push
+                };
+                let (normal_view, normal_sampler) =
+                    normal.unwrap_or_else(|| self.white_texture.clone());
                 let set = DescriptorSet::new(
                     self.descriptor_allocator.clone(),
                     pipeline.layout().set_layouts()[0].clone(),
@@ -5489,6 +5501,11 @@ impl SceneRenderer {
                         ),
                         WriteDescriptorSet::buffer(1, light_upload.clone()),
                         WriteDescriptorSet::buffer(2, edge_upload.clone()),
+                        WriteDescriptorSet::image_view_sampler(
+                            3,
+                            normal_view,
+                            normal_sampler,
+                        ),
                     ],
                     [],
                 )
@@ -5500,6 +5517,8 @@ impl SceneRenderer {
                         0,
                         set,
                     )
+                    .map_err(|error| SceneRenderError(error.to_string()))?
+                    .push_constants(pipeline.layout().clone(), 0, push)
                     .map_err(|error| SceneRenderError(error.to_string()))?;
                 count_work(&recorded, 1, 0, 0);
                 unsafe {
@@ -11796,11 +11815,15 @@ layout(location = 5) in vec4 uv;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
 layout(location = 2) out vec2 v_world;
+// World directions of the image's +X and +Y, flips included.
+layout(location = 3) flat out vec2 v_axis_x;
+layout(location = 4) flat out vec2 v_axis_y;
 layout(push_constant) uniform Push {
     mat4 view_projection;
     vec4 ambient;
     uint light_count;
     uint edge_count;
+    uint normal_mapped;
 } push;
 const vec2 CORNERS[6] = vec2[](
     vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(0.5, 0.5),
@@ -11812,6 +11835,8 @@ void main() {
     vec4 world = model * vec4(corner, 0.0, 1.0);
     gl_Position = push.view_projection * world;
     v_world = world.xy;
+    v_axis_x = normalize(column0.xy) * (uv.z >= uv.x ? 1.0 : -1.0);
+    v_axis_y = normalize(column1.xy) * (uv.w >= uv.y ? 1.0 : -1.0);
     // uv is [left, top, right, bottom]; +Y is the top of the image.
     v_uv = vec2(mix(uv.x, uv.z, corner.x + 0.5), mix(uv.w, uv.y, corner.y + 0.5));
     v_color = color;
@@ -11829,12 +11854,15 @@ mod sprite_fragment_shader {
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
 layout(location = 2) in vec2 v_world;
+layout(location = 3) flat in vec2 v_axis_x;
+layout(location = 4) flat in vec2 v_axis_y;
 layout(location = 0) out vec4 f_color;
 layout(push_constant) uniform Push {
     mat4 view_projection;
     vec4 ambient;
     uint light_count;
     uint edge_count;
+    uint normal_mapped;
 } push;
 layout(set = 0, binding = 0) uniform sampler2D image;
 struct Light {
@@ -11848,6 +11876,7 @@ layout(set = 0, binding = 1) readonly buffer Lights {
 layout(set = 0, binding = 2) readonly buffer Edges {
     vec4 edges[];
 };
+layout(set = 0, binding = 3) uniform sampler2D normal_image;
 float cross2(vec2 a, vec2 b) {
     return a.x * b.y - a.y * b.x;
 }
@@ -11871,6 +11900,11 @@ bool blocked(vec2 p, vec2 q) {
 }
 void main() {
     vec3 light = push.ambient.rgb;
+    vec3 normal = vec3(0.0, 0.0, 1.0);
+    if (push.normal_mapped != 0) {
+        vec3 texel = texture(normal_image, v_uv).xyz * 2.0 - 1.0;
+        normal = normalize(vec3(texel.x * v_axis_x + texel.y * v_axis_y, texel.z));
+    }
     for (uint i = 0; i < push.light_count; i++) {
         vec4 position_radius = lights[i].position_radius;
         if (blocked(v_world, position_radius.xy)) {
@@ -11880,7 +11914,13 @@ void main() {
             1.0 - distance(v_world, position_radius.xy) / max(position_radius.w, 1e-4),
             0.0, 1.0
         );
-        light += lights[i].color.rgb * reach * reach;
+        // Flat sprites take the full light; mapped ones by how they face it.
+        float facing = 1.0;
+        if (push.normal_mapped != 0) {
+            vec3 to_light = vec3(position_radius.xy - v_world, position_radius.z);
+            facing = max(dot(normal, normalize(to_light)), 0.0);
+        }
+        light += lights[i].color.rgb * reach * reach * facing;
     }
     f_color = texture(image, v_uv) * v_color * vec4(light, 1.0);
 }
@@ -23981,6 +24021,7 @@ mod tests {
                 color: [1.0; 4],
                 uv: [1.0, 0.0, 0.0, 1.0],
                 texture: Some(image),
+                normal_map: None,
                 layer: 0,
             },
             ExtractedSprite {
@@ -23989,6 +24030,7 @@ mod tests {
                 // Over the red texel, should the image leak into this batch.
                 uv: [0.0, 0.0, 0.5, 0.5],
                 texture: None,
+                normal_map: None,
                 layer: 1,
             },
         ];
@@ -24037,6 +24079,7 @@ mod tests {
             color: [1.0; 4],
             uv: [0.0, 0.0, 1.0, 1.0],
             texture: None,
+            normal_map: None,
             layer: 0,
         }];
         let brightness = |scene: &mut SlabScene, pixel| {
@@ -24051,6 +24094,7 @@ mod tests {
             position: [0.5, 0.0, 5.0],
             color: [0.0, 2.0, 0.0],
             radius: 0.6,
+            height: 0.5,
         }];
         let near = brightness(&mut scene, [23, 16]);
         assert!(near[0] < 30 && near[1] > 200 && near[2] < 30, "{near:?}");
@@ -24063,16 +24107,101 @@ mod tests {
             position: [5.0, 5.0, 0.0],
             color: [0.0; 3],
             radius: 0.1,
+            height: 0.5,
         };
         let mut many = vec![unlit; MAX_LIGHTS_2D];
         many.push(ExtractedLight2d {
             position: [-0.5, 0.0, 0.0],
             color: [2.0; 3],
             radius: 0.6,
+            height: 0.5,
         });
         scene.render_world.lights_2d = many;
         let far = brightness(&mut scene, [9, 16]);
         assert!(far.iter().all(|&c| c < 30), "{far:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn normal_mapped_sprites_face_toward_or_away_from_2d_lights() {
+        use crate::runtime::{ExtractedLight2d, ExtractedSprite};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A 1 m sprite whose normal map leans every pixel 45 degrees toward
+        // the image's +X, in the dark, with one light 1 m to one side.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let bumps = scene.assets.textures.insert(TextureAsset {
+            size: [1, 1],
+            rgba8: vec![255, 128, 255, 255],
+            color_space: TextureColorSpace::Linear,
+            sampler: TextureSampler::default(),
+        });
+        scene.render_world.ambient_2d = Some([0.0; 3]);
+        let sprite = |normal_map, flipped: bool, turned: bool| {
+            let mut matrix = [[0.0; 4]; 4];
+            if turned {
+                // A quarter turn: the image's +X points along world +Y.
+                matrix[0][1] = 1.0;
+                matrix[1][0] = -1.0;
+            } else {
+                matrix[0][0] = 1.0;
+                matrix[1][1] = 1.0;
+            }
+            matrix[2][2] = 1.0;
+            matrix[3] = [0.0, 0.0, 0.0, 1.0];
+            ExtractedSprite {
+                matrix,
+                color: [1.0; 4],
+                uv: if flipped {
+                    [1.0, 0.0, 0.0, 1.0]
+                } else {
+                    [0.0, 0.0, 1.0, 1.0]
+                },
+                texture: None,
+                normal_map,
+                layer: 0,
+            }
+        };
+        let light = |x: f32, y: f32| ExtractedLight2d {
+            position: [x, y, 0.0],
+            color: [3.0; 3],
+            radius: 3.0,
+            height: 0.1,
+        };
+        // High enough that the sprite's lean no longer turns it away.
+        let high = ExtractedLight2d {
+            height: 3.0,
+            ..light(-1.0, 0.0)
+        };
+        let cases = [
+            (Some(bumps), false, false, high, true, "high"),
+            (Some(bumps), false, false, light(1.0, 0.0), true, "facing"),
+            (Some(bumps), false, false, light(-1.0, 0.0), false, "away"),
+            (Some(bumps), true, false, light(-1.0, 0.0), true, "flipped"),
+            (Some(bumps), false, true, light(0.0, 1.0), true, "turned"),
+            (
+                Some(bumps),
+                false,
+                true,
+                light(1.0, -0.5),
+                false,
+                "turned off",
+            ),
+            (None, false, false, light(-1.0, 0.0), true, "flat"),
+        ];
+        for (normal_map, flipped, turned, light, lit, what) in cases {
+            scene.render_world.sprites =
+                vec![sprite(normal_map, flipped, turned)];
+            scene.render_world.lights_2d = vec![light];
+            let got = render_pixel(&mut scene, [16, 16])[1];
+            assert_eq!(got > 150, lit, "{what}: {got}");
+            assert!(lit || got < 30, "{what}: {got}");
+        }
     }
 
     #[test]
@@ -24099,6 +24228,7 @@ mod tests {
             color: [1.0; 4],
             uv: [0.0, 0.0, 1.0, 1.0],
             texture: None,
+            normal_map: None,
             layer: 0,
         }];
         scene.render_world.ambient_2d = Some([0.0; 3]);
@@ -24106,6 +24236,7 @@ mod tests {
             position: [-0.45, 0.0, 0.0],
             color: [3.0; 3],
             radius: 2.0,
+            height: 0.5,
         }];
         let wall = [[0.0, -0.2, 0.0, 0.2], [0.0, 0.2, 0.0, -0.2]];
         scene.render_world.occluder_edges_2d = wall.to_vec();

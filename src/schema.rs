@@ -911,9 +911,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.sprite",
-        summary: "A flat image of size (world units, before the object's scale) in the object's XY plane, centered on it and facing +Z: a 2D character, a pickup, a background card. texture is a path under assets/; empty draws plain color, and color (linear rgba) multiplies the image. region [u0, v0, u1, v1] (v down) picks one frame of a sprite sheet; flip_x and flip_y mirror it. Sprites draw in canvas order: lower layer first, then lower world z, then entity order, so a higher layer covers a lower one whatever its z. They draw after tone mapping over the 3D frame, without a depth test, so their colors stay exact and 3D meshes never hide them. Consecutive sprites that share an image draw as one batch.",
+        summary: "A flat image of size (world units, before the object's scale) in the object's XY plane, centered on it and facing +Z: a 2D character, a pickup, a background card. texture is a path under assets/; empty draws plain color, and color (linear rgba) multiplies the image. region [u0, v0, u1, v1] (v down) picks one frame of a sprite sheet; flip_x and flip_y mirror it. Sprites draw in canvas order: lower layer first, then lower world z, then entity order, so a higher layer covers a lower one whatever its z. They draw after tone mapping over the 3D frame, without a depth test, so their colors stay exact and 3D meshes never hide them. Consecutive sprites that share an image and normal map draw as one batch. normal_map is an optional tangent-space normal map (green up, read as linear data) that rusting.light_2d shades.",
         gpu: "one instanced draw per run of sprites sharing an image",
-        example: || json!({"texture": "sprites/hero.png", "color": [1.0, 1.0, 1.0, 1.0], "size": [1.0, 1.0], "region": [0.0, 0.0, 0.25, 1.0], "flip_x": false, "flip_y": false, "layer": 0}),
+        example: || json!({"texture": "sprites/hero.png", "color": [1.0, 1.0, 1.0, 1.0], "size": [1.0, 1.0], "region": [0.0, 0.0, 0.25, 1.0], "flip_x": false, "flip_y": false, "layer": 0, "normal_map": ""}),
     },
     ComponentSection {
         key: "rusting.sprite_animation",
@@ -923,9 +923,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.light_2d",
-        summary: "A round light for rusting.sprite objects, centered on this object: it adds color (linear rgb) times intensity to sprites within radius world units in the XY plane, fading smoothly to nothing at the edge. Lights add over rusting.ambient_2d. The renderer uses the first sixteen in entity order.",
+        summary: "A round light for rusting.sprite objects, centered on this object: it adds color (linear rgb) times intensity to sprites within radius world units in the XY plane, fading smoothly to nothing at the edge. Lights add over rusting.ambient_2d. height (world units above the sprites) only matters for sprites with a normal_map, which face toward or away from the light. The renderer uses the first sixteen in entity order.",
         gpu: "a distance test per light per sprite pixel",
-        example: || json!({"color": [1.0, 0.8, 0.5], "intensity": 1.5, "radius": 4.0}),
+        example: || json!({"color": [1.0, 0.8, 0.5], "intensity": 1.5, "radius": 4.0, "height": 0.5}),
     },
     ComponentSection {
         key: "rusting.light_occluder_2d",

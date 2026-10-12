@@ -287,6 +287,8 @@ pub struct ExtractedSprite {
     pub uv: [f32; 4],
     /// `None` draws plain color.
     pub texture: Option<Handle<crate::assets::TextureAsset>>,
+    /// Tangent-space normal map; `None` lights the sprite flat.
+    pub normal_map: Option<Handle<crate::assets::TextureAsset>>,
     pub layer: i32,
 }
 
@@ -298,6 +300,8 @@ pub struct ExtractedLight2d {
     /// Color times intensity.
     pub color: [f32; 3],
     pub radius: f32,
+    /// Height above the sprites, for normal-mapped ones.
+    pub height: f32,
 }
 
 /// Splits canvas-ordered sprites into runs that share an image, one draw
@@ -308,7 +312,12 @@ pub fn sprite_batches(
     let mut batches: Vec<std::ops::Range<usize>> = Vec::new();
     for (index, sprite) in sprites.iter().enumerate() {
         match batches.last_mut() {
-            Some(batch) if sprites[batch.start].texture == sprite.texture => {
+            Some(batch)
+                if (
+                    sprites[batch.start].texture,
+                    sprites[batch.start].normal_map,
+                ) == (sprite.texture, sprite.normal_map) =>
+            {
                 batch.end = index + 1;
             }
             _ => batches.push(index..index + 1),
@@ -492,6 +501,7 @@ pub fn extract_render_world(world: &mut World) {
                     color: sprite.color,
                     uv: [left, top, right, bottom],
                     texture: sprite.handle,
+                    normal_map: sprite.normal_handle,
                     layer: sprite.layer,
                 };
                 (entity.index(), extracted)
@@ -516,6 +526,7 @@ pub fn extract_render_world(world: &mut World) {
                     position: [position[0], position[1], position[2]],
                     color: light.color.map(|channel| channel * light.intensity),
                     radius: light.radius,
+                    height: light.height,
                 };
                 (entity.index(), extracted)
             })
@@ -1968,6 +1979,52 @@ mod tests {
     }
 
     #[test]
+    fn sprite_normal_maps_load_as_linear_data_and_split_batches() {
+        use crate::runtime::Sprite;
+        let mut app = App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let normal = app
+            .world_mut()
+            .resource_mut::<crate::assets::AssetServer>()
+            .textures
+            .insert_with_path(
+                "bumps.png",
+                crate::assets::TextureAsset {
+                    size: [1, 1],
+                    rgba8: vec![128, 128, 255, 255],
+                    color_space: crate::assets::TextureColorSpace::Srgb,
+                    sampler: crate::assets::TextureSampler::default(),
+                },
+            )
+            .unwrap();
+        // Same image and layer; only the normal map differs.
+        app.spawn((Transform::default(), Sprite::default()));
+        app.spawn((
+            Transform::default(),
+            Sprite {
+                normal_map: "bumps.png".into(),
+                ..Sprite::default()
+            },
+        ));
+        app.update(Duration::ZERO).unwrap();
+        let assets = app.world().resource::<crate::assets::AssetServer>();
+        assert_eq!(
+            assets.textures.get(normal).unwrap().color_space,
+            crate::assets::TextureColorSpace::Linear
+        );
+        let sprites = &app.world().resource::<RenderWorld>().sprites;
+        assert_eq!(
+            sprites
+                .iter()
+                .map(|sprite| sprite.normal_map)
+                .collect::<Vec<_>>(),
+            [None, Some(normal)]
+        );
+        assert_eq!(sprite_batches(sprites), [0..1, 1..2]);
+    }
+
+    #[test]
     fn light_occluders_2d_extract_closed_world_edges_in_entity_order() {
         use crate::runtime::LightOccluder2d;
         let mut app = App::new();
@@ -2012,6 +2069,7 @@ mod tests {
                 color: [1.0, 0.5, 0.0],
                 intensity: 2.0,
                 radius: 4.0,
+                height: 1.5,
             },
         ));
         app.spawn((Transform::default(), Light2d::default()));
@@ -2028,11 +2086,13 @@ mod tests {
                     position: [1.0, 2.0, 3.0],
                     color: [2.0, 1.0, 0.0],
                     radius: 4.0,
+                    height: 1.5,
                 },
                 ExtractedLight2d {
                     position: [0.0; 3],
                     color: [1.0; 3],
                     radius: 5.0,
+                    height: 0.5,
                 },
             ]
         );

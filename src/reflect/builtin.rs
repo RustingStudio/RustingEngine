@@ -1418,6 +1418,11 @@ crate::reflect! {
             doc: "canvas layer; higher layers draw over lower ones whatever their z",
         },
         #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+        normal_map: PathBuf {
+            unit: "asset path",
+            doc: "tangent-space normal map (green up) that 2D lights shade; empty is flat",
+        },
+        #[skip] normal_handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
     }
 }
 
@@ -1438,6 +1443,7 @@ crate::reflect! {
         color: [f32; 3] { unit: "linear rgb", min: 0.0 },
         intensity: f32 { min: 0.0 },
         radius: f32 { unit: "m", min: 0.0, doc: "sprites farther than this in XY get none of the light" },
+        height: f32 { unit: "m", min: 0.0, doc: "above the sprites; only normal-mapped sprites see it" },
     }
 }
 

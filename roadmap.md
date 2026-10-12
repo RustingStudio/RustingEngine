@@ -3491,7 +3491,7 @@ Depends on: Milestones 3, 4, and 10 (2D physics).
   keeps six whole-nanosecond 1/60 s steps from showing a 10 fps frame a tick
   late each fails it.
 - [ ] Tilemaps with multiple layers, autotiling rules, tile collision shapes, and tile navigation data.
-- [ ] 2D lights, shadows from occluder polygons, and normal-mapped sprites.
+- [x] 2D lights, shadows from occluder polygons, and normal-mapped sprites.
   - [x] Round 2D lights over a 2D ambient in the sprite pass.
     `rusting.light_2d` (color, intensity, radius) and `rusting.ambient_2d`
     (color) are registered for scenes, snapshots, reflection, the schema and
@@ -3516,7 +3516,18 @@ Depends on: Milestones 3, 4, and 10 (2D physics).
     cap, the entity sort, the closing edge, or the world transform each fails
     one of them. Counting the stand-in edge uploaded when there are none
     survives, as that edge is degenerate and skipped.
-  - [ ] Normal-mapped sprites.
+  - [x] Normal-mapped sprites.
+    `rusting.sprite` gains `normal_map` (a tangent-space map, green up), which
+    the loader marks as linear data, and `rusting.light_2d` gains `height`.
+    Sprites batch by image and normal map; a mapped batch turns each texel's
+    normal by the sprite's rotation and flips and scales each light by how
+    the pixel faces it. Flat sprites keep the full light. Evidence
+    2026-10-12: `sprite_normal_maps_load_as_linear_data_and_split_batches`
+    and `normal_mapped_sprites_face_toward_or_away_from_2d_lights`
+    (gpu-tests) pass; dropping the extracted normal map, the batch split, the
+    linear marking, the extracted or uploaded height, the mapped flag, the
+    flip sign, the rotation, the facing factor, the normal map upload, or the
+    normal map read each fails one of them.
 - [ ] 2D GPU particles with physics-event emission.
 - [ ] 2D camera with smoothing, limits, and pixel-perfect mode.
 - [ ] 2D hybrid GPU physics showcases (thousands of physics sprites with events to Rust gameplay).

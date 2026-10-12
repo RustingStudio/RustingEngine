@@ -2037,6 +2037,26 @@ pub(super) fn load_environment_maps(
             bevy_ecs::change_detection::DetectChanges::is_changed(&sprite);
         let sprite = sprite.bypass_change_detection();
         load(changed, &sprite.texture, &mut sprite.handle, "sprite");
+        load(
+            changed,
+            &sprite.normal_map,
+            &mut sprite.normal_handle,
+            "sprite normal map",
+        );
+    }
+    // Normal maps are data, not color, whatever their file says.
+    // ponytail: a hot reload of the file turns it back to sRGB until the
+    // sprite changes; flag linear at decode if that bites.
+    for sprite in &sprites {
+        let Some(handle) = sprite.normal_handle else {
+            continue;
+        };
+        if assets.textures.get(handle).is_some_and(|texture| {
+            texture.color_space == crate::assets::TextureColorSpace::Srgb
+        }) {
+            assets.textures.get_mut(handle).unwrap().color_space =
+                crate::assets::TextureColorSpace::Linear;
+        }
     }
 }
 

@@ -75,6 +75,12 @@ pub struct Sprite {
     /// The loaded `texture`, set by the engine.
     #[serde(skip)]
     pub handle: Option<Handle<crate::assets::TextureAsset>>,
+    /// Tangent-space normal map (green up) for [`Light2d`]s, read as linear
+    /// data; empty lights the sprite as a flat card.
+    pub normal_map: PathBuf,
+    /// The loaded `normal_map`, set by the engine.
+    #[serde(skip)]
+    pub normal_handle: Option<Handle<crate::assets::TextureAsset>>,
 }
 
 impl Default for Sprite {
@@ -88,6 +94,8 @@ impl Default for Sprite {
             flip_y: false,
             layer: 0,
             handle: None,
+            normal_map: PathBuf::new(),
+            normal_handle: None,
         }
     }
 }
@@ -102,6 +110,9 @@ pub struct Light2d {
     pub color: [f32; 3],
     pub intensity: f32,
     pub radius: f32,
+    /// How far the light sits above the sprites, in world units: only
+    /// normal-mapped sprites see it, lower lights graze their bumps.
+    pub height: f32,
 }
 
 impl Default for Light2d {
@@ -110,6 +121,7 @@ impl Default for Light2d {
             color: [1.0; 3],
             intensity: 1.0,
             radius: 5.0,
+            height: 0.5,
         }
     }
 }
