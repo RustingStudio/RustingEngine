@@ -8,6 +8,7 @@ use bevy_ecs::entity::Entity;
 use super::TypeRegistry;
 use crate::assets::{AlphaMode, MaterialAsset, MaterialModel};
 use crate::runtime::ClothSheet;
+use crate::runtime::ConvexDecomposition;
 use crate::runtime::Rope;
 use crate::runtime::{
     AmbientLight, AmbientOcclusion, Antialiasing, Articulation, AutoExposure,
@@ -848,6 +849,15 @@ crate::reflect! {
         debris_lifetime: f32 { unit: "s", min: 0.0, doc: "seconds a slab stays once it sleeps; 0 keeps it" },
         refreeze: f32 { unit: "s", min: 0.0, doc: "seconds any debris resting on this terrain sleeps before it freezes back into the heights; 0 never refreezes" },
         broken: Vec<u32> { doc: "chunks already dug out, row * chunk columns + column, sorted" },
+    }
+}
+
+crate::reflect! {
+    struct ConvexDecomposition {
+        resolution: u32 { min: 1.0, doc: "voxels along the mesh's longest side" },
+        max_hulls: u32 { min: 1.0, doc: "most hulls the mesh splits into" },
+        concavity: f32 { min: 0.0, doc: "a part stops splitting once its hull exceeds the solid inside it by less than this share of the mesh's volume" },
+        candidates: u32 { min: 1.0, doc: "split planes tried per axis; resolution or more tries every voxel plane" },
     }
 }
 

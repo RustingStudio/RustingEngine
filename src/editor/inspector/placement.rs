@@ -309,6 +309,10 @@ pub(in crate::editor) fn component_help(
             "Digs a chunk of this heightfield out as a dynamic GPU slab when hit hard enough.",
             "Craters, collapsing ground and terrain that shells and vehicles break up.",
         ),
+        crate::runtime::CONVEX_DECOMPOSITION_COMPONENT => (
+            "Lets this Convex Mesh collider follow a concave mesh as several convex hulls.",
+            "Dynamic bowls, crates with open tops, chairs and L-shaped props.",
+        ),
         FRACTURE_COMPONENT => (
             "Breaks this object's mesh into Voronoi pieces and slices, with the graph of which pieces touch.",
             "Walls, crates, pillars and glass panes that shatter into prepared chunks.",

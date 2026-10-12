@@ -452,6 +452,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::Polygon2d>();
     types.register::<super::Fracture>();
     types.register::<super::TerrainFracture>();
+    types.register::<super::ConvexDecomposition>();
     types.register::<super::MeshSurfaces>();
     types.register::<super::PhysicsMaterial>();
     types.register::<super::WaterMesh>();

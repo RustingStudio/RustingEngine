@@ -1,6 +1,7 @@
 //! Approximate convex decomposition (V-HACD-class) of a closed mesh, so a
-//! concave imported mesh can collide as a few convex hulls (one
-//! `ConvexMesh` collider child each) instead of a static triangle mesh.
+//! concave imported mesh can collide as a few convex hulls instead of a
+//! static triangle mesh: add [`ConvexDecomposition`] next to a `ConvexMesh`
+//! collider.
 //!
 //! The mesh is voxelized solid, then its box is split by axis-aligned
 //! planes. A region's concavity is the volume of the convex hull of the
@@ -11,17 +12,30 @@
 //! hulls follow the mesh, not the voxels. Everything runs in a fixed
 //! order: the same mesh gives the same hulls.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
+use bevy_ecs::prelude::Component;
 use nalgebra::Vector3;
 
 use crate::assets::{MeshAsset, MeshVertex};
 
 type V = Vector3<f32>;
 
-/// How finely [`decompose`] looks and how far it goes.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Decomposition {
+/// How finely [`decompose`] looks and how far it goes. As a component next
+/// to a `ConvexMesh` collider, the CPU solver collides the object as the
+/// hulls of its `MeshRenderer` mesh (scaled by its transform) instead of
+/// the one hull around it, so a concave prop can be dynamic.
+#[derive(
+    Component,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(default)]
+pub struct ConvexDecomposition {
     /// Voxels along the mesh's longest side.
     pub resolution: u32,
     /// Most hulls returned.
@@ -34,7 +48,7 @@ pub struct Decomposition {
     pub candidates: u32,
 }
 
-impl Default for Decomposition {
+impl Default for ConvexDecomposition {
     fn default() -> Self {
         Self {
             resolution: 32,
@@ -49,7 +63,10 @@ impl Default for Decomposition {
 /// closed, or too flat to fill a voxel, comes back as its one hull; an
 /// empty or flat mesh gives none.
 #[must_use]
-pub fn decompose(mesh: &MeshAsset, settings: Decomposition) -> Vec<MeshAsset> {
+pub fn decompose(
+    mesh: &MeshAsset,
+    settings: ConvexDecomposition,
+) -> Vec<MeshAsset> {
     let triangles: Vec<[V; 3]> = mesh
         .indices
         .chunks_exact(3)
@@ -186,13 +203,40 @@ impl Grid {
     ) -> Region {
         let [nx, ny, _] = self.cells.map(|c| c as usize);
         let mut inside = 0usize;
+        // Where the box cuts through solid the hull must reach the cut,
+        // which the clipped surface alone does not show. Per cut plane and
+        // grid line on it: the first and last solid voxel corner.
+        let mut cuts: BTreeMap<(usize, u32, u32), (u32, u32)> = BTreeMap::new();
         for z in low[2]..high[2] {
             for y in low[1]..high[1] {
                 for x in low[0]..high[0] {
-                    inside += usize::from(
-                        self.solid
-                            [(z as usize * ny + y as usize) * nx + x as usize],
-                    );
+                    if !self.solid
+                        [(z as usize * ny + y as usize) * nx + x as usize]
+                    {
+                        continue;
+                    }
+                    inside += 1;
+                    let cell = [x, y, z];
+                    for axis in 0..3 {
+                        let plane = if cell[axis] == low[axis] && low[axis] > 0
+                        {
+                            low[axis]
+                        } else if cell[axis] + 1 == high[axis]
+                            && high[axis] < self.cells[axis]
+                        {
+                            high[axis]
+                        } else {
+                            continue;
+                        };
+                        let (b, c) = ((axis + 1) % 3, (axis + 2) % 3);
+                        for row in [cell[b], cell[b] + 1] {
+                            let span = cuts
+                                .entry((axis, plane, row))
+                                .or_insert((cell[c], cell[c] + 1));
+                            span.0 = span.0.min(cell[c]);
+                            span.1 = span.1.max(cell[c] + 1);
+                        }
+                    }
                 }
             }
         }
@@ -210,10 +254,21 @@ impl Grid {
         let box_low = corner(low, low.map(|c| c == 0), -1.0);
         let box_high =
             corner(high, [0, 1, 2].map(|a| high[a] == self.cells[a]), 1.0);
-        let points: Vec<V> = triangles
+        let mut points: Vec<V> = triangles
             .iter()
             .flat_map(|t| clip(t, box_low, box_high))
             .collect();
+        for (&(axis, plane, row), &(first, last)) in &cuts {
+            for end in [first, last] {
+                let mut cell = [0; 3];
+                cell[axis] = plane;
+                cell[(axis + 1) % 3] = row;
+                cell[(axis + 2) % 3] = end;
+                points.push(
+                    self.origin + V::from(cell.map(|c| c as f32)) * self.size,
+                );
+            }
+        }
         let hull = hull_mesh(&points);
         let volume = hull.as_ref().map_or(0.0, mesh_volume);
         let solid = inside as f32 * self.size.powi(3);
@@ -431,7 +486,7 @@ mod tests {
     fn a_convex_mesh_stays_one_hull_and_a_hull_is_closed() {
         let mut mesh = MeshAsset::default();
         cuboid(V::new(-1.0, -0.5, -0.25), V::new(1.0, 0.5, 0.25), &mut mesh);
-        let hulls = decompose(&mesh, Decomposition::default());
+        let hulls = decompose(&mesh, ConvexDecomposition::default());
         assert_eq!(hulls.len(), 1);
         assert!((mesh_volume(&hulls[0]) - 1.0).abs() < 1e-4);
         assert_eq!(bounds(&hulls[0]), [[-1.0, -0.5, -0.25], [1.0, 0.5, 0.25]]);
@@ -444,7 +499,7 @@ mod tests {
         let mut mesh = MeshAsset::default();
         cuboid(V::new(-1.0, 0.0, 0.0), V::new(0.0, 1.0, 1.0), &mut mesh);
         cuboid(V::new(0.0, 0.0, 0.0), V::new(1.0, 0.5, 1.0), &mut mesh);
-        let hulls = decompose(&mesh, Decomposition::default());
+        let hulls = decompose(&mesh, ConvexDecomposition::default());
         assert_eq!(
             hulls.len(),
             2,
@@ -458,7 +513,7 @@ mod tests {
         assert_eq!(boxes[0][1][1], 1.0);
         assert_eq!(boxes[1][1][1], 0.5);
         // The same mesh decomposes the same way.
-        assert_eq!(decompose(&mesh, Decomposition::default()), hulls);
+        assert_eq!(decompose(&mesh, ConvexDecomposition::default()), hulls);
     }
 
     #[test]
@@ -471,16 +526,16 @@ mod tests {
         cuboid(V::new(-0.8, 0.2, -1.0), V::new(0.8, 1.0, -0.8), &mut mesh);
         cuboid(V::new(-0.8, 0.2, 0.8), V::new(0.8, 1.0, 1.0), &mut mesh);
         let solid = 0.8 + 2.0 * 0.32 + 2.0 * 0.256;
-        let hulls = decompose(&mesh, Decomposition::default());
+        let hulls = decompose(&mesh, ConvexDecomposition::default());
         assert!(hulls.len() >= 5, "{}", hulls.len());
         let volume: f32 = hulls.iter().map(mesh_volume).sum();
         // The cup's own hull would be 4 m³.
         assert!(volume < 1.15 * solid, "{volume} against {solid}");
         let capped = decompose(
             &mesh,
-            Decomposition {
+            ConvexDecomposition {
                 max_hulls: 3,
-                ..Decomposition::default()
+                ..ConvexDecomposition::default()
             },
         );
         assert_eq!(capped.len(), 3);
@@ -488,14 +543,110 @@ mod tests {
 
     #[test]
     fn an_open_or_empty_mesh_gives_its_hull_or_nothing() {
-        assert!(decompose(&MeshAsset::default(), Decomposition::default())
-            .is_empty());
+        assert!(decompose(
+            &MeshAsset::default(),
+            ConvexDecomposition::default()
+        )
+        .is_empty());
         let mut mesh = MeshAsset::default();
         cuboid(V::new(0.0, 0.0, 0.0), V::new(1.0, 1.0, 1.0), &mut mesh);
         // Drop the top face: no voxel is inside, so one hull of all points.
         mesh.indices.drain(18..24);
-        let hulls = decompose(&mesh, Decomposition::default());
+        let hulls = decompose(&mesh, ConvexDecomposition::default());
         assert_eq!(hulls.len(), 1);
         assert!((mesh_volume(&hulls[0]) - 1.0).abs() < 1e-4);
+    }
+
+    /// Where a small box dropped into a dynamic cup on the ground comes to
+    /// rest, with and without the cup decomposed.
+    fn drop_into_cup(decomposed: bool) -> f32 {
+        use crate::assets::AssetServer;
+        use crate::runtime::cpu_physics::next_spawn_order;
+        use crate::runtime::{
+            App, Collider, ColliderShape, MeshRenderer, PhysicsBody, RigidBody,
+            RigidBodyKind,
+        };
+        use crate::Transform;
+        let mut app = App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        let world = app.world_mut();
+        world.spawn((
+            Transform::new([0.0, -0.5, 0.0]),
+            PhysicsBody::default(),
+            RigidBody {
+                kind: RigidBodyKind::Fixed,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::Box {
+                    half_extents: [5.0, 0.5, 5.0],
+                },
+                ..Collider::default()
+            },
+        ));
+        let mut cup = MeshAsset::default();
+        cuboid(V::new(-1.0, 0.0, -1.0), V::new(1.0, 0.2, 1.0), &mut cup);
+        cuboid(V::new(-1.0, 0.2, -1.0), V::new(-0.8, 1.0, 1.0), &mut cup);
+        cuboid(V::new(0.8, 0.2, -1.0), V::new(1.0, 1.0, 1.0), &mut cup);
+        cuboid(V::new(-0.8, 0.2, -1.0), V::new(0.8, 1.0, -0.8), &mut cup);
+        cuboid(V::new(-0.8, 0.2, 0.8), V::new(0.8, 1.0, 1.0), &mut cup);
+        let (mesh, material) = {
+            let mut assets = world.resource_mut::<AssetServer>();
+            let material = assets.fallback_material;
+            (assets.meshes.insert(cup), material)
+        };
+        let order = next_spawn_order(world);
+        let mut body = world.spawn((
+            Transform::new([0.0, 0.0, 0.0]),
+            PhysicsBody::default(),
+            RigidBody {
+                mass: 20.0,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::ConvexMesh,
+                ..Collider::default()
+            },
+            MeshRenderer {
+                mesh,
+                material,
+                cast_shadows: true,
+                receive_shadows: true,
+            },
+            order,
+        ));
+        if decomposed {
+            body.insert(ConvexDecomposition::default());
+        }
+        let order = next_spawn_order(world);
+        let falling = world
+            .spawn((
+                Transform::new([0.0, 2.0, 0.0]),
+                PhysicsBody::default(),
+                RigidBody::default(),
+                Collider {
+                    shape: ColliderShape::Box {
+                        half_extents: [0.2; 3],
+                    },
+                    ..Collider::default()
+                },
+                order,
+            ))
+            .id();
+        for _ in 0..120 {
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+        }
+        app.world().get::<Transform>(falling).unwrap().position[1]
+    }
+
+    #[test]
+    fn a_decomposed_dynamic_cup_holds_what_falls_into_it() {
+        // The cup's floor is 0.2 m thick, so the box rests at 0.4 inside it;
+        // on the one hull around the cup it would rest on top, near 1.2.
+        let inside = drop_into_cup(true);
+        assert!((inside - 0.4).abs() < 0.05, "{inside}");
+        let on_top = drop_into_cup(false);
+        assert!((on_top - 1.2).abs() < 0.05, "{on_top}");
     }
 }

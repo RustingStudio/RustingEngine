@@ -4,6 +4,7 @@
 
 ### Added
 
+- `ConvexDecomposition` (`rusting.convex_decomposition`) makes a `ConvexMesh` collider follow a concave mesh as decomposed hulls on the CPU solver, so concave props can be dynamic.
 - `runtime::decompose::decompose` splits a concave closed mesh into convex hulls (V-HACD-class approximate convex decomposition) for `ConvexMesh` colliders.
 - Physics suite scenes `BuoyancySort`, `SheetCatch` and `JellyRaft` check two-way coupling between rigid bodies, cloth, soft bodies and fluid
 - `SuiteScene::run_2d` runs 2D forms of the stacking, joint chain and CCD bullet suite scenes on plane-locked polygon bodies

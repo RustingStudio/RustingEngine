@@ -84,6 +84,7 @@ pub use cpu_physics::{
     PhysicsMaterial, PhysicsWorld, Polygon2d, RayHit, Sleeping, SpawnOrder,
     SLEEP_STEPS,
 };
+pub use decompose::{decompose, ConvexDecomposition};
 pub use determinism::*;
 pub use effect_presets::*;
 pub use events::EventQueue;

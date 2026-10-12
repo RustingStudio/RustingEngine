@@ -1134,6 +1134,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"chunk_cells": 4, "pieces": 6, "break_energy": 500.0, "depth": 0.5, "density": 2000.0, "debris_lifetime": 0.0, "refreeze": 10.0, "broken": []}),
     },
     ComponentSection {
+        key: "rusting.convex_decomposition",
+        summary: "Lets a ConvexMesh collider on the same object follow a concave MeshRenderer mesh: the CPU solver collides it as up to max_hulls convex hulls of the mesh instead of the one hull around it, so a bowl or an L-shaped prop can be dynamic and still hold things. The mesh must be closed (an open mesh gets its one hull). It is voxelized at resolution voxels along its longest side and split by axis-aligned planes (candidates tried per axis) until each part's hull exceeds the solid inside it by less than concavity times the mesh's volume. The same mesh and settings always give the same hulls; they are rebuilt when the mesh, the scale or these settings change. CPU bodies only. decompose(mesh, settings) gives the hulls as meshes.",
+        gpu: NO_GPU,
+        example: || json!({"resolution": 32, "max_hulls": 16, "concavity": 0.01, "candidates": 32}),
+    },
+    ComponentSection {
         key: "rusting.heightfield",
         summary: "A grid of ground heights for a collider with shape \"Heightfield\" on the same object (static only, like TriangleMesh). heights[row][column] in metres; rows run along +Z and columns along +X, spacing metres apart, centred on the object and scaled by its transform. Add rusting.terrain to draw it, or draw it from game code with Heightfield::mesh(). cells[row][column] (one row and column fewer than heights) picks an entry of surfaces for that cell, a patch such as ice or mud with its own friction, restitution and material name (sound_cue with_material matches it); missing cells and indices past the end use the collider's own values and physics_material.",
         gpu: NO_GPU,
