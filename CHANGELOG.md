@@ -4,6 +4,7 @@
 
 ### Added
 
+- Tests: the renderer shuts down validation-clean with frames in flight; `rendering::validation_error_count` counts validation-layer errors
 - Tests: unloaded meshes and textures free their GPU data only after the frames that read them complete
 - Tests: the low-end capability baseline falls back to Eco, CPU culling, no MSAA and the Eco light budget, and draws the Eco image
 - Rendering: `CullingMode::Auto` draws scenes under 128 instances with no culling (was 64), the break-even measured on an RTX 3060

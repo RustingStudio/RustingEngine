@@ -4608,7 +4608,22 @@ Depends on: Milestones 3, 4, and 21.
 
 - [ ] Resize, minimize, restore, and zero-sized surface handling.
 - [ ] Unsupported present-mode and format fallback.
-- [ ] Frames-in-flight reuse and validation-clean shutdown.
+- [x] Frames-in-flight reuse and validation-clean shutdown.
+  Evidence (2026-10-12, lane render): reuse is covered by GPU test
+  `frame_contexts_bound_frames_in_flight_and_wait_only_on_reuse`; shutdown
+  by new GPU test
+  `renderer_shuts_down_validation_clean_with_frames_in_flight`. It opens
+  its own device with the Khronos validation layer and synchronization
+  validation on (`rendering::validated_headless_device`, which adds a
+  messenger that counts errors in `rendering::validation_error_count`),
+  goes round the frame ring twice, leaves a full ring of frames
+  unfinished, checks the image, and drops the renderer and device. It
+  asserts no validation errors and that the device is destroyed.
+  Recording a zero-width viewport through vulkano's unchecked call fails
+  it (6 errors), and so does leaking a queue in `SceneRenderer::new`
+  (device stays alive). Limit: other GPU tests share a device without the
+  layer, so only this test runs validated. Full check: workspace lib 973
+  passed, gpu-tests run 1142 passed.
 - [x] Asset unload/reload while referenced by submitted frames.
   Evidence (2026-10-12, lane render): reload is covered by GPU test
   `hot_reloaded_mesh_swaps_next_frame_and_old_buffers_outlive_in_flight_frame`;

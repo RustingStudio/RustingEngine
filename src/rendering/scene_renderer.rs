@@ -15722,6 +15722,136 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn renderer_shuts_down_validation_clean_with_frames_in_flight() {
+        use crate::rendering::swapchain::OFFSCREEN_COLOR_FORMAT;
+        let errors_before = crate::rendering::validation_error_count();
+        let Some((base, messenger)) =
+            crate::rendering::validated_headless_device()
+        else {
+            eprintln!("skipping: no Vulkan validation layer present");
+            return;
+        };
+        let device = Arc::downgrade(&base.device);
+        let extent = [8, 8];
+        let memory_allocator =
+            Arc::new(StandardMemoryAllocator::new_default(base.device.clone()));
+        let mut renderer = SceneRenderer::new(
+            base.queue.clone(),
+            memory_allocator.clone(),
+            OFFSCREEN_COLOR_FORMAT,
+            extent,
+        )
+        .unwrap();
+        let mut assets = AssetServer::default();
+        let material = assets.materials.insert(MaterialAsset {
+            model: MaterialModel::Unlit,
+            ..Default::default()
+        });
+        let mut render_world = RenderWorld::default();
+        render_world.renderables_revision = 1;
+        render_world.lights_revision = 1;
+        render_world.active_camera = Some(crate::runtime::ExtractedCamera {
+            entity: bevy_ecs::entity::Entity::from_raw_u32(1000).unwrap(),
+            transform: crate::runtime::GlobalTransform {
+                matrix: Matrix4::new_translation(&nalgebra::Vector3::new(
+                    0.0, 0.0, 5.0,
+                ))
+                .into(),
+            },
+            projection: Projection::Orthographic {
+                vertical_size: 2.0,
+                near: 0.1,
+                far: 100.0,
+            },
+            priority: 0,
+        });
+        render_world
+            .renderables
+            .push(crate::runtime::ExtractedRenderable {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(1).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: Matrix4::new_nonuniform_scaling(
+                        &nalgebra::Vector3::new(4.0, 4.0, 0.1),
+                    )
+                    .into(),
+                },
+                mesh: assets.fallback_mesh,
+                material,
+                cast_shadows: false,
+                receive_shadows: false,
+                bounds: None,
+            });
+        let image = Image::new(
+            memory_allocator.clone(),
+            ImageCreateInfo {
+                format: OFFSCREEN_COLOR_FORMAT,
+                extent: [extent[0], extent[1], 1],
+                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let render = |renderer: &mut SceneRenderer| {
+            renderer
+                .render(
+                    vulkano::sync::now(base.device.clone()).boxed(),
+                    ImageView::new_default(image.clone()).unwrap(),
+                    extent,
+                    SceneRenderOptions::game(extent),
+                    &render_world,
+                    &assets,
+                )
+                .unwrap()
+        };
+
+        // Go round the frame ring twice, then leave a full ring of frames
+        // unfinished, as a window that closes mid-frame would.
+        for _ in 0..2 * FRAMES_IN_FLIGHT {
+            render(&mut renderer)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+        }
+        let held: Vec<_> = (0..FRAMES_IN_FLIGHT)
+            .map(|_| render(&mut renderer))
+            .collect();
+        drop(held);
+        let pixels = crate::rendering::readback::read_back_image(
+            &base.device,
+            &base.queue,
+            &memory_allocator,
+            &Arc::new(StandardCommandBufferAllocator::new(
+                base.device.clone(),
+                Default::default(),
+            )),
+            &image,
+        );
+        let center = ((extent[1] / 2 * extent[0] + extent[0] / 2) * 4) as usize;
+        assert_eq!(&pixels[center..center + 3], &[255, 255, 255]);
+
+        drop((renderer, image, memory_allocator, assets, base));
+        assert!(
+            device.upgrade().is_none(),
+            "shutting the renderer down releases the device"
+        );
+        assert_eq!(
+            crate::rendering::validation_error_count(),
+            errors_before,
+            "the validation layer reported errors (see stderr)"
+        );
+        drop(messenger);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn debug_lines_blend_with_their_alpha() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");

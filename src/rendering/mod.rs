@@ -211,14 +211,23 @@ pub fn try_init_vulkan_headless() -> Result<HeadlessVulkanBase, String> {
         ext_debug_utils: library.supported_extensions().ext_debug_utils,
         ..InstanceExtensions::empty()
     };
-    let instance = Instance::new(
+    headless_with(
         library,
         InstanceCreateInfo {
             enabled_extensions,
             ..Default::default()
         },
     )
-    .map_err(|error| format!("failed to create a Vulkan instance: {error}"))?;
+}
+
+/// The headless device on an instance made from `info`.
+fn headless_with(
+    library: Arc<VulkanLibrary>,
+    info: InstanceCreateInfo,
+) -> Result<HeadlessVulkanBase, String> {
+    let instance = Instance::new(library, info).map_err(|error| {
+        format!("failed to create a Vulkan instance: {error}")
+    })?;
 
     let candidates: Vec<_> = instance
         .enumerate_physical_devices()
@@ -353,6 +362,41 @@ pub fn vulkano_config() -> vulkano_util::context::VulkanoConfig {
 /// Instance settings that turn on the Khronos validation layer in debug
 /// builds or with the `validation` feature, when the layer is installed.
 /// Set `RUSTING_GPU_VALIDATION=1` to add GPU-assisted validation.
+/// Validation errors reported so far by every instance made with
+/// `validation_instance_info`.
+static VALIDATION_ERRORS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many validation errors the Khronos layer has reported in this
+/// process. Stays 0 when the layer is off.
+pub fn validation_error_count() -> usize {
+    VALIDATION_ERRORS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A headless device on an instance with the validation layer, and the
+/// messenger that counts its errors in [`validation_error_count`] (keep it
+/// alive while the device is), or `None` when the layer is not installed or
+/// the build has it off.
+#[cfg(test)]
+pub(crate) fn validated_headless_device() -> Option<(
+    HeadlessVulkanBase,
+    vulkano::instance::debug::DebugUtilsMessenger,
+)> {
+    let library = VulkanLibrary::new().ok()?;
+    let info = validation_instance_info(&library);
+    // The create-info messengers only see instance creation and
+    // destruction; everything in between needs a messenger of its own.
+    let messenger_info = info.debug_utils_messengers.first()?.clone();
+    let base =
+        headless_with(library, info).unwrap_or_else(|error| panic!("{error}"));
+    let messenger = vulkano::instance::debug::DebugUtilsMessenger::new(
+        base.instance.clone(),
+        messenger_info,
+    )
+    .unwrap();
+    Some((base, messenger))
+}
+
 fn validation_instance_info(library: &VulkanLibrary) -> InstanceCreateInfo {
     let mut required_extensions = InstanceExtensions::empty();
     let validation_enabled = (cfg!(debug_assertions)
@@ -362,6 +406,10 @@ fn validation_instance_info(library: &VulkanLibrary) -> InstanceCreateInfo {
         });
     let validation_callback = unsafe {
         DebugUtilsMessengerCallback::new(|severity, message_type, data| {
+            if severity.intersects(DebugUtilsMessageSeverity::ERROR) {
+                VALIDATION_ERRORS
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             eprintln!(
                 "[Vulkan {severity:?} {message_type:?}] {}: {}",
                 data.message_id_name.unwrap_or("unknown"),
