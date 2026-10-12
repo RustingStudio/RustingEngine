@@ -3528,10 +3528,10 @@ Depends on: Milestones 3, 4, and 10 (2D physics).
     linear marking, the extracted or uploaded height, the mapped flag, the
     flip sign, the rotation, the facing factor, the normal map upload, or the
     normal map read each fails one of them.
-- [ ] 2D GPU particles with physics-event emission.
+- [x] 2D GPU particles with physics-event emission.
   - [x] 2a. `rusting.particles_2d` draws an emitter's CPU or GPU particles in the 2D sprite pass, in canvas order (layer, world z, entity) between sprites, without depth and not in the 3D pass. Evidence: `particles_2d_extract_emitters_in_canvas_order` (unit) and GPU test `particles_2d_draw_between_sprites_in_canvas_order` (particle over layer-0 sprite and under layer-2 sprite, covered at layer -1, second emitter kept apart, additive CPU and GPU squares drawn exactly once); 7 mutations (3D skip for CPU and GPU, canvas split, sprite rebind, per-emitter filter, z sort, emitter filter) all fail tests; full check: clippy OK, 988 CPU and 1165 GPU tests passed.
-  - [ ] 2b. Keep 2D particles in their emitter's plane (CPU spawn and integrate, GPU compute).
-  - [ ] 2c. Emit particles from physics events on 2D (axis-locked) bodies.
+  - 2b. Dropped: under the orthographic 2D camera depth motion does not show, and a Circle or Cone emitter turned a quarter turn about X spreads in the canvas plane, so flattening particles to the emitter's plane is not needed yet.
+  - [x] 2c. Emit particles from physics events on 2D bodies. 2D bodies are ordinary bodies in the XY plane, so the existing impact, settle and fracture emission applies unchanged. Evidence: `a_2d_body_landing_emits_particles_drawn_in_the_2d_pass` (`runtime/tests.rs`: a body with a 2D emitter lands, its impact particles spawn at the floor contact and extract for the 2D pass on layer 3); mutations disabling impact spawns or the `particles_2d` extraction fail it. GPU emitters still spawn impact particles at the emitter, as in 3D. Full check: clippy OK, 989 CPU and 1166 GPU tests passed.
 - [ ] 2D camera with smoothing, limits, and pixel-perfect mode.
 - [ ] 2D hybrid GPU physics showcases (thousands of physics sprites with events to Rust gameplay).
 - [ ] Mixing 2D layers over or inside 3D scenes.

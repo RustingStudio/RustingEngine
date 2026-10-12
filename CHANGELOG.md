@@ -4,6 +4,7 @@
 
 ### Added
 
+- Rendering: impact and settle particles of 2D bodies draw in the 2D pass
 - Rendering: `rusting.particles_2d` draws particle emitters with the sprites in 2D canvas order
 - Rendering: sprites take a normal map that 2D lights shade
 - Rendering: 2D light occluder polygons cast shadows on sprites
