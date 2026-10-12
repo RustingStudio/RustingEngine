@@ -33,10 +33,12 @@ pub enum EditorPanel {
     Agent,
     /// Dope sheet for the selected object's animation clips.
     Timeline,
+    /// Host or join a live editing session.
+    Collaboration,
 }
 
 impl EditorPanel {
-    pub(super) const ALL: [Self; 14] = [
+    pub(super) const ALL: [Self; 15] = [
         Self::Scene,
         Self::Game,
         Self::Code,
@@ -51,6 +53,7 @@ impl EditorPanel {
         Self::PhysicsDiagnostics,
         Self::Agent,
         Self::Timeline,
+        Self::Collaboration,
     ];
 
     pub(super) fn icon(self) -> super::EditorIcon {
@@ -70,6 +73,7 @@ impl EditorPanel {
             Self::PhysicsDiagnostics => EditorIcon::ViewOptions,
             Self::Agent => EditorIcon::Console,
             Self::Timeline => EditorIcon::Play,
+            Self::Collaboration => EditorIcon::Eye,
         }
     }
 
@@ -89,6 +93,7 @@ impl EditorPanel {
             Self::PhysicsDiagnostics => "Physics Diagnostics",
             Self::Agent => "Agent",
             Self::Timeline => "Timeline",
+            Self::Collaboration => "Collaboration",
         }
     }
 }

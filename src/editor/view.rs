@@ -62,6 +62,8 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
     let mut editor_assets = take_resource::<EditorAssetState>(world);
     let mut dialogs = take_resource::<FileDialogs>(world);
     super::reload_external_scene_change(world, &mut state, &mut history);
+    let collab_open =
+        super::collab_panel::collab_tick(world, &mut state, &mut history);
     let (build_running, build_finished, build_console_output, restart_ready) = {
         let mut build = world.resource_mut::<EditorBuildState>();
         let finished = build.poll();
@@ -391,6 +393,11 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
                 });
             }
         }
+    }
+    if let Some(request) =
+        super::collab_panel::draw_trust_prompt(context, world)
+    {
+        build_request = Some(request);
     }
     if dialogs.is_open() {
         // The modal keeps panel clicks from changing what the dialog's
@@ -875,7 +882,8 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
     let project_request = match action_to_run {
         Some(DestructiveRequest::OpenProject(request)) => Some(request),
         _ => None,
-    };
+    }
+    .or(collab_open.map(ProjectRequest::Open));
 
     if reset_layout {
         state.dock_layout = EditorDockNode::default_layout();
@@ -1271,6 +1279,17 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
                         &mut state,
                         &mut component_edits,
                     ),
+                    EditorPanel::Collaboration => {
+                        if let Some(mut collab) = world
+                            .get_resource_mut::<super::collab_panel::CollabState>()
+                        {
+                            super::collab_panel::draw_collab_area(
+                                ui,
+                                &mut collab,
+                                &state,
+                            );
+                        }
+                    }
                     EditorPanel::Agent => {
                         let clicked = world
                             .get_resource_mut::<agent_panel::AgentJournal>()
@@ -1707,6 +1726,9 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
                     Some(format!("Could not create scene: {error}"));
             }
         }
+    }
+    if undo_clicked || redo_clicked {
+        super::collab_panel::before_undo(world, &mut history);
     }
     if undo_clicked {
         if let Some(document) = history.pending_inspector.take() {
@@ -2894,6 +2916,9 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
         render_settings,
         original_scene_render,
     );
+    let build_request = build_request.and_then(|request| {
+        super::collab_panel::gate_build(world, &state.project_root, request)
+    });
     if let Some(request) = build_request {
         if let Err(error) = world
             .resource_mut::<EditorBuildState>()
@@ -2922,6 +2947,13 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
     } else {
         RenderDebugOverlay::default()
     };
+    if state.workspace == EditorWorkspace::Scene {
+        for (matrix, color) in super::collab_panel::remote_cameras(world) {
+            for [start, end] in crate::editor::overlay::camera_marker(matrix) {
+                overlay.line(start, end, color);
+            }
+        }
+    }
     if let (Some(settings), Some(physics)) = (
         world.get_resource::<crate::runtime::PhysicsDebugDraw>(),
         world.get_resource::<crate::runtime::PhysicsWorld>(),

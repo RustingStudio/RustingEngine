@@ -5,6 +5,7 @@
 
 mod agent_panel;
 mod assets_panel;
+mod collab_panel;
 mod diagnostics;
 mod dock;
 mod file_dialogs;
@@ -1180,6 +1181,7 @@ impl Plugin for EditorPlugin {
             .insert_resource(EditorFlyCamera::default())
             .insert_resource(EditorConsole::default())
             .insert_resource(agent_panel::AgentJournal::default())
+            .insert_resource(collab_panel::CollabState::default())
             .insert_resource(profiler::EditorProfiler::default())
             .insert_resource(EditorHistory::default())
             .insert_resource(PendingDestructiveAction::default())

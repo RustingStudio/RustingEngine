@@ -37,6 +37,8 @@ were run against this version of the engine.
 - [Editor guide](../editor_gui.md): areas, Scene View navigation and the
   transform gizmo, Hierarchy, Inspector, assets, Preview and Play, export,
   the Profiler, and keyboard shortcuts.
+- [Live collaboration](collaboration.md): host or join a session from the
+  editor so several people edit one project at the same time.
 - [README: headless CLI](../README.md#headless-project-cli): every `rusting`
   command, scene patches, and the scenario format.
 - `rusting schema`: the full catalog of commands and scene components, with

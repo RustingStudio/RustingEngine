@@ -140,6 +140,39 @@ pub fn bone_shapes(world: &World) -> Vec<(Entity, Vec<Segment>)> {
         .collect()
 }
 
+/// A camera frustum outline of vertical field of view `fov`, in local space.
+fn camera_pyramid(lines: &mut Vec<Segment>, fov: f32) {
+    let depth = 0.8;
+    let half_height = depth * (fov * 0.5).tan().clamp(0.1, 2.0);
+    let half_width = half_height * 16.0 / 9.0;
+    let corners = [
+        [-half_width, -half_height, -depth],
+        [half_width, -half_height, -depth],
+        [half_width, half_height, -depth],
+        [-half_width, half_height, -depth],
+    ];
+    for index in 0..4 {
+        lines.push([[0.0; 3], corners[index]]);
+        lines.push([corners[index], corners[(index + 1) % 4]]);
+    }
+    // The filled triangle in Blender marks the camera's up side.
+    let base = half_height * 1.1;
+    let tip = [0.0, base + half_height * 0.6, -depth];
+    let left = [-half_width * 0.6, base, -depth];
+    let right = [half_width * 0.6, base, -depth];
+    lines.extend([[left, right], [right, tip], [tip, left]]);
+}
+
+/// Another person's editor camera at world `matrix`, as world segments.
+pub(super) fn camera_marker(matrix: [[f32; 4]; 4]) -> Vec<Segment> {
+    let mut lines = Vec::new();
+    camera_pyramid(&mut lines, 60f32.to_radians());
+    lines
+        .into_iter()
+        .map(|[a, b]| [transform_point(matrix, a), transform_point(matrix, b)])
+        .collect()
+}
+
 /// Local-space shape: forward is -Z and up is +Y, like the renderer.
 /// `faces_view` leaves out shapes that `object_shapes` draws facing the
 /// editor camera.
@@ -159,25 +192,7 @@ fn local_shape(
             } => vertical_fov_radians,
             Projection::Orthographic { .. } => 50f32.to_radians(),
         };
-        let depth = 0.8;
-        let half_height = depth * (fov * 0.5).tan().clamp(0.1, 2.0);
-        let half_width = half_height * 16.0 / 9.0;
-        let corners = [
-            [-half_width, -half_height, -depth],
-            [half_width, -half_height, -depth],
-            [half_width, half_height, -depth],
-            [-half_width, half_height, -depth],
-        ];
-        for index in 0..4 {
-            lines.push([[0.0; 3], corners[index]]);
-            lines.push([corners[index], corners[(index + 1) % 4]]);
-        }
-        // The filled triangle in Blender marks the camera's up side.
-        let base = half_height * 1.1;
-        let tip = [0.0, base + half_height * 0.6, -depth];
-        let left = [-half_width * 0.6, base, -depth];
-        let right = [half_width * 0.6, base, -depth];
-        lines.extend([[left, right], [right, tip], [tip, left]]);
+        camera_pyramid(&mut lines, fov);
     }
     if world.get::<DirectionalLight>(entity).is_some() {
         circle(&mut lines, [0.0; 3], 0.2, [0, 1]);

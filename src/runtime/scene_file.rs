@@ -2513,7 +2513,7 @@ fn map_scene_asset_paths(
 }
 
 /// Converts scene-relative asset paths to normalized absolute paths.
-pub(super) fn absolutize_scene_assets(
+pub fn absolutize_scene_assets(
     document: &mut SceneDocument,
     scene_folder: &Path,
 ) -> Result<(), SceneIoError> {

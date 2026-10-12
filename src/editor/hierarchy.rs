@@ -311,6 +311,7 @@ pub(super) fn draw_hierarchy_area(
     ui.add_space(4.0);
 
     let visible = filter_items(entities, &state.hierarchy_filter);
+    let remote = super::collab_panel::remote_selection(world);
     let visible_entities =
         visible.iter().map(|item| item.entity).collect::<Vec<_>>();
     let (toggle, range) =
@@ -393,6 +394,28 @@ pub(super) fn draw_hierarchy_area(
                             EditorTheme::TEXT_MUTED
                         },
                     );
+                    // Dots for objects other collaborators have selected.
+                    let marks = world
+                        .get::<SceneId>(item.entity)
+                        .and_then(|id| remote.get(&id.0));
+                    for (index, (name, color)) in
+                        marks.into_iter().flatten().enumerate()
+                    {
+                        let center = egui::pos2(
+                            eye_rect.left() - 8.0 - index as f32 * 10.0,
+                            response.rect.center().y,
+                        );
+                        ui.painter().circle_filled(center, 3.5, *color);
+                        ui.interact(
+                            egui::Rect::from_center_size(
+                                center,
+                                egui::vec2(10.0, 10.0),
+                            ),
+                            ui.id().with(("hierarchy_peer", item.entity, index)),
+                            egui::Sense::hover(),
+                        )
+                        .on_hover_text(format!("Selected by {name}"));
+                    }
                     if eye.clicked() {
                         *entity_request = Some(EntityRequest::SetVisible(
                             item.entity,

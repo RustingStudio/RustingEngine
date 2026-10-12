@@ -450,3 +450,8 @@ record mode and the rest-pose preview. Later:
   object adds `ConvexDecomposition` and sets the collider to `ConvexMesh`;
   draw the decomposed hulls (`runtime::decompose`) as wireframes so the
   settings can be tuned by eye.
+
+## Deferred: live collaboration
+
+- Patch more fields in place (components, lights, mesh renderers); other
+  edits still reload the open scene.

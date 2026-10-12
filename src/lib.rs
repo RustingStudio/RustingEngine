@@ -6,6 +6,7 @@ pub mod annotate;
 pub mod art_direction;
 pub mod asset_import;
 pub mod assets;
+pub mod collab;
 pub mod cookbook;
 pub mod core;
 pub mod crash;
