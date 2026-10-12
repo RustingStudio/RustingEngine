@@ -3235,6 +3235,25 @@ Depends on: Milestones 3 and 4.
 ### Frame structure
 
 - [ ] A render graph that schedules passes, transient resources, and barriers automatically.
+  - [x] Scheduler: `FrameGraph::compile` takes the passes a frame enables,
+    in any order, and returns them in dependency order with every barrier
+    (write hazards on buffers and images, layout changes, `Undefined` on a
+    transient image's first use) and the first-to-last-pass span of each
+    transient resource, for memory aliasing.
+    Evidence: unit tests in `frame_passes.rs`. A shuffled full frame comes
+    back in order, and its layout changes equal `layout_transitions()`.
+    Physics states get barriers only after writes. A frame without ambient
+    occlusion has no depth read transitions and no AO or bloom barriers.
+    Bloom does not overlap the shadow map. A read of an unwritten
+    transient and a doubled pass are rejected. GPU test
+    `atmosphere_effects_combine_with_every_scene_path` compiles
+    `last_frame_passes()` for all 8 culling, MSAA and material paths.
+    Mutations caught: dropping the sort, dropping barriers after buffer
+    writes, and dropping SceneColor's DepthPyramid write ("Transparent
+    reads DepthPyramid before any pass writes it").
+  - [ ] Recording: `SceneRenderer` records from the compiled graph, places
+    its barriers itself, and aliases transient images whose spans do not
+    overlap.
 - [ ] Frame pacing that holds a stable presentation cadence under variable GPU load.
 - [ ] Measure and report end-to-end input latency.
 

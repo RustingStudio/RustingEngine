@@ -3,9 +3,10 @@
 //! Each pass names the resources it reads and writes and the image layout it
 //! needs them in. `SceneRenderer` records its passes in this order, labels
 //! each one with [`FramePass::label`], and builds its render passes with the
-//! attachment layouts this table asks for. Vulkano still inserts the
-//! barriers; the table makes the order and the layout transitions explicit
-//! and testable until a real render graph schedules them (Milestone 13).
+//! attachment layouts this table asks for. [`FrameGraph`] schedules any
+//! enabled subset of the passes: their order, the barriers between them,
+//! and the lifetimes of transient resources. Vulkano still inserts the
+//! barriers it records.
 
 use vulkano::image::ImageLayout;
 
@@ -338,6 +339,160 @@ pub fn layout_transitions() -> Vec<LayoutTransition> {
     transitions
 }
 
+impl FrameResource {
+    /// Whether the resource outlives the frame: it comes from outside the
+    /// passes, or a later frame reads it. The others are transient, and
+    /// transients alive in disjoint passes may share memory.
+    pub fn persistent(self) -> bool {
+        use FrameResource::*;
+        // Draw commands keep the visible set the next occlusion frame draws
+        // first.
+        matches!(
+            self,
+            MaterialTextures
+                | PhysicsStates
+                | DrawCommands
+                | SceneColor
+                | Exposure
+                | Target
+        )
+    }
+}
+
+/// A dependency the frame graph places before `before` on one resource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphBarrier {
+    pub resource: FrameResource,
+    /// The last pass that touched the resource this frame; `None` on its
+    /// first use.
+    pub after: Option<FramePass>,
+    pub before: FramePass,
+    /// Image layouts, `None` for buffers. A transient image's first use
+    /// comes from `Undefined`, which discards what it held.
+    pub from: Option<ImageLayout>,
+    pub to: Option<ImageLayout>,
+}
+
+/// The passes a transient resource is alive in, as indices into
+/// [`FrameGraph::passes`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransientLifetime {
+    pub resource: FrameResource,
+    pub first: usize,
+    pub last: usize,
+}
+
+impl TransientLifetime {
+    /// Whether both resources are alive in one pass, so they cannot share
+    /// memory.
+    pub fn overlaps(&self, other: &TransientLifetime) -> bool {
+        self.first <= other.last && other.first <= self.last
+    }
+}
+
+/// The schedule of one frame's enabled passes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameGraph {
+    pub passes: Vec<FramePass>,
+    pub barriers: Vec<GraphBarrier>,
+    pub transients: Vec<TransientLifetime>,
+}
+
+impl FrameGraph {
+    /// Schedules the passes a frame enables, given in any order. Puts them
+    /// in dependency order, places a barrier wherever a write meets another
+    /// access or an image changes layout, and spans each transient
+    /// resource. Persistent images arrive in their first use's layout.
+    /// Reads of ambient occlusion or bloom that no pass wrote get a neutral
+    /// image and no barrier. Fails when a pass is enabled twice or reads a transient resource no
+    /// earlier pass wrote.
+    pub fn compile(enabled: &[FramePass]) -> Result<FrameGraph, String> {
+        let mut passes = enabled.to_vec();
+        passes
+            .sort_by_key(|pass| FramePass::ALL.iter().position(|p| p == pass));
+        if let Some(pair) = passes.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(format!("{:?} is enabled twice", pair[0]));
+        }
+        // The last use of each resource: pass, layout and whether it wrote.
+        let mut last =
+            Vec::<(FrameResource, FramePass, Option<ImageLayout>, bool)>::new();
+        let mut barriers = Vec::new();
+        let mut transients = Vec::<TransientLifetime>::new();
+        for (index, &pass) in passes.iter().enumerate() {
+            let accesses = pass.accesses();
+            for (i, access) in accesses.iter().enumerate() {
+                let resource = access.resource;
+                // A pass that reads and writes a resource uses it once.
+                if accesses[..i].iter().any(|a| a.resource == resource) {
+                    continue;
+                }
+                let write =
+                    accesses.iter().any(|a| a.resource == resource && a.write);
+                let layout = access.layout;
+                match last.iter_mut().find(|use_| use_.0 == resource) {
+                    Some(use_) => {
+                        if use_.3 || write || use_.2 != layout {
+                            barriers.push(GraphBarrier {
+                                resource,
+                                after: Some(use_.1),
+                                before: pass,
+                                from: use_.2,
+                                to: layout,
+                            });
+                        }
+                        *use_ = (resource, pass, layout, write);
+                    }
+                    None => {
+                        // Frames without the pass that writes ambient
+                        // occlusion or bloom bind a neutral image instead.
+                        let neutral = matches!(
+                            resource,
+                            FrameResource::AmbientOcclusion
+                                | FrameResource::Bloom
+                        );
+                        if !write && neutral {
+                            continue;
+                        }
+                        if !resource.persistent() {
+                            if !write {
+                                return Err(format!(
+                                    "{pass:?} reads {resource:?} before any pass writes it"
+                                ));
+                            }
+                            if layout.is_some() {
+                                barriers.push(GraphBarrier {
+                                    resource,
+                                    after: None,
+                                    before: pass,
+                                    from: Some(ImageLayout::Undefined),
+                                    to: layout,
+                                });
+                            }
+                        }
+                        last.push((resource, pass, layout, write));
+                    }
+                }
+                if !resource.persistent() {
+                    match transients.iter_mut().find(|t| t.resource == resource)
+                    {
+                        Some(lifetime) => lifetime.last = index,
+                        None => transients.push(TransientLifetime {
+                            resource,
+                            first: index,
+                            last: index,
+                        }),
+                    }
+                }
+            }
+        }
+        Ok(FrameGraph {
+            passes,
+            barriers,
+            transients,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,5 +645,119 @@ mod tests {
             Some(ShaderReadOnlyOptimal)
         );
         assert_eq!(FramePass::DebugOverlay.next_layout(Target), None);
+    }
+
+    #[test]
+    fn the_graph_orders_passes_and_matches_the_declared_transitions() {
+        let mut shuffled = FramePass::ALL;
+        shuffled.reverse();
+        shuffled.swap(3, 9);
+        let graph = FrameGraph::compile(&shuffled).unwrap();
+        assert_eq!(graph.passes, FramePass::ALL);
+        let changes: Vec<_> = graph
+            .barriers
+            .iter()
+            .filter_map(|b| match (b.from, b.to) {
+                (Some(from), Some(to))
+                    if from != to && from != ImageLayout::Undefined =>
+                {
+                    Some(LayoutTransition {
+                        resource: b.resource,
+                        from,
+                        to,
+                        before: b.before,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(changes, layout_transitions());
+        // Buffers: each write orders the next use; reads after reads do not.
+        let physics: Vec<_> = graph
+            .barriers
+            .iter()
+            .filter(|b| b.resource == FrameResource::PhysicsStates)
+            .map(|b| (b.after, b.before, b.from))
+            .collect();
+        assert_eq!(
+            physics,
+            [
+                (Some(FramePass::Uploads), FramePass::Physics, None),
+                (Some(FramePass::Physics), FramePass::Culling, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_frame_without_occlusion_skips_the_depth_read_transitions() {
+        use FramePass::*;
+        use ImageLayout::*;
+        let graph =
+            FrameGraph::compile(&[ToneMap, DebugOverlay, Scene, Shadow])
+                .unwrap();
+        assert_eq!(graph.passes, [Shadow, Scene, ToneMap, DebugOverlay]);
+        let depth: Vec<_> = graph
+            .barriers
+            .iter()
+            .filter(|b| b.resource == FrameResource::SceneDepth)
+            .map(|b| (b.after, b.before, b.from, b.to))
+            .collect();
+        assert_eq!(
+            depth,
+            [
+                (
+                    None,
+                    Scene,
+                    Some(Undefined),
+                    Some(DepthStencilAttachmentOptimal)
+                ),
+                (
+                    Some(Scene),
+                    DebugOverlay,
+                    Some(DepthStencilAttachmentOptimal),
+                    Some(DepthStencilAttachmentOptimal)
+                ),
+            ]
+        );
+        assert!(graph.barriers.iter().all(|b| !matches!(
+            b.resource,
+            FrameResource::AmbientOcclusion | FrameResource::Bloom
+        )));
+        assert_eq!(graph.transients.len(), 3, "{:?}", graph.transients);
+        assert_eq!(
+            FrameGraph::compile(&[ToneMap]).unwrap_err(),
+            "ToneMap reads HdrColor before any pass writes it"
+        );
+        assert_eq!(
+            FrameGraph::compile(&[Scene, Shadow, Scene]).unwrap_err(),
+            "Scene is enabled twice"
+        );
+    }
+
+    #[test]
+    fn transients_span_their_first_to_last_use() {
+        use FrameResource::*;
+        let graph = FrameGraph::compile(&FramePass::ALL).unwrap();
+        let spans: Vec<_> = graph
+            .transients
+            .iter()
+            .map(|t| (t.resource, t.first, t.last))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                (ShadowMap, 3, 11),
+                (SceneDepth, 4, 15),
+                (AmbientOcclusion, 5, 11),
+                (HdrColor, 6, 14),
+                (DepthPyramid, 7, 11),
+                (Bloom, 12, 14),
+            ]
+        );
+        let lifetime =
+            |r| *graph.transients.iter().find(|t| t.resource == r).unwrap();
+        assert!(!lifetime(Bloom).overlaps(&lifetime(ShadowMap)));
+        assert!(lifetime(Bloom).overlaps(&lifetime(HdrColor)));
+        assert!(lifetime(ShadowMap).overlaps(&lifetime(DepthPyramid)));
     }
 }

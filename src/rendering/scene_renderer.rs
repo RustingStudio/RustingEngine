@@ -13175,6 +13175,12 @@ mod tests {
                     let label =
                         format!("{culling:?} {antialiasing:?} {material:?}");
                     let passes = scene.renderer.last_frame_passes();
+                    let graph =
+                        crate::rendering::frame_passes::FrameGraph::compile(
+                            passes,
+                        )
+                        .unwrap_or_else(|error| panic!("{label}: {error}"));
+                    assert_eq!(graph.passes, passes, "{label}");
                     for pass in [
                         FramePass::DepthPrepass,
                         FramePass::AmbientOcclusion,
