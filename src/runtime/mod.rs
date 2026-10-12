@@ -366,6 +366,11 @@ impl Default for App {
             ScheduleStage::PostUpdate,
             game_feel::draw_hud.after(propagate_transforms),
         );
+        // After propagation, so the camera follows where targets are now.
+        app.add_system(
+            ScheduleStage::PostUpdate,
+            two_d::follow_cameras_2d.after(propagate_transforms),
+        );
         app.add_system(ScheduleStage::Update, two_d::build_tile_maps);
         app.add_system(
             ScheduleStage::Update,

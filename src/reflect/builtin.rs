@@ -7,6 +7,7 @@ use bevy_ecs::entity::Entity;
 
 use super::TypeRegistry;
 use crate::assets::{AlphaMode, MaterialAsset, MaterialModel};
+use crate::runtime::Camera2d;
 use crate::runtime::ClothSheet;
 use crate::runtime::Rope;
 use crate::runtime::WorldText;
@@ -1450,6 +1451,17 @@ crate::reflect! {
 crate::reflect! {
     struct LightOccluder2d {
         points: Vec<[f32; 2]> { unit: "m", doc: "closed outline in the object's XY plane that blocks 2D lights" },
+    }
+}
+
+crate::reflect! {
+    struct Camera2d {
+        target: String { doc: "name of the object to follow; empty stays put" },
+        offset: [f32; 2] { unit: "m", doc: "from the target to the view center" },
+        smoothing: f32 { unit: "s", min: 0.0, doc: "time to close about two thirds of the gap; 0 snaps" },
+        limits: Option<[f32; 4]> { unit: "m", doc: "min x, min y, max x, max y the orthographic view stays inside" },
+        pixels_per_unit: f32 { min: 0.0, doc: "art pixels per metre; above 0 zooms to whole screen pixels per art pixel and snaps to screen pixels" },
+        #[skip] center: Option<[f32; 2]>,
     }
 }
 

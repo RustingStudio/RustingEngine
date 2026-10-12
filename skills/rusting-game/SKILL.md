@@ -248,6 +248,7 @@ each one's fields, defaults and an example:
 - `rusting.sprite_animation`: Plays a sprite sheet on the rusting.sprite of the same object by setting its region.
 - `rusting.light_2d`: A round light for rusting.sprite objects, centered on this object: it adds color (linear rgb) times intensity to sprites within radius world units in the XY plane, fading smoothly to nothing at the edge.
 - `rusting.light_occluder_2d`: A closed polygon (points, in the object's XY plane) that casts shadows from every rusting.light_2d: a sprite pixel whose straight line to a light crosses one of its edges gets none of that light.
+- `rusting.camera_2d`: Put on the object with rusting.camera (no parent).
 - `rusting.particles_2d`: Put on an object with rusting.particle_emitter: its particles (CPU or GPU simulated) draw in the 2D pass with rusting.sprite objects instead of in the 3D scene, in canvas order at layer and the emitter's world z, after tone mapping and without a depth test.
 - `rusting.ambient_2d`: The light every rusting.sprite gets before any rusting.light_2d: color (linear rgb) multiplies each sprite, so a dark value makes a night scene that only lights reveal.
 - `rusting.post_volume`: Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside.

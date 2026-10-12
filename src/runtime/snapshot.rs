@@ -510,6 +510,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::Light2d>();
     types.register::<super::LightOccluder2d>();
     types.register::<super::Particles2d>();
+    types.register::<super::Camera2d>();
     types.register::<super::ProceduralSky>();
     types.register::<super::CameraScreen>();
     types.register::<super::Bloom>();

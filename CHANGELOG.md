@@ -4,6 +4,7 @@
 
 ### Added
 
+- Rendering: `rusting.camera_2d` follows a target with smoothing, limits, and a pixel-perfect mode
 - Rendering: impact and settle particles of 2D bodies draw in the 2D pass
 - Rendering: `rusting.particles_2d` draws particle emitters with the sprites in 2D canvas order
 - Rendering: sprites take a normal map that 2D lights shade

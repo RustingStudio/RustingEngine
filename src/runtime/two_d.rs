@@ -779,6 +779,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cameras_2d_follow_smoothly_stay_in_limits_and_fit_pixels() {
+        use super::super::{Camera, GlobalTransform, Name, Projection};
+        use std::time::Duration;
+        let mut app = super::super::App::new();
+        app.world_mut()
+            .resource_mut::<RuntimeInput>()
+            .record_viewport_size([800.0, 600.0]);
+        let player = app
+            .spawn((Name("Player".into()), Transform::new([10.0, 0.0, 0.0])));
+        let ortho = |vertical_size| Camera {
+            projection: Projection::Orthographic {
+                vertical_size,
+                near: 0.1,
+                far: 100.0,
+            },
+            ..Camera::default()
+        };
+        let camera = app.spawn((
+            ortho(6.0),
+            Transform::new([0.0, 0.0, 10.0]),
+            Camera2d {
+                target: "Player".into(),
+                smoothing: 0.1,
+                ..Camera2d::default()
+            },
+        ));
+        let at = |app: &super::super::App| {
+            let transform = app.world().get::<Transform>(camera).unwrap();
+            let global = app.world().get::<GlobalTransform>(camera).unwrap();
+            assert_eq!(global.matrix[3][..2], transform.position[..2]);
+            assert_eq!(transform.position[2], 10.0);
+            [transform.position[0], transform.position[1]]
+        };
+        // One smoothing time closes 1 - 1/e of the gap.
+        app.update(Duration::from_secs_f32(0.1)).unwrap();
+        let [x, y] = at(&app);
+        assert!((x - 10.0 * (1.0 - (-1.0_f32).exp())).abs() < 1e-3, "{x}");
+        assert_eq!(y, 0.0);
+        // Limits keep the 8 x 6 view inside; a narrow room centers it.
+        let set = |app: &mut super::super::App,
+                   edit: &dyn Fn(&mut Camera2d)| {
+            edit(&mut app.world_mut().get_mut::<Camera2d>(camera).unwrap());
+            app.update(Duration::from_secs_f32(0.1)).unwrap();
+        };
+        set(&mut app, &|follow| {
+            follow.smoothing = 0.0;
+            follow.offset = [0.0, 100.0];
+            follow.limits = Some([-5.0, -5.0, 5.0, 5.0]);
+        });
+        assert_eq!(at(&app), [1.0, 2.0]);
+        set(&mut app, &|follow| {
+            follow.limits = Some([0.0, -5.0, 4.0, 5.0])
+        });
+        assert_eq!(at(&app), [2.0, 2.0]);
+        // Pixel-perfect at 16 pixels per unit: 600 / 96 rounds to a zoom
+        // of 6, so the view is 6.25 tall and moves in 1/96 steps.
+        set(&mut app, &|follow| {
+            follow.limits = None;
+            follow.offset = [0.004 - 10.0, 0.3];
+            follow.pixels_per_unit = 16.0;
+        });
+        let camera_component = app.world().get::<Camera>(camera).unwrap();
+        assert_eq!(camera_component.projection, ortho(6.25).projection);
+        assert_eq!(at(&app), [0.0, (0.3_f32 * 96.0).round() / 96.0]);
+        // Steps under half a screen pixel still add up under snapping.
+        set(&mut app, &|follow| {
+            follow.offset = [1.0 - 10.0, 0.0];
+            follow.smoothing = 30.0;
+        });
+        for _ in 0..20 {
+            app.update(Duration::from_secs_f32(0.1)).unwrap();
+        }
+        assert!(at(&app)[0] > 0.05, "{:?}", at(&app));
+        let _ = player;
+    }
+
+    #[test]
     fn sprite_animations_step_through_sheet_frames_on_the_fixed_tick() {
         let mut app = super::super::App::new();
         let step = app.world().resource::<FrameTime>().fixed_delta;
@@ -833,5 +910,121 @@ mod tests {
             "one frame per fixed step; the walk loops, the other holds"
         );
         assert_eq!(slow_frames, [0, 0, 0, 0, 0, 1]);
+    }
+}
+
+/// A 2D camera on the object with the [`super::Camera`]: follows the object
+/// named `target` with smoothing, keeps its view inside `limits`, and in
+/// pixel-perfect mode draws each art pixel as a whole number of screen
+/// pixels. The camera object should have no parent, since it is placed in
+/// world space.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Camera2d {
+    /// Name of the object to follow; empty stays put.
+    pub target: String,
+    /// World offset from the target to the view center.
+    pub offset: [f32; 2],
+    /// Seconds to close about two thirds of the gap to the target; 0 snaps.
+    pub smoothing: f32,
+    /// `[min_x, min_y, max_x, max_y]` world rectangle the orthographic view
+    /// stays inside; a view wider than it centers on it.
+    pub limits: Option<[f32; 4]>,
+    /// Art pixels per world unit. Above 0, the orthographic view height
+    /// zooms to a whole number of screen pixels per art pixel and the view
+    /// center snaps to screen pixels.
+    pub pixels_per_unit: f32,
+    /// The smoothed center before limits and snapping, so slow moves are
+    /// not rounded away.
+    #[serde(skip)]
+    pub center: Option<[f32; 2]>,
+}
+
+impl Default for Camera2d {
+    fn default() -> Self {
+        Self {
+            target: String::new(),
+            offset: [0.0; 2],
+            smoothing: 0.15,
+            limits: None,
+            pixels_per_unit: 0.0,
+            center: None,
+        }
+    }
+}
+
+/// Each frame after transforms propagate: moves every [`Camera2d`] toward
+/// its target, then keeps its view inside its limits and fits it to whole
+/// screen pixels.
+pub(super) fn follow_cameras_2d(
+    time: Res<FrameTime>,
+    input: Res<RuntimeInput>,
+    targets: Query<(&super::Name, &super::GlobalTransform), Without<Camera2d>>,
+    mut cameras: Query<(
+        &mut Camera2d,
+        &mut super::Camera,
+        &mut Transform,
+        &mut super::GlobalTransform,
+    )>,
+) {
+    let dt = time.delta.as_secs_f32();
+    let [width, height] = input.viewport_size();
+    for (mut follow, mut camera, mut transform, mut global) in &mut cameras {
+        let mut center = follow
+            .center
+            .unwrap_or([transform.position[0], transform.position[1]]);
+        let goal = targets
+            .iter()
+            .find(|(name, _)| {
+                !follow.target.is_empty() && name.as_str() == follow.target
+            })
+            .map(|(_, target)| {
+                let at = target.matrix[3];
+                [at[0] + follow.offset[0], at[1] + follow.offset[1]]
+            });
+        if let Some(goal) = goal {
+            let share = if follow.smoothing > 0.0 {
+                1.0 - (-dt / follow.smoothing).exp()
+            } else {
+                1.0
+            };
+            for axis in 0..2 {
+                center[axis] += (goal[axis] - center[axis]) * share;
+            }
+        }
+        follow.center = Some(center);
+        let mut drawn = center;
+        if let super::Projection::Orthographic { vertical_size, .. } =
+            &mut camera.projection
+        {
+            let pixels = follow.pixels_per_unit;
+            if pixels > 0.0 && height > 0.0 && *vertical_size > 0.0 {
+                let zoom =
+                    (height / (*vertical_size * pixels)).round().max(1.0);
+                *vertical_size = height / (zoom * pixels);
+            }
+            if let Some([min_x, min_y, max_x, max_y]) = follow.limits {
+                let aspect = if height > 0.0 { width / height } else { 1.0 };
+                let half =
+                    [*vertical_size * aspect * 0.5, *vertical_size * 0.5];
+                for (axis, (min, max)) in
+                    [(min_x, max_x), (min_y, max_y)].into_iter().enumerate()
+                {
+                    drawn[axis] = if max - min <= half[axis] * 2.0 {
+                        (min + max) * 0.5
+                    } else {
+                        drawn[axis].clamp(min + half[axis], max - half[axis])
+                    };
+                }
+            }
+            if pixels > 0.0 && height > 0.0 {
+                let step = *vertical_size / height;
+                drawn = drawn.map(|value| (value / step).round() * step);
+            }
+        }
+        transform.position[0] = drawn[0];
+        transform.position[1] = drawn[1];
+        global.matrix[3][0] = drawn[0];
+        global.matrix[3][1] = drawn[1];
     }
 }

@@ -934,6 +934,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"points": [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]}),
     },
     ComponentSection {
+        key: "rusting.camera_2d",
+        summary: "Put on the object with rusting.camera (no parent). Each frame the view center moves toward the object named target plus offset, closing about two thirds of the gap every smoothing seconds (0 snaps). With an orthographic camera, limits [min_x, min_y, max_x, max_y] keep the whole view inside that world rectangle (a view wider than it centers on it), and pixels_per_unit above 0 makes it pixel-perfect: the view height zooms so each art pixel covers a whole number of screen pixels, and the center snaps to screen pixels.",
+        gpu: NO_GPU,
+        example: || json!({"target": "Player", "offset": [0.0, 1.0], "smoothing": 0.15, "limits": [-10.0, -2.0, 40.0, 12.0], "pixels_per_unit": 16.0}),
+    },
+    ComponentSection {
         key: "rusting.particles_2d",
         summary: "Put on an object with rusting.particle_emitter: its particles (CPU or GPU simulated) draw in the 2D pass with rusting.sprite objects instead of in the 3D scene, in canvas order at layer and the emitter's world z, after tone mapping and without a depth test. Custom particle shaders are not used in the 2D pass.",
         gpu: "one 2D-pass draw per emitter",
