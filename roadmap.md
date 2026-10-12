@@ -4847,7 +4847,21 @@ Depends on: Milestones 3, 4, and 21.
   (difference 101), and so does an ACES denominator constant of 0.2
   instead of 0.14 (difference 11). Full check: workspace lib 964
   passed, gpu-tests run 1124 passed.
-- [ ] Editor compositing.
+- [x] Editor compositing.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::editor_compositing_matches_its_golden_image`
+  follows the editor's frame: the scene renders offscreen into a sampled
+  32x24 image, as `scene_view_target` makes, and `EguiPainter` shows it as
+  `editor::SCENE_VIEW_TEXTURE` at (16, 12) of a 64x48 window, under a
+  workspace fill and a header with text, with a translucent overlay and an
+  outline drawn over the view. Every view pixel outside the overlay and
+  outline equals the directly rendered scene byte for byte (unscaled,
+  colors unchanged), and the whole window matches
+  `src/rendering/golden/editor_compositing.png` (tolerance 8). Mutation
+  checks: sampling the scene texture without its sRGB re-encode fails the
+  byte comparison on the background; a non-premultiplied source blend
+  fails the golden image (difference 50). Full check: lib 977 passed,
+  gpu-tests 1149 passed.
 
 ### Physics tests
 

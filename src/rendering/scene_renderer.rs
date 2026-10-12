@@ -21529,6 +21529,232 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    #[cfg(feature = "editor")]
+    fn editor_compositing_matches_its_golden_image() {
+        use crate::rendering::egui_painter::EguiPainter;
+        use crate::rendering::swapchain::OFFSCREEN_COLOR_FORMAT;
+        use vulkano::command_buffer::ClearColorImageInfo;
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // The scene view: an unlit red slab over the left half of a dark
+        // blue background, rendered offscreen as the editor's live view is.
+        let red = MaterialAsset {
+            model: MaterialModel::Unlit,
+            base_color: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
+        };
+        let view = [32, 24];
+        let mut scene = SlabScene::with_extent(&[(0.0, red)], view);
+        scene.render_world.background_color = [0.05, 0.1, 0.3, 1.0];
+        scene.render_world.renderables[0].transform =
+            crate::runtime::GlobalTransform {
+                matrix: (Matrix4::new_translation(&nalgebra::Vector3::new(
+                    -2.0, 0.0, 0.0,
+                )) * Matrix4::new_nonuniform_scaling(
+                    &nalgebra::Vector3::new(4.0, 4.0, 0.1),
+                ))
+                .into(),
+            };
+        let memory_allocator = scene.memory_allocator.clone();
+        let image = |extent: [u32; 2], usage: ImageUsage| {
+            Image::new(
+                memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: OFFSCREEN_COLOR_FORMAT,
+                    extent: [extent[0], extent[1], 1],
+                    usage,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap()
+        };
+        // Sampled by egui, as `scene_view_target` in the editor binary.
+        scene.image = image(
+            view,
+            ImageUsage::COLOR_ATTACHMENT
+                | ImageUsage::SAMPLED
+                | ImageUsage::TRANSFER_SRC,
+        );
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        let direct = scene.pixels();
+
+        // The window: a dark workspace, a header with a label, the scene
+        // view at (16, 12) with a translucent overlay and an outline drawn
+        // over it, as the editor's toolbars and gizmos are.
+        let window = [64u32, 48];
+        let origin = [16u32, 12];
+        let at = |x: u32, y: u32| egui::pos2(x as f32, y as f32);
+        let view_rect = egui::Rect::from_min_size(
+            at(origin[0], origin[1]),
+            egui::vec2(view[0] as f32, view[1] as f32),
+        );
+        let overlay = egui::Rect::from_min_max(at(18, 14), at(26, 20));
+        let context = egui::Context::default();
+        let output = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_max(
+                    at(0, 0),
+                    at(window[0], window[1]),
+                )),
+                ..Default::default()
+            },
+            |context| {
+                let painter =
+                    context.layer_painter(egui::LayerId::background());
+                painter.rect_filled(
+                    egui::Rect::from_min_max(at(0, 0), at(64, 48)),
+                    0.0,
+                    egui::Color32::from_gray(32),
+                );
+                painter.rect_filled(
+                    egui::Rect::from_min_max(at(0, 0), at(64, 10)),
+                    0.0,
+                    egui::Color32::from_gray(48),
+                );
+                painter.text(
+                    at(2, 1),
+                    egui::Align2::LEFT_TOP,
+                    "Scene",
+                    egui::FontId::proportional(8.0),
+                    egui::Color32::from_gray(220),
+                );
+                painter.image(
+                    crate::editor::SCENE_VIEW_TEXTURE,
+                    view_rect,
+                    egui::Rect::from_min_max(
+                        egui::pos2(0.0, 0.0),
+                        egui::pos2(1.0, 1.0),
+                    ),
+                    egui::Color32::WHITE,
+                );
+                painter.rect_filled(
+                    overlay,
+                    0.0,
+                    egui::Color32::from_white_alpha(128),
+                );
+                painter.rect_stroke(
+                    view_rect.expand(0.5),
+                    0.0,
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgb(255, 180, 0),
+                    ),
+                    egui::StrokeKind::Middle,
+                );
+            },
+        );
+        let primitives =
+            context.tessellate(output.shapes, output.pixels_per_point);
+
+        let base = scene.base;
+        let target = image(
+            window,
+            ImageUsage::COLOR_ATTACHMENT
+                | ImageUsage::TRANSFER_SRC
+                | ImageUsage::TRANSFER_DST,
+        );
+        let command_allocator = Arc::new(StandardCommandBufferAllocator::new(
+            base.device.clone(),
+            Default::default(),
+        ));
+        let mut commands = AutoCommandBufferBuilder::primary(
+            command_allocator.clone(),
+            base.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+        commands
+            .clear_color_image(ClearColorImageInfo::image(target.clone()))
+            .unwrap();
+        let mut painter = EguiPainter::new(
+            base.queue.clone(),
+            scene.memory_allocator.clone(),
+            OFFSCREEN_COLOR_FORMAT,
+        )
+        .unwrap();
+        painter
+            .set_native_texture(
+                crate::editor::SCENE_VIEW_TEXTURE,
+                ImageView::new_default(scene.image.clone()).unwrap(),
+            )
+            .unwrap();
+        let before = scene
+            .now()
+            .then_execute(base.queue.clone(), commands.build().unwrap())
+            .unwrap()
+            .boxed();
+        painter
+            .paint(
+                before,
+                ImageView::new_default(target.clone()).unwrap(),
+                output.pixels_per_point,
+                &primitives,
+                &output.textures_delta,
+            )
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        let mut composed = crate::rendering::readback::read_back_image(
+            &base.device,
+            &base.queue,
+            &scene.memory_allocator,
+            &command_allocator,
+            &target,
+        );
+
+        // Outside the overlay and outline, the view shows the scene's own
+        // pixels, unscaled and with unchanged color.
+        for y in 1..view[1] - 1 {
+            for x in 1..view[0] - 1 {
+                let window_pixel =
+                    (((origin[1] + y) * window[0] + origin[0] + x) * 4)
+                        as usize;
+                let view_pixel = ((y * view[0] + x) * 4) as usize;
+                if overlay.contains(at(origin[0] + x, origin[1] + y)) {
+                    continue;
+                }
+                assert_eq!(
+                    composed[window_pixel..window_pixel + 4],
+                    direct[view_pixel..view_pixel + 4],
+                    "view pixel {x}, {y}"
+                );
+            }
+        }
+        for pixel in composed.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let composed =
+            image::RgbaImage::from_raw(window[0], window[1], composed).unwrap();
+        let name = "editor_compositing";
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("src/rendering/golden/{name}.png"));
+        if std::env::var_os(crate::scenario::UPDATE_GOLDEN_ENV).is_some() {
+            composed.save(&golden).unwrap();
+        }
+        crate::rendering::test_support::assert_matches_golden_image(
+            &composed,
+            &golden,
+            &std::env::temp_dir().join(format!("rusting-golden-{name}")),
+            8,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn resize_minimize_and_restore_redraw_the_scene_at_each_size() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");

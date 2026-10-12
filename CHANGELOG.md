@@ -4,6 +4,7 @@
 
 ### Added
 
+- Tests: editor compositing golden image: the offscreen scene view drawn through egui under panels and overlays
 - Tests: `assert_shader_layout!` checks render upload types field by field against the shader-reflected blocks
 - Tests: a `shaders` CI job compiles every shader file with `glslc` through `scripts/check_shaders.sh`
 - Tests: resize, minimize to a zero-sized surface, and restore redraw the scene correctly at each size
