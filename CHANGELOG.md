@@ -15,6 +15,7 @@
 - Tests: automatic culling bounds contain every vertex of the primitives and imported sample meshes
 - Tests: a culled CPU rigid body keeps falling off view and is drawn once it enters the view
 - Decals: `survive_fracture` moves a decal onto the nearest debris piece when its parent breaks, or removes it with the object
+- Particles: `on_fracture` bursts `impact_count` particles at the break point when an emitter's parent object fractures
 
 ## [2.4.1] - 2026-10-10
 

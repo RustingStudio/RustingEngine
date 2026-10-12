@@ -45,8 +45,9 @@ use super::hierarchy;
 use crate::assets::{AssetServer, MeshAsset, MeshVertex};
 use crate::runtime::{
     sim_math, Children, Collider, ColliderShape, CollisionLayers, Decal,
-    EventQueue, FrameTime, MeshRenderer, Name, PhysicsBody, PhysicsWorld,
-    RandomSeed, RigidBody, RigidBodyKind, SceneId, Sleeping, SpawnOrder,
+    EventQueue, FrameTime, MeshRenderer, Name, ParticleEmitter, PhysicsBody,
+    PhysicsWorld, RandomSeed, RigidBody, RigidBodyKind, SceneId, Sleeping,
+    SpawnOrder,
 };
 use crate::Transform;
 
@@ -345,12 +346,16 @@ fn shatter(
         }
     }
     let name = world.get::<Name>(entity).map(|name| name.0.clone());
-    let decals: Vec<Entity> = world
+    // Decals and particle emitters on the object ride its pieces.
+    let riders: Vec<Entity> = world
         .get::<Children>(entity)
         .map(|children| children.0.clone())
         .unwrap_or_default()
         .into_iter()
-        .filter(|child| world.get::<Decal>(*child).is_some())
+        .filter(|&child| {
+            world.get::<Decal>(child).is_some()
+                || world.get::<ParticleEmitter>(child).is_some()
+        })
         .collect();
     let centers: Vec<V> = pieces.iter().map(|(_, center, _)| *center).collect();
     world.despawn(entity);
@@ -401,17 +406,19 @@ fn shatter(
         }
         spawned.push(piece.id());
     }
-    // Pieces keep the object's rotation and scale, so a decal keeps its
+    // Pieces keep the object's rotation and scale, so a rider keeps its
     // place by moving its local position by the piece's center.
-    // ponytail: the nearest piece center, not the piece under the decal;
+    // ponytail: the nearest piece center, not the piece under a decal;
     // pick by projected area if decals land on the wrong piece.
-    for decal in decals {
-        let keep = world
-            .get::<Decal>(decal)
-            .is_some_and(|d| d.survive_fracture);
-        let local = world.get::<Transform>(decal).copied();
-        let (true, Some(local)) = (keep, local) else {
-            world.despawn(decal);
+    for rider in riders {
+        if world
+            .get::<Decal>(rider)
+            .is_some_and(|decal| !decal.survive_fracture)
+        {
+            world.despawn(rider);
+            continue;
+        }
+        let Some(local) = world.get::<Transform>(rider).copied() else {
             continue;
         };
         let at = V::from(local.position);
@@ -422,8 +429,8 @@ fn shatter(
         }) else {
             continue;
         };
-        if hierarchy::set_parent(world, decal, spawned[k]).is_ok() {
-            world.get_mut::<Transform>(decal).unwrap().position =
+        if hierarchy::set_parent(world, rider, spawned[k]).is_ok() {
+            world.get_mut::<Transform>(rider).unwrap().position =
                 (at - center).into();
         }
     }
@@ -1097,6 +1104,71 @@ mod tests {
         world.query::<&Debris>().iter(world).count()
     }
 
+    #[test]
+    fn emitters_on_a_breaking_object_burst_at_the_break() {
+        use crate::runtime::{Parent, ParticleEmitter, ParticleSystem};
+        let run_break = |on_fracture: bool| {
+            let mut app = ground();
+            let hard = add_crate(&mut app, 2.0, 3.0, Fracture::default());
+            // Above the crate's top, so the burst leaves upward.
+            let emitter = app.spawn((
+                crate::runtime::SceneId(uuid::Uuid::from_u128(9)),
+                Transform::new([0.0, 0.6, 0.0]),
+                ParticleEmitter {
+                    autoplay: false,
+                    rate: 0.0,
+                    on_fracture,
+                    impact_count: 8,
+                    spread: 0.0,
+                    speed: [2.0, 2.0],
+                    lifetime: [100.0, 100.0],
+                    gravity: 0.0,
+                    drag: 0.0,
+                    ..ParticleEmitter::default()
+                },
+            ));
+            app.set_parent(emitter, hard).unwrap();
+            let mut breaks = Vec::new();
+            let mut alive_before = 0;
+            for _ in 0..60 {
+                if app.world().get_entity(hard).is_err() {
+                    break;
+                }
+                alive_before = app
+                    .world()
+                    .get::<ParticleSystem>(emitter)
+                    .map_or(0, ParticleSystem::alive);
+                run(&mut app, 1);
+            }
+            for _ in 0..3 {
+                run(&mut app, 1);
+                let events = app.world().resource::<EventQueue<Fractured>>();
+                breaks.extend(events.iter().cloned());
+            }
+            assert_eq!(alive_before, 0, "nothing before the break");
+            assert_eq!(breaks.len(), 1);
+            let world = app.world();
+            assert!(world
+                .get::<Debris>(world.get::<Parent>(emitter).unwrap().0)
+                .is_some());
+            let system = world.get::<ParticleSystem>(emitter).unwrap();
+            (breaks[0].point, system.particles.clone())
+        };
+        let (point, particles) = run_break(true);
+        assert_eq!(particles.len(), 8);
+        for particle in &particles {
+            // Launched at 2 m/s from under the crate up toward the emitter.
+            let [x, y, z] = particle.velocity;
+            assert!(y > 1.5, "{particle:?}");
+            assert!((x * x + y * y + z * z - 4.0).abs() < 1e-3, "{particle:?}");
+            assert!(
+                (particle.position[0] - point[0]).abs() < 0.5,
+                "{particle:?}"
+            );
+        }
+        assert_eq!(run_break(true).1, particles, "the same bits again");
+        assert!(run_break(false).1.is_empty(), "off: no burst");
+    }
     #[test]
     fn decals_move_onto_the_nearest_piece_or_leave_with_the_object() {
         use crate::runtime::{Decal, Parent, RenderExtractPlugin, RenderWorld};

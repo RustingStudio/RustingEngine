@@ -145,6 +145,8 @@ pub(super) fn draw_particle_emitter(
         );
         widgets::describe_next_row(ui, "puff when the body falls asleep");
         changed |= widgets::checkbox(ui, "On Settle", &mut emitter.on_settle);
+        changed |=
+            widgets::checkbox(ui, "On Fracture", &mut emitter.on_fracture);
         changed |= bursts(ui, &mut emitter.bursts);
     });
     widgets::section(ui, "Shape", false, |ui| {

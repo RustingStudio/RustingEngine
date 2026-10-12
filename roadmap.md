@@ -2913,8 +2913,8 @@ Depends on: Milestones 3 and 4.
   Full check: fmt, clippy (default, `--no-default-features`,
   `gpu-tests`), `cargo test --workspace` (878 lib) and the gpu-tests run
   (1008 lib) pass.
-- [ ] Particle emission driven by physics events: impacts, fracture, debris settling.
-  Partial (lane/render): `ParticleEmitter` gains `impact_speed`,
+- [x] Particle emission driven by physics events: impacts, fracture, debris settling.
+  Evidence (lane/render): `ParticleEmitter` gains `impact_speed`,
   `impact_count` and `on_settle` (`emit_on_impacts` in
   `src/runtime/particles.rs`, after `update_particles`). Each contact of
   the emitter's CPU body closing at `impact_speed` m/s or faster spawns
@@ -2930,8 +2930,18 @@ Depends on: Milestones 3 and 4.
   threshold removed and with the launch direction flipped. Full check:
   fmt, clippy x3, `cargo test --workspace` (lib 886) and the gpu-tests run
   (lib 1018) pass.
-  Not done: fracture events (the engine has no fracture yet); GPU emitters
-  spawn impact particles at the emitter, not the contact point.
+  Fracture: `on_fracture` (`emit_on_fractures`, Update stage, where each
+  `Fractured` is visible once) spawns `impact_count` particles at the break
+  point for an emitter child that the break moved onto a piece, launched
+  from the break toward the emitter. Evidence:
+  `emitters_on_a_breaking_object_burst_at_the_break` (8 particles at the
+  break moving up at 2 m/s toward the emitter, the same particles on a
+  rerun, none with `on_fracture` off). It failed with the direction
+  flipped, with the flag ignored and with the system unregistered. Full
+  check: fmt, clippy x3, `cargo test --workspace` (lib 967) and the
+  gpu-tests run (lib 1129) pass.
+  Limit: GPU emitters spawn impact and fracture particles at the emitter,
+  not the contact point.
 - [x] Decals, including decals that survive or are invalidated by fracture.
   Evidence (lane/render): `rusting.decal` projects an image (or plain color)
   along its object's -Z into a box of half size `extents`, painting base

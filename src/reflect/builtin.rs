@@ -458,6 +458,7 @@ crate::reflect! {
         },
         impact_count: u32 { doc: "particles per impact or settle" },
         on_settle: bool { doc: "spawn impact_count particles when the body falls asleep" },
+        on_fracture: bool { doc: "spawn impact_count particles at the break when the parent object breaks" },
         shape: EmitterShape,
         shape_size: [f32; 3] {
             unit: "m", min: 0.0,

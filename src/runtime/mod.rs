@@ -351,6 +351,7 @@ impl Default for App {
         app.add_system(ScheduleStage::Update, player::player_look);
         app.add_system(ScheduleStage::Update, game_feel::trigger_on_gpu_events);
         app.add_system(ScheduleStage::Update, actions::bind_input_actions);
+        app.add_system(ScheduleStage::Update, particles::emit_on_fractures);
         app.add_event::<SoundEvent>();
         app.insert_resource(AudioQueue::default());
         app.add_event::<HudButtonPressed>();

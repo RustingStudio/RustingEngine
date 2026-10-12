@@ -207,6 +207,10 @@ pub struct ParticleEmitter {
     /// Spawn `impact_count` particles at the body when it falls asleep
     /// (debris settling).
     pub on_settle: bool,
+    /// Spawn `impact_count` particles at the break point when the object
+    /// this emitter is a child of breaks ([`super::Fracture`]); the emitter
+    /// moves onto the nearest piece, launching them away from the break.
+    pub on_fracture: bool,
     pub shape: EmitterShape,
     pub shape_size: [f32; 3],
     /// Seconds each particle lives.
@@ -284,6 +288,7 @@ impl Default for ParticleEmitter {
             impact_speed: 0.0,
             impact_count: 10,
             on_settle: false,
+            on_fracture: false,
             shape: EmitterShape::Point,
             shape_size: [0.5; 3],
             lifetime: [1.0, 2.0],
@@ -972,41 +977,89 @@ pub(super) fn emit_on_impacts(
         if emitter.on_settle && sleeping && !asleep.contains(&entity) {
             impacts.push((frame.point([0.0; 3]), [0.0, 1.0, 0.0]));
         }
-        let count = u64::from(emitter.impact_count);
-        if emitter.simulation == ParticleSimulation::Gpu {
-            system.spawned += count * impacts.len() as u64;
-            continue;
-        }
-        let stream =
-            RandomSeed::stream("particle_impacts", stream_key(entity, id));
-        for (point, away) in impacts {
-            let at = if emitter.space == ParticleSpace::World {
-                impact_frame(point, away)
-            } else {
-                Frame {
-                    matrix: GlobalTransform::default().matrix,
-                }
-            };
-            let axis = if emitter.space == ParticleSpace::World {
-                [0.0, 1.0, 0.0]
-            } else {
-                launch_axis(emitter)
-            };
-            let room = u64::from(emitter.max_particles)
-                .saturating_sub(system.alive() as u64);
-            for _ in 0..count.min(room) {
-                let draw = Draw {
-                    seed: &seed,
-                    tick: time.fixed_tick,
-                    stream,
-                    spawn: system.spawned,
-                };
-                system.spawned += 1;
-                system.particles.push(spawn(emitter, at, &draw, axis));
-            }
-        }
+        let stream = stream_key(entity, id);
+        spawn_impacts(emitter, &mut system, &impacts, &seed, &time, stream);
     }
     *asleep = now_asleep;
+}
+
+/// Spawns `impact_count` particles at each `(point, away)` impact.
+fn spawn_impacts(
+    emitter: &ParticleEmitter,
+    system: &mut ParticleSystem,
+    impacts: &[([f32; 3], [f32; 3])],
+    seed: &RandomSeed,
+    time: &FrameTime,
+    key: u64,
+) {
+    let count = u64::from(emitter.impact_count);
+    if emitter.simulation == ParticleSimulation::Gpu {
+        system.spawned += count * impacts.len() as u64;
+        return;
+    }
+    let stream = RandomSeed::stream("particle_impacts", key);
+    for &(point, away) in impacts {
+        let at = if emitter.space == ParticleSpace::World {
+            impact_frame(point, away)
+        } else {
+            Frame {
+                matrix: GlobalTransform::default().matrix,
+            }
+        };
+        let axis = if emitter.space == ParticleSpace::World {
+            [0.0, 1.0, 0.0]
+        } else {
+            launch_axis(emitter)
+        };
+        let room = u64::from(emitter.max_particles)
+            .saturating_sub(system.alive() as u64);
+        for _ in 0..count.min(room) {
+            let draw = Draw {
+                seed,
+                tick: time.fixed_tick,
+                stream,
+                spawn: system.spawned,
+            };
+            system.spawned += 1;
+            system.particles.push(spawn(emitter, at, &draw, axis));
+        }
+    }
+}
+
+/// Spawns `impact_count` particles at the break point for each emitter
+/// with `on_fracture` that a break just moved onto one of its pieces,
+/// launched from the break toward the emitter. Runs in `Update`, where
+/// each [`super::Fractured`] is visible for exactly one frame.
+// ponytail: the burst starts a frame after the break; move it into the
+// fixed chain if the delay shows.
+pub(super) fn emit_on_fractures(
+    breaks: Res<super::EventQueue<super::Fractured>>,
+    seed: Res<RandomSeed>,
+    time: Res<FrameTime>,
+    mut emitters: Query<(ImpactParts, &super::Parent)>,
+) {
+    for event in breaks.iter() {
+        for ((entity, emitter, mut system, global, transform, id, _), parent) in
+            &mut emitters
+        {
+            if !emitter.on_fracture
+                || system.paused
+                || !event.pieces.contains(&parent.0)
+            {
+                continue;
+            }
+            let center = emitter_frame(global, transform).point([0.0; 3]);
+            let mut away = sim_math::normalize(std::array::from_fn(|i| {
+                center[i] - event.point[i]
+            }));
+            if away == [0.0; 3] {
+                away = [0.0, 1.0, 0.0];
+            }
+            let stream = stream_key(entity, id);
+            let impacts = [(event.point, away)];
+            spawn_impacts(emitter, &mut system, &impacts, &seed, &time, stream);
+        }
+    }
 }
 
 /// A unit frame at `point` whose y axis is the unit vector `up`.

@@ -157,6 +157,12 @@ stopped, so `autoplay: false` with `rate: 0` makes an impact-only effect.
 Only CPU bodies have contacts here. A GPU emitter spawns impact particles
 at the emitter, and Local space particles start at the emitter.
 
+For a burst when a breakable object shatters, make the emitter a child of
+the `rusting.fracture` object and set `on_fracture: true`. When the object
+breaks, the emitter moves onto the piece nearest it and spawns
+`impact_count` particles at the break point, launched from there toward
+the emitter. The burst starts one frame after the break.
+
 ## Budgets
 
 The quality profile caps the particles drawn per frame, CPU particles and
