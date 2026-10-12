@@ -1424,6 +1424,9 @@ crate::reflect! {
             doc: "tangent-space normal map (green up) that 2D lights shade; empty is flat",
         },
         #[skip] normal_handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+        in_scene: bool {
+            doc: "draw inside the 3D scene, hidden by nearer meshes, instead of over it",
+        },
     }
 }
 

@@ -3534,7 +3534,16 @@ Depends on: Milestones 3, 4, and 10 (2D physics).
   - [x] 2c. Emit particles from physics events on 2D bodies. 2D bodies are ordinary bodies in the XY plane, so the existing impact, settle and fracture emission applies unchanged. Evidence: `a_2d_body_landing_emits_particles_drawn_in_the_2d_pass` (`runtime/tests.rs`: a body with a 2D emitter lands, its impact particles spawn at the floor contact and extract for the 2D pass on layer 3); mutations disabling impact spawns or the `particles_2d` extraction fail it. GPU emitters still spawn impact particles at the emitter, as in 3D. Full check: clippy OK, 989 CPU and 1166 GPU tests passed.
 - [x] 2D camera with smoothing, limits, and pixel-perfect mode. `rusting.camera_2d` (`Camera2d` in `runtime/two_d.rs`, after transform propagation in PostUpdate) follows the object named `target` plus `offset` with exponential `smoothing` (0 snaps), keeps an orthographic view inside `limits` using the viewport aspect (a narrower room centers it), and with `pixels_per_unit` zooms the view height to whole screen pixels per art pixel and snaps the drawn center to screen pixels while keeping the unsnapped center, so slow moves add up. It writes `Transform` and `GlobalTransform`, so picking sees the drawn view. Evidence: `cameras_2d_follow_smoothly_stay_in_limits_and_fit_pixels` (one smoothing time closes 1 - 1/e, limits clamp to [1, 2] and center a 4 m room, 600 px at 16 px/unit gives a 6.25 m view and 1/96 m steps, sub-half-pixel steps still accumulate); 8 mutations (smoothing, stored center, zoom rounding, narrow-room centering, clamp margins, snapping, GlobalTransform write, aspect) all fail it. Full check: clippy OK, 990 CPU and 1167 GPU tests passed. The 2D template still parents its camera to the player (tools lane).
 - [ ] 2D hybrid GPU physics showcases (thousands of physics sprites with events to Rust gameplay).
-- [ ] Mixing 2D layers over or inside 3D scenes.
+- [x] Mixing 2D layers over or inside 3D scenes.
+  Canvas sprites already draw after tone mapping over the 3D frame; new
+  `Sprite::in_scene` draws a sprite inside the HDR pass instead (MSAA, depth
+  test without depth write, tone mapped), under every canvas sprite.
+  Evidence: `in_scene_sprites_extract_before_every_canvas_sprite` (sort) and
+  GPU `in_scene_sprites_hide_behind_meshes_and_canvas_sprites_do_not` (a
+  slab hides the in-scene sprite behind it, not one in front; the canvas
+  sprite covers it; both kinds in one frame draw apart); 5/5 mutations killed
+  (sort key, depth test, canvas start offset, scene batch range, canvas pass
+  gate). Full check: clippy OK, 991 CPU and 1169 GPU tests pass.
 
 ### Exit gate
 

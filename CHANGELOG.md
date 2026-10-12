@@ -4,6 +4,7 @@
 
 ### Added
 
+- Rendering: `Sprite::in_scene` draws a sprite inside the 3D scene, hidden by nearer meshes, instead of over it
 - Rendering: `rusting.camera_2d` follows a target with smoothing, limits, and a pixel-perfect mode
 - Rendering: impact and settle particles of 2D bodies draw in the 2D pass
 - Rendering: `rusting.particles_2d` draws particle emitters with the sprites in 2D canvas order

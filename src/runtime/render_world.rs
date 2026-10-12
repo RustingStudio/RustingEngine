@@ -293,6 +293,8 @@ pub struct ExtractedSprite {
     /// Tangent-space normal map; `None` lights the sprite flat.
     pub normal_map: Option<Handle<crate::assets::TextureAsset>>,
     pub layer: i32,
+    /// Drawn inside the 3D scene; these sort before every canvas sprite.
+    pub in_scene: bool,
 }
 
 /// One [`Light2d`](super::Light2d) ready to light sprites.
@@ -506,13 +508,15 @@ pub fn extract_render_world(world: &mut World) {
                     texture: sprite.handle,
                     normal_map: sprite.normal_handle,
                     layer: sprite.layer,
+                    in_scene: sprite.in_scene,
                 };
                 (entity.index(), extracted)
             })
             .collect::<Vec<_>>();
         sprites.sort_by(|(a_entity, a), (b_entity, b)| {
-            a.layer
-                .cmp(&b.layer)
+            b.in_scene
+                .cmp(&a.in_scene)
+                .then(a.layer.cmp(&b.layer))
                 .then(a.matrix[3][2].total_cmp(&b.matrix[3][2]))
                 .then(a_entity.cmp(b_entity))
         });
@@ -1998,6 +2002,35 @@ mod tests {
             * nalgebra::Vector4::new(0.5, 0.5, 0.0, 1.0);
         assert_eq!(corner, nalgebra::Vector4::new(4.0, 2.0, 0.0, 1.0));
         assert_eq!(sprites[0].uv, [0.5, 0.0, 0.25, 1.0], "flip_x swaps u");
+    }
+
+    #[test]
+    fn in_scene_sprites_extract_before_every_canvas_sprite() {
+        use crate::runtime::Sprite;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let sprite = |layer, in_scene, z: f32| {
+            (
+                Transform::new([0.0, 0.0, z]),
+                Sprite {
+                    layer,
+                    in_scene,
+                    ..Sprite::default()
+                },
+            )
+        };
+        app.spawn(sprite(-3, false, 0.0));
+        app.spawn(sprite(5, true, 0.0));
+        app.spawn(sprite(0, true, -1.0));
+        app.update(Duration::ZERO).unwrap();
+        let order: Vec<_> = app
+            .world()
+            .resource::<RenderWorld>()
+            .sprites
+            .iter()
+            .map(|sprite| (sprite.in_scene, sprite.layer))
+            .collect();
+        assert_eq!(order, [(true, 0), (true, 5), (false, -3)]);
     }
 
     #[test]

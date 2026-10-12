@@ -81,6 +81,9 @@ pub struct Sprite {
     /// The loaded `normal_map`, set by the engine.
     #[serde(skip)]
     pub normal_handle: Option<Handle<crate::assets::TextureAsset>>,
+    /// Draws inside the 3D scene instead of over it: before tone mapping,
+    /// hidden behind nearer opaque geometry, under every canvas sprite.
+    pub in_scene: bool,
 }
 
 impl Default for Sprite {
@@ -96,6 +99,7 @@ impl Default for Sprite {
             handle: None,
             normal_map: PathBuf::new(),
             normal_handle: None,
+            in_scene: false,
         }
     }
 }
