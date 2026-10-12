@@ -3253,7 +3253,10 @@ Depends on: Milestones 3 and 4.
     reads DepthPyramid before any pass writes it").
   - [ ] Recording: `SceneRenderer` records from the compiled graph, places
     its barriers itself, and aliases transient images whose spans do not
-    overlap.
+    overlap. Blocked 2026-10-12: vulkano 0.35's auto command buffers place
+    every barrier themselves and cannot alias memory safely; needs
+    `vulkano-taskgraph` or raw command buffers (owner decision, see
+    `issues.md`).
 - [ ] Frame pacing that holds a stable presentation cadence under variable GPU load.
 - [ ] Measure and report end-to-end input latency.
 
