@@ -39,6 +39,7 @@ pub mod gpu_broad_phase;
 pub mod gpu_cloth;
 mod gpu_particles;
 mod gpu_skinning;
+pub mod input_latency;
 mod lightmap;
 mod post_effects;
 pub mod readback;

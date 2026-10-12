@@ -445,7 +445,11 @@ in the window's top-right corner. F3 turns the same report on and off
 while the game runs; the game also sees the F3 press. The CPU part splits into `fixed` (physics and
 fixed systems), `update` (the game's systems), `post_update` (transform
 propagation and other engine work) and `extract`; a scenario run reports
-the same split per tick as `perf.stages_ms_mean`. `rusting test` captures render offscreen and
+the same split per tick as `perf.stages_ms_mean`. In a second with key or
+mouse presses, the line ends with `input latency p50 ... max ... ms`: the
+time from a press to the present of the first frame that read it, plus
+that frame's GPU time. The display's scan-out and the monitor's own delay
+come on top and need a camera or photodiode to measure. `rusting test` captures render offscreen and
 read every frame back, so their frame times run higher than the window's;
 use them as a regression guard, not as the frame budget.
 To measure at a set size, put `"window": [1920, 1080]` in `project.json`:

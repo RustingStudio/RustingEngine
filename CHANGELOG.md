@@ -4,6 +4,7 @@
 
 ### Added
 
+- Rendering: the `[rusting] perf` line reports press-to-present input latency
 - Rendering: the FPS limiter keeps its cadence through late wakes and uneven frames instead of drifting slower
 - Rendering: `FrameGraph` schedules a frame's enabled passes, their barriers, and transient resource lifetimes
 - Tests: editor compositing golden image: the offscreen scene view drawn through egui under panels and overlays

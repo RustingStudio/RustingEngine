@@ -3274,6 +3274,20 @@ Depends on: Milestones 3 and 4.
   - [ ] Cadence on real displays under variable GPU load (FIFO and Mailbox
     present timing, frames in flight). Hardware only, not verifiable here.
 - [ ] Measure and report end-to-end input latency.
+  - [x] Engine side: `rendering::input_latency::InputLatency` times each
+    key or mouse press from its event to the present of the first frame
+    that read it, plus that frame's GPU time. While `RUSTING_PERF` or F3 is
+    on, the `[rusting] perf` line reports `input latency p50 ... max ...
+    ms (n presses)`; `docs/look-and-feel.md` explains what it leaves out.
+    Evidence: unit test
+    `a_sample_spans_the_oldest_press_to_its_presented_frame` (two presses
+    before one frame give one 12 ms sample from the oldest press, frames
+    without presses give none, then a 6 ms sample). Mutations caught:
+    keeping the newest press ([9, 6]) and dropping the GPU time ([9, 5]).
+    The runner wiring has no automated test: there is no way to inject
+    window input headlessly here.
+  - [ ] Input-to-photon on real displays (scan-out and monitor delay, with
+    a camera or photodiode). Hardware only, not verifiable here.
 
 ### Exit gate
 

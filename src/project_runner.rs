@@ -4954,6 +4954,8 @@ struct ProjectApplication {
     /// Each frame's length in milliseconds since the last line, and when
     /// the last frame ended.
     perf_frames: (Vec<f64>, Option<Instant>),
+    /// Press-to-present latency samples while the perf line is on.
+    input_latency: crate::rendering::input_latency::InputLatency,
     /// Plays the audio queue; `None` without the `audio` feature or a device.
     audio: Option<crate::audio_output::AudioOutput>,
     /// Set by [`crate::project::QUIT_AFTER_MS_ENV`]: close at this time.
@@ -4999,6 +5001,7 @@ impl ProjectApplication {
             perf: std::env::var_os(PERF_ENV).map(|_| (Instant::now(), 0)),
             perf_spent: [std::time::Duration::ZERO; 2],
             perf_frames: (Vec::new(), None),
+            input_latency: Default::default(),
             audio: crate::audio_output::AudioOutput::open(),
             quit_at: std::env::var(crate::project::QUIT_AFTER_MS_ENV)
                 .ok()
@@ -5105,6 +5108,7 @@ impl ProjectApplication {
             self.perf = Some((Instant::now(), 0));
             self.perf_frames = Default::default();
             self.perf_spent = Default::default();
+            self.input_latency = Default::default();
             world.insert_resource(crate::runtime::PerfOverlay("-- fps".into()));
         }
     }
@@ -5170,6 +5174,14 @@ impl ProjectApplication {
             " | draws {} dispatches {} triangles {}",
             counters.draws, counters.dispatches, counters.triangles
         );
+        let mut presses = self.input_latency.take_samples();
+        if !presses.is_empty() {
+            let [p50, _, _, max] = frame_percentiles(&mut presses);
+            line += &format!(
+                " | input latency p50 {p50:.2} max {max:.2} ms ({} presses)",
+                presses.len()
+            );
+        }
         eprintln!("{line}");
     }
 }
@@ -5231,6 +5243,12 @@ impl ApplicationHandler for ProjectApplication {
                     {
                         self.toggle_perf_overlay();
                     }
+                    if self.perf.is_some()
+                        && event.state.is_pressed()
+                        && !event.repeat
+                    {
+                        self.input_latency.record_input(Instant::now());
+                    }
                     let tick = self.event_tick();
                     let mut input =
                         self.runtime.world_mut().resource_mut::<RuntimeInput>();
@@ -5244,6 +5262,9 @@ impl ApplicationHandler for ProjectApplication {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if self.perf.is_some() && state.is_pressed() {
+                    self.input_latency.record_input(Instant::now());
+                }
                 let tick = self.event_tick();
                 let mut input =
                     self.runtime.world_mut().resource_mut::<RuntimeInput>();
@@ -5368,6 +5389,16 @@ impl ApplicationHandler for ProjectApplication {
                 match rendered {
                     Ok(()) => {
                         announce_first_frame();
+                        if self.perf.is_some() {
+                            if let Some(renderer) =
+                                self.window.scene_renderer.as_mut()
+                            {
+                                self.input_latency.frame_presented(
+                                    Instant::now(),
+                                    renderer.gpu_pass_times().total(),
+                                );
+                            }
+                        }
                         self.report_perf();
                     }
                     Err(error) => {
