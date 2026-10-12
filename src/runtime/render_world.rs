@@ -199,6 +199,9 @@ pub struct RenderWorld {
     pub particles: Vec<super::ParticleBatch>,
     /// Visible GPU-simulated emitters, in entity order.
     pub gpu_particles: Vec<super::GpuParticleBatch>,
+    /// Emitters drawn in the 2D pass, with their canvas layer and world z,
+    /// in canvas order.
+    pub particles_2d: Vec<(Entity, i32, f32)>,
     /// Meshes the renderer deforms on the GPU this frame, with
     /// [`super::GpuSkinning`]; empty otherwise.
     pub skin_jobs: Vec<super::SkinJob>,
@@ -616,6 +619,24 @@ pub fn extract_render_world(world: &mut World) {
     let ambient_occlusion = collect_first::<super::AmbientOcclusion>(world);
     let particles = collect_particles(world);
     let gpu_particles = collect_gpu_particles(world);
+    let particles_2d = {
+        let mut query = world.query_filtered::<
+            (Entity, &GlobalTransform, &super::Particles2d),
+            With<super::ParticleEmitter>,
+        >();
+        let mut emitters = query
+            .iter(world)
+            .map(|(entity, transform, particles)| {
+                (entity, particles.layer, transform.matrix[3][2])
+            })
+            .collect::<Vec<_>>();
+        emitters.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then(a.2.total_cmp(&b.2))
+                .then(a.0.index().cmp(&b.0.index()))
+        });
+        emitters
+    };
     let particle_shaders = world
         .query_filtered::<(Entity, &super::ParticleShader), With<super::ParticleEmitter>>()
         .iter(world)
@@ -830,6 +851,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.ambient_occlusion = ambient_occlusion;
     render_world.particles = particles;
     render_world.gpu_particles = gpu_particles;
+    render_world.particles_2d = particles_2d;
     render_world.particle_shaders = particle_shaders;
     render_world.environment = environment;
     render_world.reflection_probes = reflection_probes;
@@ -2055,6 +2077,36 @@ mod tests {
                 [0.0, 0.0, 3.0, 0.0],
                 [3.0, 0.0, 0.0, 0.0],
             ]
+        );
+    }
+
+    #[test]
+    fn particles_2d_extract_emitters_in_canvas_order() {
+        use crate::runtime::{ParticleEmitter, Particles2d};
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let high = app.spawn((
+            Transform::new([0.0, 0.0, -5.0]),
+            ParticleEmitter::default(),
+            Particles2d { layer: 1 },
+        ));
+        let near = app.spawn((
+            Transform::new([0.0, 0.0, 2.0]),
+            ParticleEmitter::default(),
+            Particles2d { layer: 0 },
+        ));
+        let far = app.spawn((
+            Transform::new([0.0, 0.0, 1.0]),
+            ParticleEmitter::default(),
+            Particles2d { layer: 0 },
+        ));
+        // No emitter, so nothing to draw.
+        app.spawn((Transform::default(), Particles2d { layer: 0 }));
+        app.update(Duration::ZERO).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        assert_eq!(
+            render_world.particles_2d,
+            [(far, 0, 1.0), (near, 0, 2.0), (high, 1, -5.0)]
         );
     }
 

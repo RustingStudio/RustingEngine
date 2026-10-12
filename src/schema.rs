@@ -934,6 +934,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"points": [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]}),
     },
     ComponentSection {
+        key: "rusting.particles_2d",
+        summary: "Put on an object with rusting.particle_emitter: its particles (CPU or GPU simulated) draw in the 2D pass with rusting.sprite objects instead of in the 3D scene, in canvas order at layer and the emitter's world z, after tone mapping and without a depth test. Custom particle shaders are not used in the 2D pass.",
+        gpu: "one 2D-pass draw per emitter",
+        example: || json!({"layer": 1}),
+    },
+    ComponentSection {
         key: "rusting.ambient_2d",
         summary: "The light every rusting.sprite gets before any rusting.light_2d: color (linear rgb) multiplies each sprite, so a dark value makes a night scene that only lights reveal. Without one, sprites keep their full color and lights brighten them. The first one in entity order is used.",
         gpu: NO_GPU,

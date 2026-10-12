@@ -142,6 +142,18 @@ impl Default for Ambient2d {
     }
 }
 
+/// Draws the [`super::ParticleEmitter`] on the same object in the 2D pass
+/// with the [`Sprite`]s, in canvas order at `layer` and its world z, instead
+/// of in the 3D scene.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct Particles2d {
+    /// Canvas layer; higher layers draw over lower ones whatever their z.
+    pub layer: i32,
+}
+
 /// A polygon that blocks every [`Light2d`]: sprite pixels whose straight
 /// line to a light crosses one of its edges get none of that light. The
 /// renderer uses the first 256 edges in entity order.

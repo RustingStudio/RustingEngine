@@ -5014,6 +5014,15 @@ impl SceneRenderer {
             }
         }
         let mut particles_drawn = 0;
+        // 2D emitters draw later with the sprites, from the same upload.
+        let is_2d = |entity: bevy_ecs::entity::Entity| {
+            render_world
+                .particles_2d
+                .iter()
+                .any(|(emitter, ..)| *emitter == entity)
+        };
+        let mut particle_upload = None;
+        let mut particle_2d_draws = Vec::new();
         if !render_world.particles.is_empty() {
             let (vertices, draws) = particle_draws(
                 &render_world.particles,
@@ -5036,9 +5045,15 @@ impl SceneRenderer {
                 .map_err(|error| SceneRenderError(error.to_string()))?
                 .set_scissor(0, [scene_scissor].into_iter().collect())
                 .map_err(|error| SceneRenderError(error.to_string()))?
-                .bind_vertex_buffers(0, upload)
+                .bind_vertex_buffers(0, upload.clone())
                 .map_err(|error| SceneRenderError(error.to_string()))?;
+            particle_upload = Some(upload);
             for (additive, sprite, first, count, entity) in draws {
+                if entity.is_some_and(is_2d) {
+                    particle_2d_draws
+                        .push((additive, sprite, first, count, entity));
+                    continue;
+                }
                 let pipeline = entity
                     .and_then(|entity| particle_shaders.get(&entity))
                     .unwrap_or(&active.particle_pipelines)
@@ -5086,6 +5101,9 @@ impl SceneRenderer {
             let slots = batch.max_particles as u64;
             let kept = particles_kept(slots as usize, particle_share) as u64;
             particles_drawn += kept as usize;
+            if is_2d(batch.entity) {
+                continue;
+            }
             let billboards = kept * (state.billboards.len() / slots.max(1));
             let additive =
                 batch.blend == crate::runtime::ParticleBlend::Additive;
@@ -5385,7 +5403,9 @@ impl SceneRenderer {
                 .map_err(|error| SceneRenderError(error.to_string()))?;
         }
         passes.end(&mut commands)?;
-        if !render_world.sprites.is_empty() {
+        if !render_world.sprites.is_empty()
+            || !render_world.particles_2d.is_empty()
+        {
             passes.begin(&mut commands, FramePass::Sprites)?;
             let sprites = &render_world.sprites;
             let instances = sprites
@@ -5401,11 +5421,12 @@ impl SceneRenderer {
                 .collect::<Vec<_>>();
             let upload = self.frame_contexts[self.frame_index]
                 .transient
-                .allocate_slice::<SpriteInstance>(instances.len() as u64)
+                .allocate_slice::<SpriteInstance>(instances.len().max(1) as u64)
                 .map_err(|error| SceneRenderError(error.to_string()))?;
             upload
                 .write()
                 .map_err(|error| SceneRenderError(error.to_string()))?
+                [..instances.len()]
                 .copy_from_slice(&instances);
             self.counters.upload_bytes += upload.size();
             let lights_2d = &render_world.lights_2d
@@ -5473,12 +5494,141 @@ impl SceneRenderer {
                 .set_viewport(0, [scene_viewport.clone()].into_iter().collect())
                 .map_err(|error| SceneRenderError(error.to_string()))?
                 .set_scissor(0, [scene_scissor].into_iter().collect())
-                .map_err(|error| SceneRenderError(error.to_string()))?
-                .bind_pipeline_graphics(pipeline.clone())
-                .map_err(|error| SceneRenderError(error.to_string()))?
-                .bind_vertex_buffers(0, upload)
                 .map_err(|error| SceneRenderError(error.to_string()))?;
-            for batch in crate::runtime::sprite_batches(sprites) {
+            // Canvas order: each 2D emitter draws after the sprites below or
+            // level with it, as `Err(emitter index)` between sprite batches.
+            let mut canvas = Vec::new();
+            let mut start = 0;
+            let push_batches = |canvas: &mut Vec<_>, start, end| {
+                canvas.extend(
+                    crate::runtime::sprite_batches(&sprites[start..end])
+                        .into_iter()
+                        .map(
+                            |batch| Ok(batch.start + start..batch.end + start),
+                        ),
+                );
+            };
+            for (index, &(_, layer, z)) in
+                render_world.particles_2d.iter().enumerate()
+            {
+                let end = start
+                    + sprites[start..].partition_point(|sprite| {
+                        (sprite.layer, sprite.matrix[3][2]) <= (layer, z)
+                    });
+                push_batches(&mut canvas, start, end);
+                canvas.push(Err(index));
+                start = end;
+            }
+            push_batches(&mut canvas, start, sprites.len());
+            let mut sprites_bound = false;
+            for item in canvas {
+                let batch = match item {
+                    Ok(batch) => batch,
+                    Err(index) => {
+                        sprites_bound = false;
+                        let entity = render_world.particles_2d[index].0;
+                        // ponytail: custom particle shaders and 2D lights are
+                        // not used here; add them when a 2D game needs them.
+                        let mut runs = particle_2d_draws
+                            .iter()
+                            .filter(|draw| draw.4 == Some(entity))
+                            .filter_map(
+                                |&(additive, sprite, first, count, _)| {
+                                    Some((
+                                        additive,
+                                        sprite,
+                                        particle_upload.clone()?,
+                                        first,
+                                        count,
+                                    ))
+                                },
+                            )
+                            .collect::<Vec<_>>();
+                        if let (Some(batch), Some(state)) = (
+                            render_world
+                                .gpu_particles
+                                .iter()
+                                .find(|batch| batch.entity == entity),
+                            self.gpu_particles.get(&entity),
+                        ) {
+                            let slots = batch.max_particles as usize;
+                            let billboards =
+                                particles_kept(slots, particle_share)
+                                    * (state.billboards.len() as usize
+                                        / slots.max(1));
+                            runs.push((
+                                batch.blend
+                                    == crate::runtime::ParticleBlend::Additive,
+                                batch.sprite as u32,
+                                state.billboards.clone(),
+                                0,
+                                billboards as u32,
+                            ));
+                        }
+                        for (additive, sprite, buffer, first, count) in runs {
+                            let particle_pipeline = active
+                                .particle_2d_pipelines[usize::from(additive)]
+                            .clone();
+                            commands
+                                .bind_pipeline_graphics(
+                                    particle_pipeline.clone(),
+                                )
+                                .map_err(|error| {
+                                    SceneRenderError(error.to_string())
+                                })?
+                                .bind_vertex_buffers(0, buffer)
+                                .map_err(|error| {
+                                    SceneRenderError(error.to_string())
+                                })?
+                                .push_constants(
+                                    particle_pipeline.layout().clone(),
+                                    0,
+                                    particle_vertex_shader::Particles {
+                                        view_projection: camera.view_projection,
+                                        eye: camera.eye,
+                                        right: [
+                                            camera_right[0],
+                                            camera_right[1],
+                                            camera_right[2],
+                                            0.0,
+                                        ],
+                                        up: [
+                                            camera_up[0],
+                                            camera_up[1],
+                                            camera_up[2],
+                                            0.0,
+                                        ],
+                                        params: [
+                                            sprite,
+                                            render_world
+                                                .elapsed_seconds
+                                                .to_bits(),
+                                            0,
+                                            0,
+                                        ],
+                                    },
+                                )
+                                .map_err(|error| {
+                                    SceneRenderError(error.to_string())
+                                })?;
+                            count_work(&recorded, 1, 0, u64::from(count) * 2);
+                            unsafe {
+                                commands.draw(6, count, 0, first).map_err(
+                                    |error| SceneRenderError(error.to_string()),
+                                )?;
+                            }
+                        }
+                        continue;
+                    }
+                };
+                if !sprites_bound {
+                    commands
+                        .bind_pipeline_graphics(pipeline.clone())
+                        .map_err(|error| SceneRenderError(error.to_string()))?
+                        .bind_vertex_buffers(0, upload.clone())
+                        .map_err(|error| SceneRenderError(error.to_string()))?;
+                    sprites_bound = true;
+                }
                 let prepared = |image: Option<Handle<TextureAsset>>| {
                     let prepared = self.prepared_textures.get(&image?.key())?;
                     Some((prepared.view.clone()?, prepared.sampler.clone()))
@@ -9278,6 +9428,8 @@ struct MainPasses {
     sprite_pipeline: Arc<GraphicsPipeline>,
     /// Particles blended by alpha, then added as light.
     particle_pipelines: [Arc<GraphicsPipeline>; 2],
+    /// The same particles drawn with the sprites, for `Particles2d`.
+    particle_2d_pipelines: [Arc<GraphicsPipeline>; 2],
     tonemap_pipeline: Arc<GraphicsPipeline>,
     /// Height fog over the background after the opaque draws.
     sky_pipeline: Arc<GraphicsPipeline>,
@@ -9318,6 +9470,14 @@ impl MainPasses {
         name_object(
             &*self.particle_pipelines[1],
             &format!("Additive particles{suffix}"),
+        );
+        name_object(
+            &*self.particle_2d_pipelines[0],
+            &format!("2D particles{suffix}"),
+        );
+        name_object(
+            &*self.particle_2d_pipelines[1],
+            &format!("Additive 2D particles{suffix}"),
         );
         name_object(&*self.tonemap_pipeline, &format!("Tone map{suffix}"));
         name_object(&*self.sky_pipeline, &format!("Sky fog{suffix}"));
@@ -9459,8 +9619,34 @@ fn create_main_passes(
                 samples,
                 false,
                 None,
+                false,
             )?,
-            create_particle_pipeline(queue, &render_pass, samples, true, None)?,
+            create_particle_pipeline(
+                queue,
+                &render_pass,
+                samples,
+                true,
+                None,
+                false,
+            )?,
+        ],
+        particle_2d_pipelines: [
+            create_particle_pipeline(
+                queue,
+                &render_pass,
+                samples,
+                false,
+                None,
+                true,
+            )?,
+            create_particle_pipeline(
+                queue,
+                &render_pass,
+                samples,
+                true,
+                None,
+                true,
+            )?,
         ],
         debug_pipeline: create_debug_pipeline(
             queue.clone(),
@@ -10115,6 +10301,7 @@ fn particle_pipelines(
                                     samples,
                                     additive,
                                     Some(module.clone()),
+                                    false,
                                 )
                                 .map_err(|error| error.0)
                             };
@@ -10282,6 +10469,7 @@ fn create_particle_pipeline(
     samples: u32,
     additive: bool,
     fragment: Option<Arc<vulkano::shader::ShaderModule>>,
+    two_d: bool,
 ) -> Result<Arc<GraphicsPipeline>, SceneRenderError> {
     let device = queue.device().clone();
     let vertex = particle_vertex_shader::load(device.clone())
@@ -10308,9 +10496,12 @@ fn create_particle_pipeline(
             .map_err(|error| SceneRenderError(error.to_string()))?,
     )
     .map_err(|error| SceneRenderError(error.to_string()))?;
-    let subpass = Subpass::from(render_pass.clone(), 0).ok_or_else(|| {
-        SceneRenderError("particle subpass is missing".into())
-    })?;
+    // 2D particles draw with the sprites: after tone mapping, single
+    // sampled, in canvas order without a depth test.
+    let subpass = Subpass::from(render_pass.clone(), u32::from(two_d))
+        .ok_or_else(|| {
+            SceneRenderError("particle subpass is missing".into())
+        })?;
     let blend = if additive {
         AttachmentBlend {
             src_color_blend_factor: BlendFactor::One,
@@ -10343,11 +10534,15 @@ fn create_particle_pipeline(
                 ..Default::default()
             }),
             multisample_state: Some(MultisampleState {
-                rasterization_samples: sample_count(samples)?,
+                rasterization_samples: sample_count(if two_d {
+                    1
+                } else {
+                    samples
+                })?,
                 ..Default::default()
             }),
             depth_stencil_state: Some(DepthStencilState {
-                depth: Some(DepthState {
+                depth: (!two_d).then_some(DepthState {
                     write_enable: false,
                     compare_op: CompareOp::Less,
                 }),
@@ -24119,6 +24314,120 @@ mod tests {
         scene.render_world.lights_2d = many;
         let far = brightness(&mut scene, [9, 16]);
         assert!(far.iter().all(|&c| c < 30), "{far:?}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn particles_2d_draw_between_sprites_in_canvas_order() {
+        use crate::runtime::{
+            ExtractedSprite, ParticleBatch, ParticleBlend, ParticleInstance,
+            ParticleSprite,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A white 1 m sprite on layer 0, a green 0.25 m sprite on layer 2,
+        // and a red 0.5 m particle square between them. Pixels are 1/16 m.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let sprite = |size: f32, color, layer| {
+            let mut matrix = [[0.0; 4]; 4];
+            matrix[0][0] = size;
+            matrix[1][1] = size;
+            matrix[2][2] = 1.0;
+            matrix[3] = [0.0, 0.0, 0.0, 1.0];
+            ExtractedSprite {
+                matrix,
+                color,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                texture: None,
+                normal_map: None,
+                layer,
+            }
+        };
+        scene.render_world.sprites = vec![
+            sprite(1.0, [1.0; 4], 0),
+            sprite(0.25, [0.0, 1.0, 0.0, 1.0], 2),
+        ];
+        let entity = bevy_ecs::entity::Entity::from_raw_u32(1).unwrap();
+        let particle = |x: f32, blend| ParticleBatch {
+            entity: Some(entity),
+            blend,
+            sprite: ParticleSprite::Square,
+            instances: vec![ParticleInstance {
+                position: [x, 0.0, 0.0],
+                size: 0.5,
+                color: [0.25, 0.0, 0.0, 1.0],
+                ..ParticleInstance::default()
+            }],
+        };
+        scene.render_world.particles =
+            vec![particle(0.0, ParticleBlend::Alpha)];
+        let rgb = |scene: &mut SlabScene, pixel| {
+            let got = render_pixel(scene, pixel);
+            [got[0], got[1], got[2]]
+        };
+        // On layer 1 the particle covers the white sprite, under the green.
+        scene.render_world.particles_2d = vec![(entity, 1, 0.0)];
+        let over = rgb(&mut scene, [13, 16]);
+        assert!(over[0] > 30 && over[1] < 30 && over[2] < 30, "{over:?}");
+        let top = rgb(&mut scene, [16, 16]);
+        assert!(top[0] < 30 && top[1] > 200, "{top:?}");
+        assert!(rgb(&mut scene, [9, 16]).iter().all(|&c| c > 240));
+        // Below layer 0, the white sprite covers it, while another emitter
+        // draws on layer 1 off to the side.
+        let other = bevy_ecs::entity::Entity::from_raw_u32(2).unwrap();
+        scene.render_world.particles.push(ParticleBatch {
+            entity: Some(other),
+            ..particle(0.75, ParticleBlend::Alpha)
+        });
+        scene.render_world.particles_2d =
+            vec![(entity, -1, 0.0), (other, 1, 0.0)];
+        assert!(rgb(&mut scene, [13, 16]).iter().all(|&c| c > 240));
+        // An additive square off the sprites draws once, not again in 3D.
+        scene.render_world.particles =
+            vec![particle(0.75, ParticleBlend::Additive)];
+        scene.render_world.particles_2d = vec![(entity, 0, 0.0)];
+        let once = rgb(&mut scene, [28, 16]);
+        assert_eq!(once, over, "{once:?}");
+        // A GPU emitter draws with the sprites the same way.
+        let emitter = crate::runtime::ParticleEmitter {
+            simulation: crate::runtime::ParticleSimulation::Gpu,
+            max_particles: 1,
+            speed: [0.0, 0.0],
+            size: [0.5, 0.5],
+            lifetime: [10.0, 10.0],
+            fade_in: 0.0,
+            fade_out: 0.0,
+            color_over_life: vec![crate::runtime::ColorKey {
+                t: 0.0,
+                color: [0.25, 0.0, 0.0, 1.0],
+            }],
+            sprite: ParticleSprite::Square,
+            blend: ParticleBlend::Additive,
+            ..crate::runtime::ParticleEmitter::default()
+        };
+        let global = crate::runtime::GlobalTransform {
+            matrix: Matrix4::new_translation(&Vector3::new(0.75, 0.0, 0.0))
+                .into(),
+        };
+        scene.render_world.particles.clear();
+        scene.render_world.gpu_particles =
+            vec![crate::runtime::gpu_particle_batch(
+                entity,
+                &emitter,
+                &crate::runtime::ParticleSystem {
+                    spawned: 1,
+                    ..crate::runtime::ParticleSystem::default()
+                },
+                Some(&global),
+                None,
+            )];
+        let gpu = rgb(&mut scene, [28, 16]);
+        assert_eq!(gpu, over, "{gpu:?}");
     }
 
     #[test]

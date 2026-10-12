@@ -4,6 +4,7 @@
 
 ### Added
 
+- Rendering: `rusting.particles_2d` draws particle emitters with the sprites in 2D canvas order
 - Rendering: sprites take a normal map that 2D lights shade
 - Rendering: 2D light occluder polygons cast shadows on sprites
 - Rendering: round 2D lights and a 2D ambient color light sprites in the sprite pass
