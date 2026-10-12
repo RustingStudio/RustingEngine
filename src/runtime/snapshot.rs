@@ -504,6 +504,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::PostVolume>();
     types.register::<super::FogVolume>();
     types.register::<super::Decal>();
+    types.register::<super::Sprite>();
     types.register::<super::ProceduralSky>();
     types.register::<super::CameraScreen>();
     types.register::<super::Bloom>();

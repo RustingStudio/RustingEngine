@@ -51,6 +51,47 @@ impl Default for TileKind {
     }
 }
 
+/// A flat image in the XY plane, centered on the object and facing +Z,
+/// drawn by the 2D sprite pass in canvas order: lower `layer` first, then
+/// lower world z, then entity order. Consecutive sprites that share an
+/// image draw as one batch.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sprite {
+    /// Image path relative to the project's `assets` folder; empty draws
+    /// plain `color`.
+    pub texture: PathBuf,
+    /// Linear RGBA multiplied with the image.
+    pub color: [f32; 4],
+    /// Width and height in world units, before the object's scale.
+    pub size: [f32; 2],
+    /// Part of the image to draw, `[u0, v0, u1, v1]` with v down: one frame
+    /// of a sprite sheet.
+    pub region: [f32; 4],
+    pub flip_x: bool,
+    pub flip_y: bool,
+    /// Canvas layer; higher layers draw over lower ones whatever their z.
+    pub layer: i32,
+    /// The loaded `texture`, set by the engine.
+    #[serde(skip)]
+    pub handle: Option<Handle<crate::assets::TextureAsset>>,
+}
+
+impl Default for Sprite {
+    fn default() -> Self {
+        Self {
+            texture: PathBuf::new(),
+            color: [1.0; 4],
+            size: [1.0, 1.0],
+            region: [0.0, 0.0, 1.0, 1.0],
+            flip_x: false,
+            flip_y: false,
+            layer: 0,
+            handle: None,
+        }
+    }
+}
+
 /// Farthest column or row `set_tile` may grow a map to; a stray coordinate
 /// must not allocate gigabytes.
 pub const MAX_TILE_CELLS: usize = 4096;

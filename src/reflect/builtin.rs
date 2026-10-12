@@ -25,10 +25,10 @@ use crate::runtime::{
     PlayerController, Polygon2d, PostShader, PostVolume, ProceduralSky,
     QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
     ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
-    SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, Terrain, TerrainLayer, TileKind, TileMap,
-    ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle,
-    WaterBody, Wheel,
+    SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Sprite,
+    Squash, StateAction, StateTransition, Terrain, TerrainLayer, TileKind,
+    TileMap, ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat,
+    Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -1388,6 +1388,33 @@ crate::reflect! {
         },
         survive_fracture: bool {
             doc: "false: removed when its parent breaks; true: moves onto the nearest piece",
+        },
+        #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+    }
+}
+
+crate::reflect! {
+    struct Sprite {
+        texture: PathBuf {
+            unit: "asset path",
+            doc: "image drawn on the sprite; empty draws color",
+        },
+        color: [f32; 4] {
+            unit: "linear rgba", min: 0.0,
+            doc: "multiplies the image",
+        },
+        size: [f32; 2] {
+            unit: "m", min: 0.0,
+            doc: "width and height before the object's scale",
+        },
+        region: [f32; 4] {
+            min: 0.0, max: 1.0,
+            doc: "part of the image to draw, [u0, v0, u1, v1] with v down",
+        },
+        flip_x: bool,
+        flip_y: bool,
+        layer: i32 {
+            doc: "canvas layer; higher layers draw over lower ones whatever their z",
         },
         #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
     }

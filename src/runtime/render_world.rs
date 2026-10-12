@@ -163,6 +163,9 @@ pub struct RenderWorld {
     /// each [`Decal`](super::Decal) whose image is loaded or that has none,
     /// in entity order.
     pub decals: Vec<([[f32; 4]; 4], super::Decal)>,
+    /// Each [`Sprite`](super::Sprite) whose image is loaded or that has
+    /// none, in canvas order.
+    pub sprites: Vec<ExtractedSprite>,
     pub bloom: Option<super::Bloom>,
     pub auto_exposure: Option<super::AutoExposure>,
     pub depth_of_field: Option<super::DepthOfField>,
@@ -264,6 +267,37 @@ pub struct RenderWorld {
     renderables_signature: Option<u64>,
     /// Tick and component counts seen by the last signature hash.
     renderables_fingerprint: Option<(Tick, [usize; 8])>,
+}
+
+/// One [`Sprite`](super::Sprite) ready to draw.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExtractedSprite {
+    /// Maps the unit quad, -0.5..0.5 in X and Y, to world space.
+    pub matrix: [[f32; 4]; 4],
+    pub color: [f32; 4],
+    /// Image coordinates at the quad's `[left, top, right, bottom]`, with
+    /// the flips applied.
+    pub uv: [f32; 4],
+    /// `None` draws plain color.
+    pub texture: Option<Handle<crate::assets::TextureAsset>>,
+    pub layer: i32,
+}
+
+/// Splits canvas-ordered sprites into runs that share an image, one draw
+/// call each. Batching never reorders sprites, so overlaps stay correct.
+pub fn sprite_batches(
+    sprites: &[ExtractedSprite],
+) -> Vec<std::ops::Range<usize>> {
+    let mut batches: Vec<std::ops::Range<usize>> = Vec::new();
+    for (index, sprite) in sprites.iter().enumerate() {
+        match batches.last_mut() {
+            Some(batch) if sprites[batch.start].texture == sprite.texture => {
+                batch.end = index + 1;
+            }
+            _ => batches.push(index..index + 1),
+        }
+    }
+    batches
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -414,6 +448,45 @@ pub fn extract_render_world(world: &mut World) {
             .into_iter()
             .map(|(_, matrix, decal)| (matrix, decal))
             .collect()
+    };
+    let sprites = {
+        let mut query =
+            world.query::<(Entity, &GlobalTransform, &super::Sprite)>();
+        let mut sprites = query
+            .iter(world)
+            .filter(|(_, _, sprite)| {
+                sprite.handle.is_some() || sprite.texture.as_os_str().is_empty()
+            })
+            .map(|(entity, transform, sprite)| {
+                let [width, height] = sprite.size;
+                let matrix = nalgebra::Matrix4::from(transform.matrix)
+                    * nalgebra::Matrix4::new_nonuniform_scaling(
+                        &nalgebra::Vector3::new(width, height, 1.0),
+                    );
+                let [mut left, mut top, mut right, mut bottom] = sprite.region;
+                if sprite.flip_x {
+                    std::mem::swap(&mut left, &mut right);
+                }
+                if sprite.flip_y {
+                    std::mem::swap(&mut top, &mut bottom);
+                }
+                let extracted = ExtractedSprite {
+                    matrix: matrix.into(),
+                    color: sprite.color,
+                    uv: [left, top, right, bottom],
+                    texture: sprite.handle,
+                    layer: sprite.layer,
+                };
+                (entity.index(), extracted)
+            })
+            .collect::<Vec<_>>();
+        sprites.sort_by(|(a_entity, a), (b_entity, b)| {
+            a.layer
+                .cmp(&b.layer)
+                .then(a.matrix[3][2].total_cmp(&b.matrix[3][2]))
+                .then(a_entity.cmp(b_entity))
+        });
+        sprites.into_iter().map(|(_, sprite)| sprite).collect()
     };
     let tone_mapping = collect_first::<ToneMapping>(world);
     let procedural_sky = collect_first::<super::ProceduralSky>(world);
@@ -658,6 +731,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.procedural_sky = procedural_sky;
     render_world.fog_volumes = fog_volumes;
     render_world.decals = decals;
+    render_world.sprites = sprites;
     render_world.bloom = bloom;
     render_world.auto_exposure = auto_exposure;
     render_world.depth_of_field = depth_of_field;
@@ -1745,6 +1819,78 @@ mod tests {
         let corner = nalgebra::Matrix4::from(decals[0].0)
             * nalgebra::Vector4::new(1.0, 1.0, 1.0, 1.0);
         assert_eq!(corner, nalgebra::Vector4::new(3.0, 1.0, 0.5, 1.0));
+    }
+
+    #[test]
+    fn sprites_draw_in_canvas_order_and_batch_by_image() {
+        use crate::runtime::Sprite;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let mut textures = crate::assets::Assets::default();
+        let image = || crate::assets::TextureAsset {
+            size: [1, 1],
+            rgba8: vec![255; 4],
+            color_space: crate::assets::TextureColorSpace::Srgb,
+            sampler: crate::assets::TextureSampler::default(),
+        };
+        let a = textures.insert(image());
+        let b = textures.insert(image());
+        let sprite = |layer, handle, z: f32| {
+            (
+                Transform::new([0.0, 0.0, z]),
+                Sprite {
+                    texture: "x.png".into(),
+                    layer,
+                    handle: Some(handle),
+                    ..Sprite::default()
+                },
+            )
+        };
+        // Spawned out of order: the higher layer first, nearer z first.
+        app.spawn(sprite(1, a, -5.0));
+        app.spawn(sprite(0, b, 2.0));
+        app.spawn(sprite(0, a, 1.0));
+        app.spawn(sprite(0, a, 1.0));
+        app.spawn((
+            Transform::new([3.0, 0.0, 0.0]),
+            Sprite {
+                texture: "missing.png".into(),
+                ..Sprite::default()
+            },
+        ));
+        app.spawn((
+            Transform::new([3.0, 0.0, 0.0]),
+            Sprite {
+                size: [2.0, 4.0],
+                region: [0.25, 0.0, 0.5, 1.0],
+                flip_x: true,
+                layer: 0,
+                ..Sprite::default()
+            },
+        ));
+        app.update(Duration::ZERO).unwrap();
+        let sprites = &app.world().resource::<RenderWorld>().sprites;
+        assert_eq!(sprites.len(), 5, "the unloaded image is skipped");
+        let order: Vec<_> = sprites
+            .iter()
+            .map(|sprite| (sprite.layer, sprite.matrix[3][2], sprite.texture))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (0, 0.0, None),
+                (0, 1.0, Some(a)),
+                (0, 1.0, Some(a)),
+                (0, 2.0, Some(b)),
+                (1, -5.0, Some(a)),
+            ],
+            "layer, then z, then entity order"
+        );
+        assert_eq!(sprite_batches(sprites), [0..1, 1..3, 3..4, 4..5]);
+        let corner = nalgebra::Matrix4::from(sprites[0].matrix)
+            * nalgebra::Vector4::new(0.5, 0.5, 0.0, 1.0);
+        assert_eq!(corner, nalgebra::Vector4::new(4.0, 2.0, 0.0, 1.0));
+        assert_eq!(sprites[0].uv, [0.5, 0.0, 0.25, 1.0], "flip_x swaps u");
     }
 
     #[test]

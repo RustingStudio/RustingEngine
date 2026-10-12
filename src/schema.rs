@@ -910,6 +910,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"texture": "decals/crack.png", "color": [1.0, 1.0, 1.0, 1.0], "extents": [0.5, 0.5, 0.25], "roughness": null, "survive_fracture": true}),
     },
     ComponentSection {
+        key: "rusting.sprite",
+        summary: "A flat image of size (world units, before the object's scale) in the object's XY plane, centered on it and facing +Z: a 2D character, a pickup, a background card. texture is a path under assets/; empty draws plain color, and color (linear rgba) multiplies the image. region [u0, v0, u1, v1] (v down) picks one frame of a sprite sheet; flip_x and flip_y mirror it. Sprites draw in canvas order: lower layer first, then lower world z, then entity order, so a higher layer covers a lower one whatever its z. Consecutive sprites that share an image draw as one batch.",
+        gpu: "one instanced draw per run of sprites sharing an image",
+        example: || json!({"texture": "sprites/hero.png", "color": [1.0, 1.0, 1.0, 1.0], "size": [1.0, 1.0], "region": [0.0, 0.0, 0.25, 1.0], "flip_x": false, "flip_y": false, "layer": 0}),
+    },
+    ComponentSection {
         key: "rusting.post_volume",
         summary: "Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside. Higher priority wins where volumes overlap. Fog and grading without a volume apply everywhere else; a hall with fog and a sickly grade and an office with a warm grade each get one.",
         gpu: NO_GPU,

@@ -3461,6 +3461,17 @@ Goal: make RustingEngine a complete 2D engine, not a 3D engine with a flat camer
 Depends on: Milestones 3, 4, and 10 (2D physics).
 
 - [ ] 2D renderer with sprites, sprite batching, z-ordering, and canvas layers.
+  - [x] Sprite component and extraction. `rusting.sprite` (texture, color,
+    size, region, flip_x/flip_y, layer) is registered for scenes, snapshots,
+    reflection and the schema; its image loads with the other environment
+    textures. `extract_render_world` fills `RenderWorld::sprites` in canvas
+    order (layer, then world z, then entity order), skips sprites whose image
+    has not loaded, and `sprite_batches` splits the list into runs sharing an
+    image. Evidence 2026-10-12: `sprites_draw_in_canvas_order_and_batch_by_image`
+    passes; dropping the layer key, the z key, the flip swap, the batch merge
+    or the unloaded-image filter each fails it.
+  - [ ] GPU sprite pass: one instanced draw per batch over the lit frame, with
+    a headless render test.
 - [ ] Sprite sheets and sprite animation.
 - [ ] Tilemaps with multiple layers, autotiling rules, tile collision shapes, and tile navigation data.
 - [ ] 2D lights, shadows from occluder polygons, and normal-mapped sprites.

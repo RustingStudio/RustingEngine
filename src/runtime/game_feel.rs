@@ -1969,7 +1969,7 @@ impl Default for ColorLut {
 }
 
 /// Loads the image of each added or changed [`EnvironmentMap`],
-/// [`LightCookie`], [`Decal`] and [`ColorLut`]. An image whose load failed (file missing or not written
+/// [`LightCookie`], [`Decal`], [`ColorLut`] and [`super::Sprite`]. An image whose load failed (file missing or not written
 /// yet) is tried again about every two seconds.
 pub(super) fn load_environment_maps(
     assets: Option<ResMut<crate::assets::AssetServer>>,
@@ -1977,6 +1977,7 @@ pub(super) fn load_environment_maps(
     mut cookies: Query<&mut LightCookie>,
     mut luts: Query<&mut ColorLut>,
     mut decals: Query<&mut Decal>,
+    mut sprites: Query<&mut super::Sprite>,
     mut frame: bevy_ecs::prelude::Local<u32>,
 ) {
     let Some(mut assets) = assets else {
@@ -2030,6 +2031,12 @@ pub(super) fn load_environment_maps(
             bevy_ecs::change_detection::DetectChanges::is_changed(&decal);
         let decal = decal.bypass_change_detection();
         load(changed, &decal.texture, &mut decal.handle, "decal");
+    }
+    for mut sprite in &mut sprites {
+        let changed =
+            bevy_ecs::change_detection::DetectChanges::is_changed(&sprite);
+        let sprite = sprite.bypass_change_detection();
+        load(changed, &sprite.texture, &mut sprite.handle, "sprite");
     }
 }
 
