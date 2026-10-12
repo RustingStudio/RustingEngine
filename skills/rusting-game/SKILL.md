@@ -39,6 +39,12 @@ aim), `core_defense` (top-down, mouse), `lantern_grid` (click puzzle),
 3. Change the scene with a patch file, never by hand:
    `rusting scene patch scenes/main.rscene patch.json [--dry-run]`.
    For large layouts, write a short script that generates `patch.json`.
+   For a level made from a seed, list a generator binary under
+   `scene_generators` in `project.json` and run `rusting scene generate .`;
+   its `checks` scenarios (an `explore` run that must reach every goal)
+   reject a broken level. `meshgen::extrude`, `loft` and `ProcMesh::subtract`
+   build roads, pipes and cut walls as `.glb` meshes with mesh colliders
+   (`rusting docs show guide/procedural`).
 4. Write game code in `src/main.rs`. `rusting check` builds it and
    validates the scene.
 5. Write scenarios in `tests/` and run `rusting test` until they pass.
@@ -525,6 +531,12 @@ if scene.counter_complete("keys") && at_exit {
 
 `rusting export` ships only the main scene today, so exported builds cannot
 load other levels yet; `rusting run` and `rusting test` can.
+
+Players mod a game by putting folders or `.rmod` files (from
+`rusting mod pack`) with a `mod.json` and `assets/` or `scenes/` in the
+game's `mods/` folder; their files replace the game's. `rusting mod list`
+shows the load order and why a mod was left out
+(`rusting docs show guide/modding`).
 
 ## Scenarios
 

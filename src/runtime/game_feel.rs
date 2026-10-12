@@ -2472,7 +2472,7 @@ fn hud_font(
             .then_some(family);
     }
     let path = assets.join(font);
-    let bytes = std::fs::read(&path).ok().filter(|bytes| {
+    let bytes = crate::assets::read_file(&path).ok().filter(|bytes| {
         // egui panics on a font it cannot parse; this one checks safely.
         crate::text_texture::text_texture_in_font(
             "Aa",

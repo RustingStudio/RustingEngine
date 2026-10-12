@@ -521,15 +521,19 @@ where
         let path = assets.join(&clip);
         let streamed = !sound.reverse
             && self.stream_over.is_some_and(|limit| {
-                std::fs::metadata(&path).is_ok_and(|file| file.len() > limit)
+                crate::assets::file_len(&path).is_some_and(|len| len > limit)
             });
         if !streamed && !self.clips.contains_key(&path) {
             let loaded = match crate::sfx::clip(&clip) {
                 Some(samples) => Ok(builtin_clip(&samples)),
-                None => {
-                    kira::sound::static_sound::StaticSoundData::from_file(&path)
+                None => crate::assets::read_file(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| {
+                        kira::sound::static_sound::StaticSoundData::from_cursor(
+                            std::io::Cursor::new(bytes),
+                        )
                         .map_err(|error| error.to_string())
-                }
+                    }),
             };
             match loaded {
                 Ok(data) => {
@@ -586,19 +590,28 @@ where
         }
         let bus = self.buses.get_mut(&info.bus).unwrap();
         let (handle, duration) = if streamed {
-            let data =
-                match kira::sound::streaming::StreamingSoundData::from_file(
-                    &path,
-                ) {
-                    Ok(data) => data,
-                    Err(error) => {
-                        eprintln!(
-                            "audio: cannot play `{}`: {error}",
-                            info.clip
-                        );
-                        return;
-                    }
-                };
+            use kira::sound::streaming::StreamingSoundData;
+            // A packed clip streams its decoding from the encoded bytes in
+            // memory; a loose one from the file.
+            let data = if path.is_file() {
+                StreamingSoundData::from_file(&path).map_err(|e| e.to_string())
+            } else {
+                crate::assets::read_file(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| {
+                        StreamingSoundData::from_cursor(std::io::Cursor::new(
+                            bytes,
+                        ))
+                        .map_err(|error| error.to_string())
+                    })
+            };
+            let data = match data {
+                Ok(data) => data,
+                Err(error) => {
+                    eprintln!("audio: cannot play `{}`: {error}", info.clip);
+                    return;
+                }
+            };
             let duration = data.duration().as_secs_f64();
             let mut data = data
                 .volume(decibels(info.volume))
@@ -1130,6 +1143,36 @@ mod tests {
                 mixer.render(480)
             }
         }
+    }
+
+    #[test]
+    fn a_packed_clip_plays_whole_and_streamed() {
+        let directory = std::env::temp_dir()
+            .join(format!("rusting-mix-pack-{}", uuid::Uuid::new_v4()));
+        let assets = directory.join("assets");
+        let ramp: Vec<f32> = (0..48_000).flat_map(|_| [0.5, 0.5]).collect();
+        write_wav(&assets.join("ramp.wav"), &ramp).unwrap();
+        crate::assets::pack_folder(&assets, &directory.join("assets.rpak"))
+            .unwrap();
+        std::fs::remove_dir_all(&assets).unwrap();
+        for mut mixer in [
+            OfflineMixer::offline().unwrap(),
+            OfflineMixer::offline_streaming(1024).unwrap(),
+        ] {
+            let mut queue = AudioQueue::default();
+            queue.play("ramp.wav", &Sound::default(), 0);
+            for command in queue.drain() {
+                mixer.run(&assets, command, |_| Duration::ZERO);
+            }
+            // A streamed sound starts once its decoder thread fills a buffer.
+            let heard = (0..200).any(|_| {
+                let block = mixer.render(480);
+                std::thread::sleep(Duration::from_millis(5));
+                block.iter().any(|s| s.abs() > 0.1)
+            });
+            assert!(heard, "packed clip is silent");
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

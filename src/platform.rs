@@ -1,4 +1,5 @@
-//! Platform services: where saves go, achievements and stats, behind one
+//! Platform services: where saves go, achievements and stats, workshop
+//! mods and store content, behind one
 //! [`PlatformServices`] trait so a storefront SDK (Steam, GOG, Epic) plugs
 //! in without game code changing.
 //!
@@ -11,7 +12,7 @@
 //! presentation, like audio, and must not affect replay hashes.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// File in the user data folder where [`LocalPlatform`] keeps achievements
@@ -44,6 +45,43 @@ pub trait PlatformServices: Send {
 
     /// The stat's value, or `None` when it was never set.
     fn stat(&self, name: &str) -> Option<i32>;
+
+    /// Installed workshop items the player subscribed to: mod folders or
+    /// `.rmod` files, as [`crate::mods`] reads them. Games load them with
+    /// the mods in their `mods/` folder. None by default.
+    fn workshop_items(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    /// Uploads a packed mod ([`crate::mods::pack_mod`]) as a workshop item,
+    /// a new one or a new version of the item with the same name, and
+    /// returns the item's ID. Fails by default: there is no workshop.
+    ///
+    /// # Errors
+    /// Why the platform did not take it.
+    fn publish_workshop_item(
+        &mut self,
+        archive: &Path,
+        manifest: &crate::mods::ModManifest,
+    ) -> Result<String, String> {
+        let _ = (archive, manifest);
+        Err(format!("the `{}` platform has no workshop", self.name()))
+    }
+
+    /// Whether the player owns the paid content (DLC) with this store ID.
+    /// True by default, so a game without a storefront has all of it.
+    fn owns_content(&self, id: &str) -> bool {
+        let _ = id;
+        true
+    }
+
+    /// Opens the store page of the game, or of the content with this ID,
+    /// in the platform's overlay or browser. Returns whether it opened;
+    /// false by default.
+    fn open_store_page(&mut self, id: Option<&str>) -> bool {
+        let _ = id;
+        false
+    }
 }
 
 /// The default services: achievements and stats in
@@ -189,6 +227,37 @@ pub fn stat(name: &str) -> Option<i32> {
     services().stat(name)
 }
 
+/// Installed workshop items; see [`PlatformServices::workshop_items`].
+#[must_use]
+pub fn workshop_items() -> Vec<PathBuf> {
+    services().workshop_items()
+}
+
+/// Uploads a packed mod as a workshop item and returns its ID; see
+/// [`PlatformServices::publish_workshop_item`].
+///
+/// # Errors
+/// Why the platform did not take it.
+pub fn publish_workshop_item(
+    archive: &Path,
+    manifest: &crate::mods::ModManifest,
+) -> Result<String, String> {
+    services().publish_workshop_item(archive, manifest)
+}
+
+/// Whether the player owns the paid content with this store ID; see
+/// [`PlatformServices::owns_content`].
+#[must_use]
+pub fn owns_content(id: &str) -> bool {
+    services().owns_content(id)
+}
+
+/// Opens the store page of the game (`None`) or of some content; see
+/// [`PlatformServices::open_store_page`].
+pub fn open_store_page(id: Option<&str>) -> bool {
+    services().open_store_page(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +284,16 @@ mod tests {
         }
         fn stat(&self, _: &str) -> Option<i32> {
             None
+        }
+        fn publish_workshop_item(
+            &mut self,
+            _: &Path,
+            manifest: &crate::mods::ModManifest,
+        ) -> Result<String, String> {
+            Ok(format!("item-{}", manifest.name))
+        }
+        fn owns_content(&self, id: &str) -> bool {
+            id == "soundtrack"
         }
     }
 
@@ -245,7 +324,25 @@ mod tests {
         assert!(achievement_unlocked("first_blood"));
         assert!(!set_stat("kills", 1));
         assert_eq!(platform_save_folder(), None);
+        let manifest = crate::mods::ModManifest {
+            name: "hats".into(),
+            ..Default::default()
+        };
+        let archive = Path::new("hats.rmod");
+        assert_eq!(
+            publish_workshop_item(archive, &manifest),
+            Ok("item-hats".into())
+        );
+        assert!(owns_content("soundtrack"));
+        assert!(!owns_content("expansion"));
+        assert!(!open_store_page(None));
         set_platform_services(previous);
         assert_eq!(platform_name(), "local");
+        // Local services: no workshop, and every piece of content owned.
+        assert!(workshop_items().is_empty());
+        assert!(publish_workshop_item(archive, &manifest)
+            .unwrap_err()
+            .contains("no workshop"));
+        assert!(owns_content("expansion"));
     }
 }

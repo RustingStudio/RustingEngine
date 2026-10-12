@@ -275,12 +275,30 @@ rusting export my_game ~/exports --preset demo
   project folder.
   When it fails, the export folder is deleted and export fails with
   `EXPORT_SIGN_FAILED`.
+- `pack` set to `true` packs the exported `assets/` and `scenes/` folders
+  into `assets.rpak` and `scenes.rpak` after excluded files are removed,
+  and deletes the loose folders. The game reads a file that is missing on
+  disk from the `.rpak` beside its folder, so asset paths stay the same and
+  a loose file still wins over the packed one. Files are read straight from
+  the pack without unpacking it; streamed audio holds the encoded clip in
+  memory. A glTF model imported while the game runs writes its cooked
+  meshes beside the source, so leave `pack` off for a game that calls
+  `add_gltf`; models placed in the editor are cooked already and load from
+  the pack.
+  Packing only happens at export.
+- `zip` set to `true` zips the finished export folder into
+  `<folder>.zip` beside it, after it is signed and checked, ready to
+  upload to a store or share. Files sit under the folder's name inside
+  the zip and keep their Unix permissions, so the game stays executable
+  after unzipping on Linux. The files are stored without compression, and
+  a zip holds at most 65,535 files and 4 GiB.
 
-The export's JSON lists the `features` and the `excluded` files. A native
+The export's JSON lists the `features`, the `excluded` files, the
+`packed` archives and the `zip` path. A native
 export is still run headless, so leaving out a file the game loads fails
 with `EXPORT_VERIFY_FAILED`. An unknown preset name fails with
 `EXPORT_PRESET_UNKNOWN`, which lists the presets the project has.
-Packed data is not encrypted yet.
+Packed data is not compressed or encrypted yet.
 
 ### Crash reports
 

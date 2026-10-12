@@ -3850,6 +3850,55 @@ pub fn generate_asset(
     )
 }
 
+/// Runs the stale `project.json` scene generators, or the ones in `names`.
+pub fn generate_scenes(
+    root: &Path,
+    names: &[&str],
+    force: bool,
+    dry_run: bool,
+) -> CliResult {
+    let project = match open_project(root) {
+        Ok(project) => project,
+        Err(error) => return project_error(error, root),
+    };
+    match asset_import::generate_scenes(
+        &project.root,
+        &project.manifest.scene_generators,
+        names,
+        force,
+        dry_run,
+        // Each check plays its scenario on the staged scene.
+        &mut |scenario, scene| {
+            let run = run_game_project(
+                &project.root,
+                RunOptions {
+                    scenario: Some(scenario.to_owned()),
+                    scene: Some(scene.to_owned()),
+                    ..RunOptions::default()
+                },
+            );
+            if run.ok {
+                return Ok(());
+            }
+            Err(run
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; "))
+        },
+    ) {
+        Ok(scenes) => {
+            CliResult::success(json!({ "scenes": scenes, "dry_run": dry_run }))
+        }
+        Err(error) => CliResult::failure(
+            error.code(),
+            error.to_string(),
+            error.path().map(Path::to_owned),
+        ),
+    }
+}
+
 /// Imported assets with references; asset errors make the result fail.
 pub fn list_assets(root: &Path) -> CliResult {
     let project = match open_project(root) {
@@ -5185,6 +5234,9 @@ pub struct RunOptions {
     /// Run as a dedicated server (`--server`): no window, real-time ticks
     /// until the game quits or `timeout` stops it.
     pub server: bool,
+    /// Load this scene instead of the cooked main scene, through
+    /// `RUSTING_SCENE_PATH`, such as a generated scene being checked.
+    pub scene: Option<PathBuf>,
 }
 
 /// Cooks the main scene, builds the game, and runs it as a debug session:
@@ -5457,6 +5509,9 @@ fn run_game_project_once(root: &Path, options: RunOptions) -> CliResult {
         None => {
             game.current_dir(&root);
         }
+    }
+    if let Some(scene) = &options.scene {
+        game.env("RUSTING_SCENE_PATH", scene);
     }
     let final_scene = root.join("build/final.rscene");
     if let Some(ticks) = options.headless_ticks {
@@ -6181,6 +6236,20 @@ pub fn export_game_project(
                 )
             }
         };
+    let packed = if preset.pack {
+        match crate::project::pack_export(&exported) {
+            Ok(packed) => packed,
+            Err(error) => {
+                return CliResult::failure(
+                    "EXPORT_FAILED",
+                    format!("could not pack the exported assets: {error}"),
+                    Some(exported),
+                )
+            }
+        }
+    } else {
+        Vec::new()
+    };
     if let Some((program, arguments)) = preset.sign.split_first() {
         let executable = exported.join(crate::project::executable_name(
             &project.manifest.binary_name,
@@ -6223,30 +6292,58 @@ pub fn export_game_project(
         "target": target,
         "features": preset.features,
         "excluded": excluded,
+        "packed": packed,
         "signed": !preset.sign.is_empty(),
         "files": files,
         "verified": null,
+        "zip": null,
     });
-    if target.is_some() {
+    let mut result = if target.is_some() {
         let mut result = CliResult::success(data);
         result.diagnostics.push(Diagnostic {
             code: "EXPORT_NOT_VERIFIED",
             severity: "warning",
             message: "cross-target exports are not run on this machine".into(),
-            file: Some(exported),
+            file: Some(exported.clone()),
             ..Diagnostic::default()
         });
-        return result;
+        result
+    } else {
+        match verify_export(&exported, &project.manifest.binary_name) {
+            Ok(run) if run.success => {
+                data["verified"] = run.data();
+                CliResult::success(data)
+            }
+            verified => {
+                return export_verify_failure(&verified, data, exported)
+            }
+        }
+    };
+    if preset.zip {
+        let mut zip = exported.clone().into_os_string();
+        zip.push(".zip");
+        let zip = PathBuf::from(zip);
+        if let Err(error) = crate::project::zip_folder(&exported, &zip) {
+            return CliResult::failure(
+                "EXPORT_FAILED",
+                format!("could not zip the export: {error}"),
+                Some(exported),
+            );
+        }
+        result.data["zip"] = json!(zip);
     }
-    let verified = verify_export(&exported, &project.manifest.binary_name);
-    let ok = verified.as_ref().is_ok_and(|run| run.success);
-    data["verified"] = match &verified {
+    result
+}
+
+fn export_verify_failure(
+    verified: &Result<ProcessRun, String>,
+    mut data: Value,
+    exported: PathBuf,
+) -> CliResult {
+    data["verified"] = match verified {
         Ok(run) => run.data(),
         Err(error) => json!({"error": error}),
     };
-    if ok {
-        return CliResult::success(data);
-    }
     let message = match &verified {
         Ok(run) => format!(
             "exported game failed its headless run:\n{}",
@@ -7879,5 +7976,58 @@ src/main.rs:30:5: error[E0425]: cannot find value `x` in this scope";
         assert!(cut.data["omitted"].as_u64().unwrap() > 0);
         assert!(cut.data.to_string().len() < full.data.to_string().len());
         std::fs::remove_dir_all(parent).unwrap();
+    }
+}
+
+/// Checks a mod folder's `mod.json` and packs the folder into the `.rmod`
+/// archive `out`. `out` is always an argument, so --confine checks it.
+pub fn pack_mod(folder: &Path, out: &Path) -> CliResult {
+    match crate::mods::pack_mod(folder, out) {
+        Ok(manifest) => CliResult::success(json!({
+            "name": manifest.name,
+            "version": manifest.version,
+            "archive": out,
+        })),
+        Err(error) => {
+            CliResult::failure(error.code, error.message, Some(error.path))
+        }
+    }
+}
+
+/// The mods in `<root>/mods` that a game there would load, in load order,
+/// the files and scene fields more than one of them changes, and an error
+/// diagnostic for each mod left out.
+pub fn list_mods(root: &Path) -> CliResult {
+    let set = crate::mods::load_mods(&root.join("mods"));
+    let mods: Vec<Value> = set
+        .mods
+        .iter()
+        .map(|loaded| {
+            json!({
+                "name": loaded.manifest.name,
+                "version": loaded.manifest.version,
+                "depends": loaded.manifest.depends,
+                "path": loaded.path,
+            })
+        })
+        .collect();
+    CliResult {
+        schema_version: 1,
+        ok: set.errors.is_empty(),
+        data: json!({
+            "mods": mods,
+            "conflicts": crate::mods::conflicts(root, &set.mods),
+        }),
+        diagnostics: set
+            .errors
+            .into_iter()
+            .map(|error| Diagnostic {
+                code: error.code,
+                severity: "error",
+                message: error.message,
+                file: Some(error.path),
+                ..Diagnostic::default()
+            })
+            .collect(),
     }
 }

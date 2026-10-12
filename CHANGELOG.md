@@ -53,6 +53,17 @@
 - Particles: `on_fracture` bursts `impact_count` particles at the break point when an emitter's parent object fractures
 - Fracture: debris pieces keep the broken object's normals and texture coordinates on their outer faces
 - Soft blocks: `color` and `texture`, laid once on each side of the block and fixed to the particles
+- Release zips: an export preset with `"zip": true` zips the finished, signed and verified export folder into `<folder>.zip` beside it (stored, Unix modes kept, same bytes for the same folder); the export JSON reports `zip`.
+- Workshop and store hooks: `PlatformServices` gains `workshop_items`, `publish_workshop_item`, `owns_content` and `open_store_page`, each with a default (no workshop, all content owned, no store page), with matching `platform::` functions; games load subscribed workshop items with their `mods/` folder (`mods::load_mods_with`). Mod loading no longer follows linked folders inside a mod (a link loop hung the game), compares scenes field by field only in `rusting mod list` and only up to 4 MiB, and prints mod file names with control characters replaced
+- Mod conflicts: `rusting mod list` reports under `conflicts` each file more than one mod holds, and for scenes each entity and component field two mods changed differently; games print the conflicting files as they mount mods. `rusting mod pack` now needs `--out`, so `--confine` checks where it writes The scene comparison skips files that are not regular files of known size, so a mod scene linked to `/dev/zero` cannot hang it.
+- Mods: folders or `.rmod` archives with a `mod.json` (name, version, dependencies) in a game's `mods/` folder replace or add its assets and scenes, in a load order from `mods/load_order.json` or by name with dependencies first; `rusting mod pack` packs one and `rusting mod list` shows the order and the mods left out
+- Mesh generation: `meshgen::spline` (Catmull-Rom points), `extrude` (a profile swept along a path without twisting), `loft` (rings skinned into a closed mesh), and `ProcMesh::union`, `subtract` and `intersect`; `ProcMesh::glb` saves a mesh for a scene and `ProcMesh::asset` gives a flat-shaded asset that `TriangleMesh` and `ConvexMesh` colliders use
+- Generated level checks: a `scene_generators` entry's `checks` scenarios (such as an `explore` run that must reach every goal, or `invariants`) play on each new scene before it replaces the old one; a failure keeps the old scene and gives `GENERATED_SCENE_CHECK_FAILED`. `RunOptions.scene` runs a game on any scene
+- Scene generators: `scene_generators` in `project.json` name a project command that writes a scene from a seed and inputs; `rusting scene generate` reruns it only when the command, seed, inputs or watched files changed, checks the scene loads, journals the write, and refuses to overwrite hand edits without `--force`
+- The API audit test covers every type in the prelude: a new public method returning a borrow, or a prelude type gaining a lifetime parameter, fails the build's tests
+- Packed asset archives: export preset `pack: true` packs `assets/` and `scenes/` into `.rpak` files the game streams files from, with loose files still winning
+- `procgen`: seeded random streams, gradient noise with fractal layers, and Poisson-disk point scattering that give the same bits on every machine
+- `procgen` grid generators for tile maps and 3D grids: `cellular_caves`, `rooms_and_corridors` and `wave_function_collapse`, with `tile_rows` to fill a `TileMap`
 
 ### Fixed
 

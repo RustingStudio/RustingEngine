@@ -2260,12 +2260,16 @@ pub fn write_atomic(
 pub fn read_scene_bytes(
     path: impl AsRef<Path>,
 ) -> Result<Vec<u8>, SceneIoError> {
+    use crate::assets::{file_len, read_file};
     let path = path.as_ref();
-    if !path.is_dir() {
-        return Ok(std::fs::read(path)?);
+    // A packed folder-form scene has no folder on disk, only its files.
+    let folder = path.is_dir()
+        || (!path.exists() && file_len(&path.join("scene.json")).is_some());
+    if !folder {
+        return Ok(read_file(path)?);
     }
     let mut document: Value =
-        serde_json::from_slice(&std::fs::read(path.join("scene.json"))?)?;
+        serde_json::from_slice(&read_file(&path.join("scene.json"))?)?;
     let ids: Vec<Uuid> = serde_json::from_value(
         document
             .get_mut("entities")
@@ -2275,7 +2279,7 @@ pub fn read_scene_bytes(
     let entities = ids
         .iter()
         .map(|id| {
-            Ok(serde_json::from_slice(&std::fs::read(entity_file(
+            Ok(serde_json::from_slice(&read_file(&entity_file(
                 path, *id,
             ))?)?)
         })

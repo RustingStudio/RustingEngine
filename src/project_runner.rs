@@ -265,7 +265,10 @@ impl GameScene<'_> {
     /// # Errors
     /// Returns the error from reading the file.
     pub fn load_text(&self, path: &str) -> std::io::Result<String> {
-        std::fs::read_to_string(self.assets_folder().join(path))
+        let bytes = crate::assets::read_file(&self.assets_folder().join(path))?;
+        String::from_utf8(bytes).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+        })
     }
 
     /// Switches to the translations in `assets/locales/<locale>.json`, a
@@ -2860,8 +2863,9 @@ impl GameScene<'_> {
                     None => crate::text_texture::text_texture(text, style),
                     Some(font) => {
                         let path = self.assets_folder().join(font);
-                        let drawn =
-                            std::fs::read(&path).ok().and_then(|bytes| {
+                        let drawn = crate::assets::read_file(&path)
+                            .ok()
+                            .and_then(|bytes| {
                                 crate::text_texture::text_texture_in_font(
                                     text, style, &bytes,
                                 )
@@ -4355,6 +4359,7 @@ fn load_project_runtime<P: Plugin>(
     scene_path: &Path,
     plugin: P,
 ) -> Result<App, Box<dyn Error>> {
+    crate::mods::mount_beside(scene_path);
     let mut runtime = App::new();
     runtime.add_plugin(AssetPlugin)?;
     runtime.add_plugin(HybridPhysicsPlugin)?;

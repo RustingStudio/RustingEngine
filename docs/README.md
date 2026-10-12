@@ -65,8 +65,14 @@ were run against this version of the engine.
 - [Animation](animation.md): keyframe clips, skinned models, state
   machines, blend spaces, IK, and ragdolls.
 - [Effects](effects.md): particle emitters and ready-made presets.
+- [Procedural content](procedural.md): seeded random streams, noise, point
+  scattering, caves, dungeons and wave function collapse that give the same
+  level on every machine, meshes extruded and lofted along splines or cut
+  with solid operations, and generated scenes cached by seed and inputs.
 - [Look and feel](look-and-feel.md): art presets, color grading, and a
   polish checklist.
+- [Modding](modding.md): mods that replace or add a shipped game's assets
+  and scenes, with versions, dependencies and a load order.
 - [Cameras](cameras.md), [Audio](audio.md), and
   [Menus and UI](menus-and-ui.md).
 - [GPU condition shaders](gpu-condition-shaders.md): custom checks and

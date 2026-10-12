@@ -235,6 +235,18 @@ pub const CODES: &[CodeInfo] = &[
         "rusting run --ticks 120 --json",
     ),
     code(
+        "GENERATED_SCENE_CHECK_FAILED",
+        "A scene made by a `scene_generators` entry failed one of the generator's `checks` scenarios, so `rusting scene generate` kept the old scene.",
+        "Read the scenario failure in the message; fix the generator so the level passes (for example so every explore goal is reachable), or change its seed or inputs.",
+        "rusting scene generate . level --json",
+    ),
+    code(
+        "GENERATED_SCENE_EDITED",
+        "A scene made by a `scene_generators` entry was edited by hand since it was generated, so `rusting scene generate` did not replace it.",
+        "Keep the edit by moving it into the generator or its inputs, or pass --force to regenerate over it; `rusting revert` brings back the replaced scene.",
+        "rusting scene generate . level --force --json",
+    ),
+    code(
         "GENERATOR_FAILED",
         "An asset generator hook failed or printed no valid JSON result on its last output line.",
         "Run the hook's command by hand with RUSTING_PROMPT and RUSTING_OUTPUT_DIR set and fix its output.",
@@ -401,6 +413,24 @@ pub const CODES: &[CodeInfo] = &[
         "`scene add-model` could not import the glTF model.",
         "Check that the file is a valid .gltf or .glb and that its buffers and images sit next to it.",
         "rusting scene add-model scenes/main.rscene assets/models/barrel.glb --dry-run",
+    ),
+    code(
+        "MOD_DEPENDENCY_CYCLE",
+        "Mods in the game's mods/ folder depend on each other in a loop, so none of them loaded.",
+        "Remove the dependency that closes the loop from one mod's mod.json `depends`.",
+        "rusting mod list my_game --json",
+    ),
+    code(
+        "MOD_DEPENDENCY_UNMET",
+        "A mod needs another mod that is not installed, not in mods/load_order.json, left out itself, or at a version the requirement does not accept, so it did not load.",
+        "Install or enable the needed mod at a version with the same major number (minor for 0.x) and at least the one asked for, or relax the mod's `depends`.",
+        "rusting mod list my_game --json",
+    ),
+    code(
+        "MOD_MANIFEST_INVALID",
+        "A mod's mod.json is missing or wrong (format_version 1, a name of letters, digits, `_`, `-` or `.`, a major.minor.patch version, version requirements in `depends`), its .rmod cannot be read, two mods share a name, or mods/load_order.json is not a list of names.",
+        "Fix the file the diagnostic names and run `rusting mod list` again.",
+        "rusting mod pack my_mod --out my_mod.rmod --json",
     ),
     code(
         "OUTSIDE_CONFINE",

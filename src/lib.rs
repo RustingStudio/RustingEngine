@@ -24,8 +24,10 @@ pub mod fontgen;
 pub mod geometry;
 pub mod input;
 pub mod meshgen;
+pub mod mods;
 pub mod net;
 pub mod platform;
+pub mod procgen;
 pub mod project;
 #[cfg(feature = "window")]
 pub mod project_runner;

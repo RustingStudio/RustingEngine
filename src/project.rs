@@ -291,6 +291,14 @@ pub struct ProjectManifest {
     )]
     pub generators:
         std::collections::BTreeMap<String, crate::asset_import::GeneratorHook>,
+    /// Optional scene generators by name; see
+    /// [`crate::asset_import::SceneGenerator`] and `rusting scene generate`.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    pub scene_generators:
+        std::collections::BTreeMap<String, crate::asset_import::SceneGenerator>,
     /// How strictly the simulation must reproduce itself; see
     /// [`crate::runtime::DeterminismMode`]. `cook` copies it into the
     /// cooked scene.
@@ -347,6 +355,16 @@ pub struct ExportPreset {
     /// non-zero exit fails the export.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sign: Vec<String>,
+    /// Pack the exported `assets/` and `scenes/` folders into
+    /// `assets.rpak` and `scenes.rpak` after excluded files are removed.
+    /// The game reads a file missing on disk from the pack beside its
+    /// folder, so asset paths do not change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pack: bool,
+    /// Zip the finished export folder into `<folder>.zip` beside it, once
+    /// it is signed and verified, ready to upload.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zip: bool,
 }
 
 /// Whether `path` (relative, `/`-separated) matches `pattern`, where `*`
@@ -428,6 +446,160 @@ pub fn remove_excluded(
     }
     removed.sort();
     Ok(removed)
+}
+
+/// Packs the `assets/` and `scenes/` folders of an export into
+/// `<folder>.rpak` beside them and removes the loose folders; returns the
+/// pack names written.
+pub fn pack_export(export: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let mut packed = Vec::new();
+    for name in ["assets", "scenes"] {
+        let folder = export.join(name);
+        if !folder.is_dir() {
+            continue;
+        }
+        let pack = format!("{name}.rpak");
+        crate::assets::pack_folder(&folder, &export.join(&pack))?;
+        std::fs::remove_dir_all(&folder)?;
+        packed.push(pack);
+    }
+    Ok(packed)
+}
+
+/// Writes `folder` into a zip file at `out`, with every file under the
+/// folder's own name. Files are stored without compression (compressing
+/// needs a dependency); Unix file modes are kept, so the executable stays
+/// executable after unzipping, and the same folder gives the same bytes.
+/// Fails on more than 65,535 files or 4 GiB, which needs Zip64.
+pub fn zip_folder(
+    folder: &std::path::Path,
+    out: &std::path::Path,
+) -> std::io::Result<()> {
+    let written = write_zip(folder, out);
+    if written.is_err() {
+        let _ = std::fs::remove_file(out);
+    }
+    written
+}
+
+fn write_zip(
+    folder: &std::path::Path,
+    out: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::io::{Error, Read, Write};
+    let top = folder
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::other("the folder has no UTF-8 name"))?;
+    let mut files = Vec::new();
+    let mut pending = vec![folder.to_owned()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                pending.push(entry.path());
+            } else {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    let too_big =
+        || Error::other("the export needs Zip64 (over 65,535 files or 4 GiB)");
+    let count = u16::try_from(files.len()).map_err(|_| too_big())?;
+    let mut zip = std::io::BufWriter::new(std::fs::File::create(out)?);
+    let mut central = Vec::new();
+    let mut offset = 0u64;
+    for file in &files {
+        let relative = file.strip_prefix(folder).map_err(Error::other)?;
+        let relative = relative.to_str().ok_or_else(|| {
+            Error::other(format!("{} is not UTF-8", file.display()))
+        })?;
+        let name = format!("{top}/{}", relative.replace('\\', "/"));
+        let meta = std::fs::metadata(file)?;
+        #[cfg(unix)]
+        let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions());
+        #[cfg(not(unix))]
+        let mode = 0o100_644;
+        let size = u32::try_from(meta.len()).map_err(|_| too_big())?;
+        let mut crc = !0u32;
+        let mut reader = std::fs::File::open(file)?;
+        let mut buffer = vec![0; 1 << 16];
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            crc = crc32_update(crc, &buffer[..read]);
+        }
+        let crc = !crc;
+        let start = u32::try_from(offset).map_err(|_| too_big())?;
+        // Version 2.0, UTF-8 names, stored, DOS date 1980-01-01 00:00.
+        let shared = |bytes: &mut Vec<u8>| {
+            for half in [20u16, 0x0800, 0, 0, 0x21] {
+                bytes.extend(half.to_le_bytes());
+            }
+            for word in [crc, size, size] {
+                bytes.extend(word.to_le_bytes());
+            }
+            bytes.extend((name.len() as u16).to_le_bytes());
+            bytes.extend(0u16.to_le_bytes());
+        };
+        let mut local = 0x0403_4b50u32.to_le_bytes().to_vec();
+        shared(&mut local);
+        local.extend(name.as_bytes());
+        zip.write_all(&local)?;
+        let copied = std::io::copy(
+            &mut std::fs::File::open(file)?.take(size.into()),
+            &mut zip,
+        )?;
+        if copied != u64::from(size) {
+            return Err(Error::other(format!(
+                "{} changed while zipping",
+                file.display()
+            )));
+        }
+        offset += local.len() as u64 + copied;
+        central.extend(0x0201_4b50u32.to_le_bytes());
+        // Made by Unix, so the external attributes hold the file mode.
+        central.extend((3u16 << 8 | 20).to_le_bytes());
+        shared(&mut central);
+        central.extend([0; 6]); // Comment length, disk, internal attributes.
+        central.extend((mode << 16).to_le_bytes());
+        central.extend(start.to_le_bytes());
+        central.extend(name.as_bytes());
+    }
+    let central_start = u32::try_from(offset).map_err(|_| too_big())?;
+    let central_len = u32::try_from(central.len()).map_err(|_| too_big())?;
+    zip.write_all(&central)?;
+    zip.write_all(&0x0605_4b50u32.to_le_bytes())?;
+    zip.write_all(&[0; 4])?;
+    zip.write_all(&count.to_le_bytes())?;
+    zip.write_all(&count.to_le_bytes())?;
+    zip.write_all(&central_len.to_le_bytes())?;
+    zip.write_all(&central_start.to_le_bytes())?;
+    zip.write_all(&[0; 2])?;
+    zip.flush()
+}
+
+/// Folds `bytes` into a running CRC-32 (the zip and PNG polynomial).
+fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        std::array::from_fn(|index| {
+            (0..8).fold(index as u32, |c, _| {
+                if c & 1 == 1 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                }
+            })
+        })
+    });
+    for &byte in bytes {
+        crc = table[((crc ^ u32::from(byte)) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -885,6 +1057,7 @@ fn write_project_template(
         cooked_scene: "build/main.rscene.bin".into(),
         binary_name: package_name.clone(),
         generators: std::collections::BTreeMap::new(),
+        scene_generators: std::collections::BTreeMap::new(),
         determinism: Default::default(),
         window: None,
         ui_base_size: None,
@@ -2967,6 +3140,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_zipped_export_holds_each_file_with_its_crc_and_mode() {
+        assert_eq!(!crc32_update(!0, b"123456789"), 0xCBF4_3926);
+        let root = std::env::temp_dir()
+            .join(format!("rusting-zip-{}", uuid::Uuid::new_v4()));
+        let folder = root.join("My Game");
+        std::fs::create_dir_all(folder.join("assets/art")).unwrap();
+        std::fs::write(folder.join("game"), b"#!run").unwrap();
+        std::fs::write(folder.join("assets/art/a.txt"), b"hello").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            folder.join("game"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let out = root.join("My Game.zip");
+        zip_folder(&folder, &out).unwrap();
+        let zip = std::fs::read(&out).unwrap();
+        let u16_at = |at: usize| u16::from_le_bytes([zip[at], zip[at + 1]]);
+        let u32_at =
+            |at: usize| u32::from_le_bytes(zip[at..at + 4].try_into().unwrap());
+        let end = zip.len() - 22;
+        assert_eq!(u32_at(end), 0x0605_4b50);
+        assert_eq!(u16_at(end + 10), 2);
+        let mut entry = u32_at(end + 16) as usize;
+        let mut found = Vec::new();
+        for _ in 0..2 {
+            assert_eq!(u32_at(entry), 0x0201_4b50);
+            let name_len = usize::from(u16_at(entry + 28));
+            let name = std::str::from_utf8(&zip[entry + 46..][..name_len])
+                .unwrap()
+                .to_owned();
+            let mode = u32_at(entry + 38) >> 16;
+            let local = u32_at(entry + 42) as usize;
+            let size = u32_at(local + 22) as usize;
+            let data_at = local + 30 + usize::from(u16_at(local + 26));
+            let data = &zip[data_at..][..size];
+            assert_eq!(!crc32_update(!0, data), u32_at(local + 14));
+            found.push((name, data.to_vec(), mode));
+            entry += 46 + name_len;
+        }
+        assert_eq!(found[0].0, "My Game/assets/art/a.txt");
+        assert_eq!(found[0].1, b"hello");
+        assert_eq!(found[1].0, "My Game/game");
+        assert_eq!(found[1].1, b"#!run");
+        #[cfg(unix)]
+        assert_eq!(found[1].2 & 0o777, 0o755);
+        zip_folder(&folder, &root.join("again.zip")).unwrap();
+        assert_eq!(std::fs::read(root.join("again.zip")).unwrap(), zip);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn export_excludes_match_paths_and_leave_the_rest() {
         assert!(path_matches("assets/source/**", "assets/source/a/b.psd"));
         assert!(path_matches("**/*.psd", "assets/art/hero.psd"));
@@ -3001,13 +3226,32 @@ mod tests {
         assert_eq!(removed, ["assets/hero.png", "scenes/level.rscene"]);
         assert!(export.join("game").is_file());
         assert!(export.join("build/main.rscene.bin").is_file());
+
+        std::fs::write(export.join("assets/hero.png"), "png").unwrap();
+        std::fs::write(export.join("scenes/level.rscene"), "{}").unwrap();
+        assert_eq!(
+            pack_export(&export).unwrap(),
+            ["assets.rpak", "scenes.rpak"]
+        );
+        assert!(!export.join("assets").exists());
+        assert!(!export.join("scenes").exists());
+        assert_eq!(
+            crate::assets::read_file(&export.join("assets/hero.png")).unwrap(),
+            b"png"
+        );
+        assert_eq!(
+            crate::assets::read_file(&export.join("scenes/level.rscene"))
+                .unwrap(),
+            b"{}"
+        );
         let _ = std::fs::remove_dir_all(export);
 
         let preset: ExportPreset = serde_json::from_str(
-            r#"{"target": "x86_64-pc-windows-gnu", "features": ["steam"], "exclude": ["**/*.psd"]}"#,
+            r#"{"target": "x86_64-pc-windows-gnu", "features": ["steam"], "exclude": ["**/*.psd"], "pack": true}"#,
         )
         .unwrap();
         assert_eq!(preset.features, ["steam"]);
+        assert!(preset.pack);
         assert!(
             serde_json::from_str::<ExportPreset>(r#"{"exclud": []}"#).is_err(),
             "a misspelt key is an error, not a silent no-op"
