@@ -905,9 +905,51 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.decal",
-        summary: "Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain. color (linear rgba) multiplies the image and its alpha scales the coverage; an empty texture paints plain color. Surfaces facing away from the projection are left alone. Later decals in entity order paint over earlier ones; the renderer uses the first sixteen (eight at Balanced, four at Eco), with at most four distinct images.",
+        summary: "Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain. color (linear rgba) multiplies the image and its alpha scales the coverage; an empty texture paints plain color. roughness (0..1, null keeps the surface's) is painted by the same coverage: a low value makes a wet stain or a puddle shine. On a child of a rusting.fracture object, survive_fracture (default true) moves the decal onto the nearest piece when the object breaks; false removes it. Surfaces facing away from the projection are left alone. Later decals in entity order paint over earlier ones; the renderer uses the first sixteen (eight at Balanced, four at Eco), with at most four distinct images.",
         gpu: "a box test per decal per lit pixel, plus one texture sample inside a box",
-        example: || json!({"texture": "decals/crack.png", "color": [1.0, 1.0, 1.0, 1.0], "extents": [0.5, 0.5, 0.25]}),
+        example: || json!({"texture": "decals/crack.png", "color": [1.0, 1.0, 1.0, 1.0], "extents": [0.5, 0.5, 0.25], "roughness": null, "survive_fracture": true}),
+    },
+    ComponentSection {
+        key: "rusting.sprite",
+        summary: "A flat image of size (world units, before the object's scale) in the object's XY plane, centered on it and facing +Z: a 2D character, a pickup, a background card. texture is a path under assets/; empty draws plain color, and color (linear rgba) multiplies the image. region [u0, v0, u1, v1] (v down) picks one frame of a sprite sheet; flip_x and flip_y mirror it. Sprites draw in canvas order: lower layer first, then lower world z, then entity order, so a higher layer covers a lower one whatever its z. They draw after tone mapping over the 3D frame, without a depth test, so their colors stay exact and 3D meshes never hide them. Set in_scene to draw a sprite inside the 3D scene instead: before tone mapping, under every canvas sprite, hidden behind nearer opaque meshes (a billboard tree, a paper character in a 3D room). Consecutive sprites that share an image and normal map draw as one batch. normal_map is an optional tangent-space normal map (green up, read as linear data) that rusting.light_2d shades.",
+        gpu: "one instanced draw per run of sprites sharing an image",
+        example: || json!({"texture": "sprites/hero.png", "color": [1.0, 1.0, 1.0, 1.0], "size": [1.0, 1.0], "region": [0.0, 0.0, 0.25, 1.0], "flip_x": false, "flip_y": false, "layer": 0, "normal_map": "", "in_scene": false}),
+    },
+    ComponentSection {
+        key: "rusting.sprite_animation",
+        summary: "Plays a sprite sheet on the rusting.sprite of the same object by setting its region. The sheet is a grid of columns x rows equal frames, numbered row by row from the top left; the animation shows count frames starting at first, fps frames per second of fixed time, so it replays the same at the same tick. looping starts over after the last frame; false holds it. Swap first and count from code to change animations, for example walk and jump rows.",
+        gpu: NO_GPU,
+        example: || json!({"columns": 4, "rows": 2, "first": 0, "count": 4, "fps": 10.0, "looping": true}),
+    },
+    ComponentSection {
+        key: "rusting.light_2d",
+        summary: "A round light for rusting.sprite objects, centered on this object: it adds color (linear rgb) times intensity to sprites within radius world units in the XY plane, fading smoothly to nothing at the edge. Lights add over rusting.ambient_2d. height (world units above the sprites) only matters for sprites with a normal_map, which face toward or away from the light. The renderer uses the first sixteen in entity order.",
+        gpu: "a distance test per light per sprite pixel",
+        example: || json!({"color": [1.0, 0.8, 0.5], "intensity": 1.5, "radius": 4.0, "height": 0.5}),
+    },
+    ComponentSection {
+        key: "rusting.light_occluder_2d",
+        summary: "A closed polygon (points, in the object's XY plane) that casts shadows from every rusting.light_2d: a sprite pixel whose straight line to a light crosses one of its edges gets none of that light. Pixels inside the polygon are shadowed too. The renderer uses the first 256 edges in entity order.",
+        gpu: "an edge crossing test per edge per light per sprite pixel",
+        example: || json!({"points": [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]}),
+    },
+    ComponentSection {
+        key: "rusting.camera_2d",
+        summary: "Put on the object with rusting.camera (no parent). Each frame the view center moves toward the object named target plus offset, closing about two thirds of the gap every smoothing seconds (0 snaps). With an orthographic camera, limits [min_x, min_y, max_x, max_y] keep the whole view inside that world rectangle (a view wider than it centers on it), and pixels_per_unit above 0 makes it pixel-perfect: the view height zooms so each art pixel covers a whole number of screen pixels, and the center snaps to screen pixels.",
+        gpu: NO_GPU,
+        example: || json!({"target": "Player", "offset": [0.0, 1.0], "smoothing": 0.15, "limits": [-10.0, -2.0, 40.0, 12.0], "pixels_per_unit": 16.0}),
+    },
+    ComponentSection {
+        key: "rusting.particles_2d",
+        summary: "Put on an object with rusting.particle_emitter: its particles (CPU or GPU simulated) draw in the 2D pass with rusting.sprite objects instead of in the 3D scene, in canvas order at layer and the emitter's world z, after tone mapping and without a depth test. Custom particle shaders are not used in the 2D pass.",
+        gpu: "one 2D-pass draw per emitter",
+        example: || json!({"layer": 1}),
+    },
+    ComponentSection {
+        key: "rusting.ambient_2d",
+        summary: "The light every rusting.sprite gets before any rusting.light_2d: color (linear rgb) multiplies each sprite, so a dark value makes a night scene that only lights reveal. Without one, sprites keep their full color and lights brighten them. The first one in entity order is used.",
+        gpu: NO_GPU,
+        example: || json!({"color": [0.15, 0.15, 0.25]}),
     },
     ComponentSection {
         key: "rusting.post_volume",
@@ -1037,9 +1079,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.particle_emitter",
-        summary: "Particle effects: rate and bursts per cycle, an emission shape (Point, Box, Sphere, Cone, Circle), random [min, max] ranges for lifetime, speed, size, rotation and spin, gravity, drag, wind and turbulence, size and color keys over life, fades, World or Local space, Billboard or Velocity facing, Alpha or Additive blend. Particles are not entities; each emitter is one instanced draw. Random values come from the scene seed, the emitter's SceneId and the fixed tick. simulation Gpu moves up to 1048576 particles in a compute shader each frame (no turbulence, start colors, rotation, spin, Local space, Velocity facing or collision restarts, and alpha particles are not sorted); GPU force fields push its particles, collide bounces them off physics colliders, trail draws each particle's last seconds of path, and on_parent_death makes a GPU child emitter spawn that many particles where each parent GPU particle dies (fireworks). impact_speed > 0 spawns impact_count particles at each contact of the emitter's CPU body closing at least that fast, launched along the contact normal away from what it hit (sparks, dust); on_settle spawns impact_count at the body when it falls asleep (debris settling). Game code calls play(), pause(), stop() or restart(). `rusting effect list` shows ready presets.",
+        summary: "Particle effects: rate and bursts per cycle, an emission shape (Point, Box, Sphere, Cone, Circle), random [min, max] ranges for lifetime, speed, size, rotation and spin, gravity, drag, wind and turbulence, size and color keys over life, fades, World or Local space, Billboard or Velocity facing, Alpha or Additive blend. Particles are not entities; each emitter is one instanced draw. Random values come from the scene seed, the emitter's SceneId and the fixed tick. simulation Gpu moves up to 1048576 particles in a compute shader each frame (no turbulence, start colors, rotation, spin, Local space, Velocity facing or collision restarts, and alpha particles are not sorted); GPU force fields push its particles, collide bounces them off physics colliders, trail draws each particle's last seconds of path, and on_parent_death makes a GPU child emitter spawn that many particles where each parent GPU particle dies (fireworks). impact_speed > 0 spawns impact_count particles at each contact of the emitter's CPU body closing at least that fast, launched along the contact normal away from what it hit (sparks, dust); on_settle spawns impact_count at the body when it falls asleep (debris settling); on_fracture, on a child of a rusting.fracture object, spawns impact_count at the break point when the object breaks, launched toward the emitter, which moves onto the nearest piece. Game code calls play(), pause(), stop() or restart(). `rusting effect list` shows ready presets.",
         gpu: "one instanced draw of up to max_particles quads per emitter, rebuilt every frame; past the quality profile's particle budget (1048576 at High, 524288 at Balanced, 131072 at Eco, all emitters together) each emitter draws the same share",
-        example: || json!({"autoplay": true, "rate": 20.0, "bursts": [], "max_particles": 500, "prewarm": false, "duration": 5.0, "looping": true, "on_collision": false, "impact_speed": 0.0, "impact_count": 10, "on_settle": false, "shape": "Sphere", "shape_size": [0.5, 0.5, 0.5], "lifetime": [1.0, 2.0], "speed": [0.5, 1.5], "size": [0.05, 0.1], "rotation": [0.0, 0.0], "spin": [0.0, 0.0], "direction": [0.0, 1.0, 0.0], "spread": 0.5, "gravity": 0.0, "drag": 0.5, "wind": [0.0, 0.0, 0.0], "turbulence": 0.5, "turbulence_frequency": 1.0, "size_over_life": [{"t": 0.0, "value": 1.0}, {"t": 1.0, "value": 0.2}], "color_over_life": [{"t": 0.0, "color": [1.0, 0.8, 0.3, 1.0]}, {"t": 1.0, "color": [1.0, 0.2, 0.1, 1.0]}], "start_colors": [], "emissive": 3.0, "fade_in": 0.1, "fade_out": 0.4, "space": "World", "facing": "Billboard", "stretch": 0.1, "blend": "Additive", "sprite": "Soft", "simulation": "Cpu", "collide": false, "trail": 0.0, "on_parent_death": 0}),
+        example: || json!({"autoplay": true, "rate": 20.0, "bursts": [], "max_particles": 500, "prewarm": false, "duration": 5.0, "looping": true, "on_collision": false, "impact_speed": 0.0, "impact_count": 10, "on_settle": false, "on_fracture": false, "shape": "Sphere", "shape_size": [0.5, 0.5, 0.5], "lifetime": [1.0, 2.0], "speed": [0.5, 1.5], "size": [0.05, 0.1], "rotation": [0.0, 0.0], "spin": [0.0, 0.0], "direction": [0.0, 1.0, 0.0], "spread": 0.5, "gravity": 0.0, "drag": 0.5, "wind": [0.0, 0.0, 0.0], "turbulence": 0.5, "turbulence_frequency": 1.0, "size_over_life": [{"t": 0.0, "value": 1.0}, {"t": 1.0, "value": 0.2}], "color_over_life": [{"t": 0.0, "color": [1.0, 0.8, 0.3, 1.0]}, {"t": 1.0, "color": [1.0, 0.2, 0.1, 1.0]}], "start_colors": [], "emissive": 3.0, "fade_in": 0.1, "fade_out": 0.4, "space": "World", "facing": "Billboard", "stretch": 0.1, "blend": "Additive", "sprite": "Soft", "simulation": "Cpu", "collide": false, "trail": 0.0, "on_parent_death": 0}),
     },
     ComponentSection {
         key: "rusting.particle_shader",
@@ -1085,15 +1127,21 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.fluid_block",
-        summary: "Particle fluid: a block of count_x by count_y by count_z particles resting on the floor of a box centered on the entity. It runs every fixed tick, floats and sinks dynamic bodies with sphere colliders, and draws a smooth water surface when visible (show_particles adds a sphere per particle). solver Particles (position based) suits small splashy volumes of a few thousand particles; Grid runs FLIP on a grid over the box and carries large water volumes (softer, slowly loses volume); Granular makes grains with friction (sand, gravel, rubble) that pile into heaps, steeper as friction grows. CPU only, deterministic.",
+        summary: "Particle fluid: a block of count_x by count_y by count_z particles resting on the floor of a box centered on the entity. It runs every fixed tick, floats and sinks dynamic bodies with sphere colliders, and draws a smooth surface when visible, translucent water for liquids and opaque sand for Granular (show_particles adds a sphere per particle). solver Particles (position based) suits small splashy volumes of a few thousand particles; Grid runs FLIP on a grid over the box and carries large water volumes (softer, slowly loses volume); Granular makes grains with friction (sand, gravel, rubble) that pile into heaps, steeper as friction grows. CPU only, deterministic.",
         gpu: NO_GPU,
         example: || json!({"spacing": 0.1, "count_x": 6, "count_y": 6, "count_z": 6, "container_half_extents": [0.5, 0.5, 0.5], "iterations": 4, "viscosity": 0.01, "solver": "Particles", "friction": 0.6, "visible": true, "show_particles": false}),
     },
     ComponentSection {
         key: "rusting.soft_block",
-        summary: "XPBD soft body: a block of count_x by count_y by count_z cubes of spacing metres centered on the entity, each cut into six tetrahedra that keep their edge lengths and volumes. softness (edge compliance) 0 is rigid and 1e-3 a wobbly jelly; squash lets the volume change; tear_strain above 0 tears edges stretched past rest times 1 + tear_strain. It falls under gravity every fixed tick, keeps out of sphere, box and capsule colliders and pushes dynamic bodies back. visible draws its outer faces (and the cuts once torn). CPU only, deterministic; at most 4096 particles.",
+        summary: "XPBD soft body: a block of count_x by count_y by count_z cubes of spacing metres centered on the entity, each cut into six tetrahedra that keep their edge lengths and volumes. softness (edge compliance) 0 is rigid and 1e-3 a wobbly jelly; squash lets the volume change; tear_strain above 0 tears edges stretched past rest times 1 + tear_strain. It falls under gravity every fixed tick, keeps out of sphere, box and capsule colliders and pushes dynamic bodies back. visible draws its outer faces (and the cuts once torn) in color (linear RGBA) times texture, an image laid once on each side of the block, upright on the walls, that squashes and tears with it. CPU only, deterministic; at most 4096 particles.",
         gpu: NO_GPU,
-        example: || json!({"spacing": 0.1, "count_x": 4, "count_y": 4, "count_z": 4, "density": 1000.0, "softness": 0.0001, "squash": 0.0, "damping": 1.0, "tear_strain": 0.0, "substeps": 10, "visible": true}),
+        example: || json!({"spacing": 0.1, "count_x": 4, "count_y": 4, "count_z": 4, "density": 1000.0, "softness": 0.0001, "squash": 0.0, "damping": 1.0, "tear_strain": 0.0, "substeps": 10, "visible": true, "color": [0.35, 0.8, 0.3, 1.0], "texture": ""}),
+    },
+    ComponentSection {
+        key: "rusting.text",
+        summary: "Text standing in the world: signs, labels, numbers over objects. text (lines split at \\n) is drawn with the built-in 5 by 7 pixel font as a flat mesh in the entity's XY plane, centered on it and read from +Z (turn the entity to aim it); size is the height of a capital in metres. It draws unlit in color (linear RGBA), so it reads the same in light and shadow, and redraws when the component changes. Characters outside printable ASCII draw as ?. No font file or other font.",
+        gpu: NO_GPU,
+        example: || json!({"text": "SHOP", "size": 0.5, "color": [1.0, 0.85, 0.3, 1.0]}),
     },
     ComponentSection {
         key: "rusting.cloth",

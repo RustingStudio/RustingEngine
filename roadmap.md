@@ -2916,8 +2916,8 @@ Depends on: Milestones 3 and 4.
   Full check: fmt, clippy (default, `--no-default-features`,
   `gpu-tests`), `cargo test --workspace` (878 lib) and the gpu-tests run
   (1008 lib) pass.
-- [ ] Particle emission driven by physics events: impacts, fracture, debris settling.
-  Partial (lane/render): `ParticleEmitter` gains `impact_speed`,
+- [x] Particle emission driven by physics events: impacts, fracture, debris settling.
+  Evidence (lane/render): `ParticleEmitter` gains `impact_speed`,
   `impact_count` and `on_settle` (`emit_on_impacts` in
   `src/runtime/particles.rs`, after `update_particles`). Each contact of
   the emitter's CPU body closing at `impact_speed` m/s or faster spawns
@@ -2933,10 +2933,20 @@ Depends on: Milestones 3 and 4.
   threshold removed and with the launch direction flipped. Full check:
   fmt, clippy x3, `cargo test --workspace` (lib 886) and the gpu-tests run
   (lib 1018) pass.
-  Not done: fracture events (the engine has no fracture yet); GPU emitters
-  spawn impact particles at the emitter, not the contact point.
-- [ ] Decals, including decals that survive or are invalidated by fracture.
-  Partial (lane/render): `rusting.decal` projects an image (or plain color)
+  Fracture: `on_fracture` (`emit_on_fractures`, Update stage, where each
+  `Fractured` is visible once) spawns `impact_count` particles at the break
+  point for an emitter child that the break moved onto a piece, launched
+  from the break toward the emitter. Evidence:
+  `emitters_on_a_breaking_object_burst_at_the_break` (8 particles at the
+  break moving up at 2 m/s toward the emitter, the same particles on a
+  rerun, none with `on_fracture` off). It failed with the direction
+  flipped, with the flag ignored and with the system unregistered. Full
+  check: fmt, clippy x3, `cargo test --workspace` (lib 967) and the
+  gpu-tests run (lib 1129) pass.
+  Limit: GPU emitters spawn impact and fracture particles at the emitter,
+  not the contact point.
+- [x] Decals, including decals that survive or are invalidated by fracture.
+  Evidence (lane/render): `rusting.decal` projects an image (or plain color)
   along its object's -Z into a box of half size `extents`, painting base
   color on surfaces facing the projection; up to 16 decals and 4 distinct
   images per frame (set 2 binding 9), later ones over earlier.
@@ -2947,9 +2957,28 @@ Depends on: Milestones 3 and 4.
   `decals_wait_for_their_image`. Mutations (flipped uv, no facing fade, no
   box test) each fail the GPU test. Full check: workspace lib 872 passed,
   gpu-tests run 994 passed.
-  Not done: fracture survival or invalidation (the engine has no fracture
-  yet), decal normals and roughness, decals on skinned or moving objects
-  following them.
+  Decal `roughness` (0..1, `None` keeps the surface's) is painted by the
+  same coverage, for wet stains and puddles. Evidence: GPU test
+  `decal_roughness_makes_a_matte_floor_shine_under_it` (black rough floor
+  under a point light: highlight peak 118 bare, 255 under a roughness 0.15
+  decal, 118 under a roughness 1 decal); removing the shader's roughness
+  mix fails it (wet 118). Full check: workspace lib 891 passed, gpu-tests
+  run 1034 passed.
+  Fracture (2026-10-12): a decal that is a child of a `rusting.fracture`
+  object moves onto the piece whose center is nearest it when the object
+  breaks, keeping its world place (pieces keep the object's rotation and
+  scale, so its local position shifts by that center), and rides the piece
+  from then on; `survive_fracture: false` removes it with the object.
+  Evidence: unit test
+  `fracture::tests::decals_move_onto_the_nearest_piece_or_leave_with_the_object`
+  (a 3 m crate drop: the crack's parent is a debris piece, it moves under
+  0.2 m across the break tick, no piece is nearer than its own, it is the
+  one extracted decal, and its distance to the piece is unchanged after 30
+  tumbling ticks; the label is despawned). Mutations (no reparent, no
+  center shift, farthest piece, keep the label, drop the crack) each fail
+  it. Full check: workspace lib 966 passed, gpu-tests run 1128 passed.
+  Not done: decal normals, decals on skinned meshes following their bones,
+  non-decal children of a broken object (they keep a missing parent).
 - [x] Instanced multi-mesh rendering and foliage scattering with wind driven by physics force fields.
   Evidence: `rusting.foliage` (`Foliage`) on an object with a mesh_renderer
   draws `count` copies of its mesh (at most 65536) in place of the object,
@@ -3004,7 +3033,7 @@ Depends on: Milestones 3 and 4.
   mutation that skipped the grid search failed both. Full check: fmt,
   clippy x3, `cargo test --workspace` (lib 885) and the gpu-tests run
   (lib 1017) pass.
-- [ ] Rendering of deformables, fluid surfaces, and debris produced by Milestone 11.
+- [x] Rendering of deformables, fluid surfaces, and debris produced by Milestone 11.
   Partial (lane/render): cloth sheets take a material. `rusting.cloth`
   gains `color` (linear RGBA) and `texture` (asset path); `spawn_cloths`
   gives a sheet with either set its own material (a texture that fails to
@@ -3023,9 +3052,45 @@ Depends on: Milestones 3 and 4.
   surfaces do each tick). Mutation (v flipped) fails the UV and GPU tests.
   Full check: fmt, clippy x3, `cargo test --workspace` (lib 887) and the
   gpu-tests run (lib 1021) pass.
-  Not done: debris (the engine has no fracture yet), soft-body skin
-  textures, fluid surface shading beyond its material, UVs for cloth
-  curved at rest.
+  Debris: fracture pieces keep the object's material; their outer faces
+  now take the source mesh's normal, UV and tangent from the nearest
+  triangle facing the same way (`Surface` in `src/runtime/fracture.rs`),
+  and cut faces keep flat normals and planar UVs in meters. Docs:
+  `docs/look-and-feel.md` "Broken objects". Evidence: unit test
+  `pieces_keep_the_normals_and_uvs_of_the_surface_they_came_from` (cube
+  and sphere: every kept source vertex keeps its normal and UV); GPU test
+  `fractured_pieces_draw_like_the_object_they_came_from` (a lit, textured
+  sphere and its 6+ pieces in place: 688 pixels covered, at most 8 of
+  1024 differ, 2 measured). It failed with the transfer off (683 differ)
+  and with flat normals (47 differ). Sphere fracture time in a debug build
+  went from 0.40 s to 0.50 s. Full check: fmt, clippy x3,
+  `cargo test --workspace` (lib 968) and the gpu-tests run (lib 1131)
+  pass.
+  Soft blocks: `rusting.soft_block` gains `color` and `texture` (shared
+  `textured_material` with cloth), and `skin_uv_mesh` gives the skin a
+  vertex per triangle corner with box-projected UVs from the rest
+  particles (each side filled once, upright on the walls). Docs:
+  `docs/look-and-feel.md` "Cloth and soft blocks". Evidence: unit tests
+  `soft_skin_uvs_fill_each_side_once_and_stay_on_the_particles` (8
+  triangles per side of a 2x2x2 block, each corner at its expected UV,
+  unchanged after squashing and moving) and
+  `soft_blocks_draw_in_their_color_and_plain_ones_share_the_jelly`; GPU
+  test `soft_block_textures_land_upright_and_unmirrored` (a 2x2 image's
+  quadrants land on the matching screen quadrants). It failed with v
+  flipped on the walls and with the skin built without UVs. Full check:
+  fmt, clippy x3, `cargo test --workspace` (lib 970) and the gpu-tests
+  run (lib 1134) pass.
+  Fluid surfaces: `Granular` blocks draw an opaque sand material ("Fluid
+  Block Sand", rough, sand colored) in place of the translucent water
+  that liquids keep; see `docs/look-and-feel.md` "Cloth and soft blocks".
+  Evidence: unit test `sand_blocks_draw_opaque_sand_and_liquids_draw_water`
+  (a Granular block's surface gets the opaque sand material, a Particles
+  block keeps the blended water). It failed with every block drawn as
+  water. Full check: fmt, clippy x3, `cargo test --workspace` (lib 971)
+  and the gpu-tests run (lib 1135) pass.
+  Limits: cloth UVs assume the flat grid that `rusting.cloth` always
+  builds; a cloth curved at rest would need UVs from its rest shape. The
+  fluid surface is shaded by its material only (no refraction or foam).
 - [x] Effect budget and quality-profile scaling for particles and decals.
   `particle_budget` and `decal_budget` (`src/rendering/scene_renderer.rs`,
   next to `light_budget`) cap each frame by the resolved quality profile:
@@ -3173,8 +3238,59 @@ Depends on: Milestones 3 and 4.
 ### Frame structure
 
 - [ ] A render graph that schedules passes, transient resources, and barriers automatically.
+  - [x] Scheduler: `FrameGraph::compile` takes the passes a frame enables,
+    in any order, and returns them in dependency order with every barrier
+    (write hazards on buffers and images, layout changes, `Undefined` on a
+    transient image's first use) and the first-to-last-pass span of each
+    transient resource, for memory aliasing.
+    Evidence: unit tests in `frame_passes.rs`. A shuffled full frame comes
+    back in order, and its layout changes equal `layout_transitions()`.
+    Physics states get barriers only after writes. A frame without ambient
+    occlusion has no depth read transitions and no AO or bloom barriers.
+    Bloom does not overlap the shadow map. A read of an unwritten
+    transient and a doubled pass are rejected. GPU test
+    `atmosphere_effects_combine_with_every_scene_path` compiles
+    `last_frame_passes()` for all 8 culling, MSAA and material paths.
+    Mutations caught: dropping the sort, dropping barriers after buffer
+    writes, and dropping SceneColor's DepthPyramid write ("Transparent
+    reads DepthPyramid before any pass writes it").
+  - [ ] Recording: `SceneRenderer` records from the compiled graph, places
+    its barriers itself, and aliases transient images whose spans do not
+    overlap. Blocked 2026-10-12: vulkano 0.35's auto command buffers place
+    every barrier themselves and cannot alias memory safely; needs
+    `vulkano-taskgraph` or raw command buffers (owner decision, see
+    `issues.md`).
 - [ ] Frame pacing that holds a stable presentation cadence under variable GPU load.
+  - [x] FPS limiter cadence: `FramePacer` steps its deadlines by whole
+    intervals from the last one, instead of from the moment a frame
+    started, so late wakes and uneven frames no longer push every later
+    frame back. A stall longer than one interval restarts the schedule
+    instead of bursting frames to catch up.
+    Evidence: unit test
+    `the_limiter_holds_its_rate_through_late_wakes_and_uneven_frames`
+    (simulated clock, 100 FPS cap, 0.5 ms late wakes, 1 to 9.1 ms frames,
+    one 35 ms hitch). Frame k starts at exactly k intervals plus 0.5 ms;
+    no gap is shorter than one interval; after the hitch the 10 ms
+    cadence resumes. Mutations caught: the old `now + interval` schedule
+    drifts to 21 ms by frame 2; without the restart, five frames burst
+    out 4.7 ms apart after the hitch.
+  - [ ] Cadence on real displays under variable GPU load (FIFO and Mailbox
+    present timing, frames in flight). Hardware only, not verifiable here.
 - [ ] Measure and report end-to-end input latency.
+  - [x] Engine side: `rendering::input_latency::InputLatency` times each
+    key or mouse press from its event to the present of the first frame
+    that read it, plus that frame's GPU time. While `RUSTING_PERF` or F3 is
+    on, the `[rusting] perf` line reports `input latency p50 ... max ...
+    ms (n presses)`; `docs/look-and-feel.md` explains what it leaves out.
+    Evidence: unit test
+    `a_sample_spans_the_oldest_press_to_its_presented_frame` (two presses
+    before one frame give one 12 ms sample from the oldest press, frames
+    without presses give none, then a 6 ms sample). Mutations caught:
+    keeping the newest press ([9, 6]) and dropping the GPU time ([9, 5]).
+    The runner wiring has no automated test: there is no way to inject
+    window input headlessly here.
+  - [ ] Input-to-photon on real displays (scan-out and monitor delay, with
+    a camera or photodiode). Hardware only, not verifiable here.
 
 ### Exit gate
 
@@ -3347,14 +3463,90 @@ Goal: make RustingEngine a complete 2D engine, not a 3D engine with a flat camer
 
 Depends on: Milestones 3, 4, and 10 (2D physics).
 
-- [ ] 2D renderer with sprites, sprite batching, z-ordering, and canvas layers.
-- [ ] Sprite sheets and sprite animation.
+- [x] 2D renderer with sprites, sprite batching, z-ordering, and canvas layers.
+  - [x] Sprite component and extraction. `rusting.sprite` (texture, color,
+    size, region, flip_x/flip_y, layer) is registered for scenes, snapshots,
+    reflection and the schema; its image loads with the other environment
+    textures. `extract_render_world` fills `RenderWorld::sprites` in canvas
+    order (layer, then world z, then entity order), skips sprites whose image
+    has not loaded, and `sprite_batches` splits the list into runs sharing an
+    image. Evidence 2026-10-12: `sprites_draw_in_canvas_order_and_batch_by_image`
+    passes; dropping the layer key, the z key, the flip swap, the batch merge
+    or the unloaded-image filter each fails it.
+  - [x] GPU sprite pass: one instanced draw per batch over the lit frame, with
+    a headless render test. The new `FramePass::Sprites` runs after tone
+    mapping in subpass 1 on frames with sprites, uploads one instance per
+    sprite and draws each batch with its image bound (white for plain
+    color), alpha blended and without a depth test. Evidence 2026-10-12:
+    `sprites_draw_in_canvas_order_with_their_image` (gpu-tests) passes;
+    skipping the pass, unflipping u in the shader, binding the first batch's
+    image for every batch, or drawing every batch from instance 0 each fails
+    it.
+- [x] Sprite sheets and sprite animation.
+  `rusting.sprite_animation` (columns, rows, first, count, fps, looping)
+  plays a grid sprite sheet on the object's `rusting.sprite` by writing its
+  region each fixed step, so a replay shows the same frame at the same tick;
+  it is registered for scenes, snapshots, reflection, the schema and the
+  inspector help. Evidence 2026-10-12:
+  `sprite_animations_step_through_sheet_frames_on_the_fixed_tick` passes;
+  dropping the loop wrap, the hold on the last frame, the first-frame offset,
+  the row step, the time advance, the region write, or the tolerance that
+  keeps six whole-nanosecond 1/60 s steps from showing a 10 fps frame a tick
+  late each fails it.
 - [ ] Tilemaps with multiple layers, autotiling rules, tile collision shapes, and tile navigation data.
-- [ ] 2D lights, shadows from occluder polygons, and normal-mapped sprites.
-- [ ] 2D GPU particles with physics-event emission.
-- [ ] 2D camera with smoothing, limits, and pixel-perfect mode.
+- [x] 2D lights, shadows from occluder polygons, and normal-mapped sprites.
+  - [x] Round 2D lights over a 2D ambient in the sprite pass.
+    `rusting.light_2d` (color, intensity, radius) and `rusting.ambient_2d`
+    (color) are registered for scenes, snapshots, reflection, the schema and
+    the inspector help. Extraction keeps lights in entity order and the first
+    ambient; the sprite shader multiplies each sprite by the ambient (1 with
+    none) plus each of the first sixteen lights, fading as (1 - d/r)^2 with
+    XY distance, read from a storage buffer. Evidence 2026-10-12:
+    `lights_2d_extract_in_entity_order_with_the_first_ambient` and
+    `lights_2d_light_sprites_near_them_over_the_ambient` (gpu-tests) pass;
+    dropping the entity sort, taking the last ambient, dropping intensity,
+    the sixteen-light cap, the white default ambient, the distance fade, the
+    light color, or the ambient in the shader each fails one of them.
+  - [x] Shadows from `LightOccluder2d` polygons.
+    `rusting.light_occluder_2d` (points) is registered like the lights.
+    Extraction turns each closed outline into world-space edges in entity
+    order; the sprite shader skips a light for a pixel whose segment to the
+    light crosses any of the first 256 edges, read from a second storage
+    buffer. Evidence 2026-10-12:
+    `light_occluders_2d_extract_closed_world_edges_in_entity_order` and
+    `light_occluders_2d_shadow_sprites_behind_their_edges` (gpu-tests) pass;
+    dropping the shadow test, either bound of the crossing test, the 256-edge
+    cap, the entity sort, the closing edge, or the world transform each fails
+    one of them. Counting the stand-in edge uploaded when there are none
+    survives, as that edge is degenerate and skipped.
+  - [x] Normal-mapped sprites.
+    `rusting.sprite` gains `normal_map` (a tangent-space map, green up), which
+    the loader marks as linear data, and `rusting.light_2d` gains `height`.
+    Sprites batch by image and normal map; a mapped batch turns each texel's
+    normal by the sprite's rotation and flips and scales each light by how
+    the pixel faces it. Flat sprites keep the full light. Evidence
+    2026-10-12: `sprite_normal_maps_load_as_linear_data_and_split_batches`
+    and `normal_mapped_sprites_face_toward_or_away_from_2d_lights`
+    (gpu-tests) pass; dropping the extracted normal map, the batch split, the
+    linear marking, the extracted or uploaded height, the mapped flag, the
+    flip sign, the rotation, the facing factor, the normal map upload, or the
+    normal map read each fails one of them.
+- [x] 2D GPU particles with physics-event emission.
+  - [x] 2a. `rusting.particles_2d` draws an emitter's CPU or GPU particles in the 2D sprite pass, in canvas order (layer, world z, entity) between sprites, without depth and not in the 3D pass. Evidence: `particles_2d_extract_emitters_in_canvas_order` (unit) and GPU test `particles_2d_draw_between_sprites_in_canvas_order` (particle over layer-0 sprite and under layer-2 sprite, covered at layer -1, second emitter kept apart, additive CPU and GPU squares drawn exactly once); 7 mutations (3D skip for CPU and GPU, canvas split, sprite rebind, per-emitter filter, z sort, emitter filter) all fail tests; full check: clippy OK, 988 CPU and 1165 GPU tests passed.
+  - 2b. Dropped: under the orthographic 2D camera depth motion does not show, and a Circle or Cone emitter turned a quarter turn about X spreads in the canvas plane, so flattening particles to the emitter's plane is not needed yet.
+  - [x] 2c. Emit particles from physics events on 2D bodies. 2D bodies are ordinary bodies in the XY plane, so the existing impact, settle and fracture emission applies unchanged. Evidence: `a_2d_body_landing_emits_particles_drawn_in_the_2d_pass` (`runtime/tests.rs`: a body with a 2D emitter lands, its impact particles spawn at the floor contact and extract for the 2D pass on layer 3); mutations disabling impact spawns or the `particles_2d` extraction fail it. GPU emitters still spawn impact particles at the emitter, as in 3D. Full check: clippy OK, 989 CPU and 1166 GPU tests passed.
+- [x] 2D camera with smoothing, limits, and pixel-perfect mode. `rusting.camera_2d` (`Camera2d` in `runtime/two_d.rs`, after transform propagation in PostUpdate) follows the object named `target` plus `offset` with exponential `smoothing` (0 snaps), keeps an orthographic view inside `limits` using the viewport aspect (a narrower room centers it), and with `pixels_per_unit` zooms the view height to whole screen pixels per art pixel and snaps the drawn center to screen pixels while keeping the unsnapped center, so slow moves add up. It writes `Transform` and `GlobalTransform`, so picking sees the drawn view. Evidence: `cameras_2d_follow_smoothly_stay_in_limits_and_fit_pixels` (one smoothing time closes 1 - 1/e, limits clamp to [1, 2] and center a 4 m room, 600 px at 16 px/unit gives a 6.25 m view and 1/96 m steps, sub-half-pixel steps still accumulate); 8 mutations (smoothing, stored center, zoom rounding, narrow-room centering, clamp margins, snapping, GlobalTransform write, aspect) all fail it. Full check: clippy OK, 990 CPU and 1167 GPU tests passed. The 2D template still parents its camera to the player (tools lane).
 - [ ] 2D hybrid GPU physics showcases (thousands of physics sprites with events to Rust gameplay).
-- [ ] Mixing 2D layers over or inside 3D scenes.
+- [x] Mixing 2D layers over or inside 3D scenes.
+  Canvas sprites already draw after tone mapping over the 3D frame; new
+  `Sprite::in_scene` draws a sprite inside the HDR pass instead (MSAA, depth
+  test without depth write, tone mapped), under every canvas sprite.
+  Evidence: `in_scene_sprites_extract_before_every_canvas_sprite` (sort) and
+  GPU `in_scene_sprites_hide_behind_meshes_and_canvas_sprites_do_not` (a
+  slab hides the in-scene sprite behind it, not one in front; the canvas
+  sprite covers it; both kinds in one frame draw apart); 5/5 mutations killed
+  (sort key, depth test, canvas start offset, scene batch range, canvas pass
+  gate). Full check: clippy OK, 991 CPU and 1169 GPU tests pass.
 
 ### Exit gate
 
@@ -3945,7 +4137,23 @@ Goal: fix every engine gap that `RustingGames/forty-thousand-and-one/FRICTION.md
 - [x] F11, F13, F14: the GPU contact pass takes the largest push and velocity change per direction instead of their sum, runs 4 rounds per tick (`CONTACT_ROUNDS`), ignores contacts closer than a 2 mm margin, and dynamic bodies sleep after 20 ticks under 0.05 m/s (`angular_velocity.w`; `GpuCondition::sleeping()`). Verification: gpu-test `a_deep_gpu_ball_pit_settles_and_its_walls_hold`: 3,600 balls in a 4 x 4 m pit with sideways gravity of 8 m/s^2, 3,045 at rest and 0 escaped. The old solver gave 646 at rest and 17 escaped through wall corners.
 - [x] F15, F16, F19, F22: reading a missing counter warns once, and `set_counter` / `add_to_counter` create it, so game state needs no scene entity per counter; the scenario docs give the order inside one tick; `expect` and invariants take `not_equals`. Verification: runtime and scenario unit tests.
 - [x] F17, F18, F21: `preset apply --only`, EPIPE exits quietly, `scene query` returns component values as JSON. Verification: CLI tests.
-- [ ] F23: 3D world-space text. Deferred; needs a text atlas in the scene renderer.
+- [x] F23: 3D world-space text. Deferred; needs a text atlas in the scene renderer.
+  Done without an atlas (editor help text for it in placement.rs, agent guide regenerated): `rusting.text` (`WorldText`: text, size, color)
+  builds a flat mesh with one quad per pixel run of the built-in 5 x 7
+  pixel font (`fontgen::glyph_pixels`), centered on the entity in its XY
+  plane and facing +Z, drawn with an unlit material per color. A change
+  rewrites the entity's own mesh in place. Schema text, reflect fields
+  and `docs/look-and-feel.md` "Text in the world". Evidence: unit tests
+  `text_mesh_draws_each_pixel_run_centered` (7 runs for "I", 0.7 m tall,
+  centered; two lines double it; a space draws nothing) and
+  `changing_world_text_rewrites_its_own_mesh` (same mesh and material
+  handles, new vertex count, unlit white); GPU test
+  `world_text_draws_upright_and_unmirrored` (an "L": stem top left and
+  foot bottom right lit, top right empty). It failed with the text
+  mirrored. Full check: fmt, clippy x3, `cargo test --workspace` (lib
+  973) and the gpu-tests run (lib 1138) pass.
+  Limits: printable ASCII only, one pixel font, no billboard mode (turn
+  the entity), one-sided.
 - [x] F24: `rusting determinism <root> --gpu <scenario.json>` runs the scenario in a debug and a release build and compares the GPU state hashes of every tick both runs reached (`DETERMINISM_DIVERGED` with the tick, or `DETERMINISM_NO_GPU_STATE`). Scenario reports carry `gpu_state_hashes`; a failing expect step does not stop the comparison (`scenario_passed`). Evidence (2026-10-02, RTX 3060): `rusting determinism . --gpu tests/w6_seed_a.json` on 40,001 compared 29 ticks, all equal (its pinned `night_hash` is stale after the solver change, so `scenario_passed` is false).
 - [x] F28: HUD elements are placed from this frame's measured text, so a right or bottom anchor keeps its margin when a `{counter}` value grows; the offset direction is in the schema. Evidence: 40,001 `tests/w4_cctv.json` recapture shows "COUNT: 40000" ending 24 px from the right edge.
 - [x] F29: the project guide says a `path` dependency follows a live engine and how to pin a `rev` or `tag`.
@@ -4529,30 +4737,266 @@ Depends on: Milestones 3, 4, and 21.
 - [x] Common instance field order across compute shaders.
 - [x] Common physics push-constant declaration across compute shaders.
 - [ ] Shader reflection compared with every Rust storage, uniform, vertex, and push-constant type.
-- [ ] Shader compilation as a dedicated CI job.
+  Split 2026-10-12 (lane render) into render-owned and physics-owned types.
+  - [x] Render types. Evidence (2026-10-12, lane render): the new
+    `rendering::assert_shader_layout!` test macro compares a hand-written
+    upload type's size and every field offset against the type
+    `vulkano_shaders` reflects from the shader's block. Unit tests
+    `post_effects::tests::post_effect_parameters_match_their_shader_blocks`
+    (`BloomParams` against both bloom shaders' push constants,
+    `OcclusionParams` against both occlusion shaders' buffers),
+    `cull_gpu_layouts_match_shader_structs` (`CullInstance`,
+    `DrawIndexedIndirectCommand` and `CullPushConstants`, which only had
+    hard-coded sizes before) and
+    `shadow_and_debug_layouts_match_shader_blocks` (all 23 fields of
+    `ShadowUpload`, `DebugPushConstants`) join the existing
+    `RenderInstanceUpload`, `CameraUniform` and `LightUpload` checks. The
+    egui, exposure and temporal push constants already use the reflected
+    types. Vertex types (`SceneVertex`, `VisibleInstance`, `ParticleVertex`,
+    `DebugVertex`, `EguiVertex`) are checked against the shader's input
+    interface by `Vertex::definition` at every pipeline build. Mutation
+    checks: swapping `fog` and `fog_shape` in `ShadowUpload`, `viewport` and
+    `lod` in `CullPushConstants`, or the two `BloomParams` fields each fail
+    with the field's name; narrowing `SceneVertex::uv` to `R32_SFLOAT`
+    fails pipeline creation in the GPU tests. Full check: lib 977 passed,
+    gpu-tests 1148 passed.
+  - [ ] Physics types: field offsets of `GpuBodyShape`, `GpuColliderUpload`,
+    `GpuForceFieldUpload` (no check yet), and of `GpuCommandUpload`,
+    `GpuConditionUpload`, `GpuRuleState`, `PhysicsPushConstants` and
+    `GpuEventUpload` (size only), against their compute shaders, with
+    `assert_shader_layout!`.
+- [x] Shader compilation as a dedicated CI job.
+  Evidence (2026-10-12, lane render): `scripts/check_shaders.sh` compiles
+  every `.vert`, `.frag` and `.comp` file under `src/shaders` with
+  `glslc --target-env=vulkan1.2 -I src/shaders`, without building the
+  crate, and fails if any shader fails. The new `shaders` job in
+  `.github/workflows/ci.yml` installs `glslc` and runs it. Local run: 29
+  shaders checked, 0 failed; appending a stray identifier to `cull.comp`
+  made it print glslc's error with the line number and exit 1. Shaders
+  written inline in Rust still compile only through `cargo build`, and the
+  job also covers `cs_grid_build.comp`, which no Rust code loads. Full
+  check: lib 975 passed, gpu-tests 1146 passed.
 
 ### Renderer integration tests
 
-- [ ] Resize, minimize, restore, and zero-sized surface handling.
-- [ ] Unsupported present-mode and format fallback.
-- [ ] Frames-in-flight reuse and validation-clean shutdown.
-- [ ] Asset unload/reload while referenced by submitted frames.
-- [ ] Culling enabled/disabled equivalence.
-- [ ] Automatic primitive/imported-mesh bounds contain their complete source geometry.
-- [ ] GPU-owned objects are culled from the current GPU transform without full-state CPU readback.
-- [ ] Objects outside the camera stop producing render work but continue physics simulation.
-- [ ] `CullingMode::Auto` skips culling overhead below its tested scene-size threshold.
-- [ ] Capability fallback behavior on the low-end baseline.
+- [x] Resize, minimize, restore, and zero-sized surface handling.
+  Evidence (2026-10-12, lane render): GPU test
+  `resize_minimize_and_restore_redraw_the_scene_at_each_size` draws a slab
+  over the left half of the view at 16x16, then into a fresh 40x12 target as
+  a recreated swapchain would, checking every pixel at each size. Zero-sized
+  surfaces (`[0, 0]`, `[40, 0]`, `[0, 12]`) return `Ok` without submitting
+  work and skip the physics ticks spent minimized. Restored to 16x16, the
+  image equals the first one byte for byte. Mutation checks: removing the
+  zero-size guard panics in the orthographic projection; dropping the
+  minimized tick skip fails the tick assertion; never resizing the depth
+  target fails the 40x12 image. Full check: lib 975 passed, gpu-tests
+  1146 passed.
+- [x] Unsupported present-mode and format fallback.
+  Evidence (2026-10-12, lane render): the game runner and the editor
+  forced a `B8G8R8A8_UNORM` swapchain, which fails on surfaces with no BGRA
+  format (common on Android). They now take
+  `rendering::swapchain::swapchain_format`, the UNORM form of the
+  surface's preferred format when that is RGBA, else `B8G8R8A8_UNORM`.
+  Present-mode choice moved into the pure
+  `frame_pacer::pick_present_mode`. Unit tests
+  `present_mode_falls_back_to_what_the_surface_supports` (FIFO only,
+  no Immediate, an empty list, VSync without FIFO) and
+  `swapchain_format_is_the_unorm_form_of_the_surface_preference`; GPU test
+  `rgba_swapchain_format_draws_the_same_image_as_bgra` renders the same
+  scene into both UNORM layouts and compares them channel-swapped. Falling
+  back to Immediate instead of FIFO, or mapping RGBA to BGRA, fails the
+  unit tests. Limit: vulkano_util shows the swapchain callback only the
+  surface's first format, so a surface offering neither 8-bit UNORM layout
+  still fails; no real surface was tested here. Full check: workspace lib
+  975 passed, gpu-tests run 1145 passed.
+- [x] Frames-in-flight reuse and validation-clean shutdown.
+  Evidence (2026-10-12, lane render): reuse is covered by GPU test
+  `frame_contexts_bound_frames_in_flight_and_wait_only_on_reuse`; shutdown
+  by new GPU test
+  `renderer_shuts_down_validation_clean_with_frames_in_flight`. It opens
+  its own device with the Khronos validation layer and synchronization
+  validation on (`rendering::validated_headless_device`, which adds a
+  messenger that counts errors in `rendering::validation_error_count`),
+  goes round the frame ring twice, leaves a full ring of frames
+  unfinished, checks the image, and drops the renderer and device. It
+  asserts no validation errors and that the device is destroyed.
+  Recording a zero-width viewport through vulkano's unchecked call fails
+  it (6 errors), and so does leaking a queue in `SceneRenderer::new`
+  (device stays alive). Limit: other GPU tests share a device without the
+  layer, so only this test runs validated. Full check: workspace lib 973
+  passed, gpu-tests run 1142 passed.
+- [x] Asset unload/reload while referenced by submitted frames.
+  Evidence (2026-10-12, lane render): reload is covered by GPU test
+  `hot_reloaded_mesh_swaps_next_frame_and_old_buffers_outlive_in_flight_frame`;
+  unload by new GPU test
+  `unloaded_assets_free_their_gpu_data_only_after_in_flight_frames`. A
+  slab with its own mesh, material and texture is submitted and not
+  waited on; then the renderable is removed and the three assets are
+  unloaded. The next frame drops them from the renderer's caches and
+  draws nothing, the vertex buffer and texture view stay alive while frame
+  1 may read them, and both are freed on the frame after frame 1
+  completes. Keeping removed textures in the cache fails it. Full check:
+  workspace lib 973 passed, gpu-tests run 1141 passed.
+- [x] Culling enabled/disabled equivalence.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::every_culling_mode_draws_the_same_image` renders
+  a perspective view of a shadowed floor and 135 cubes, some in view, some
+  straddling every frustum plane, some behind the camera, and some off view
+  whose shadows fall in it, through `Disabled` (`Direct`), `Frustum` (`Cpu`,
+  culling over 40), `FrustumAndOcclusion` (`GpuOcclusion`) and, with
+  far-off filler up to `GPU_CULL_MIN_INSTANCES`, `Frustum` again (`Gpu`);
+  all four images are byte-identical. Testing only the AABB center on the
+  CPU fails it (2201 bytes differ), and so does shrinking the GPU cull
+  sphere to 0.3 (2201). Full check: workspace lib 964 passed, gpu-tests
+  run 1125 passed.
+- [x] Automatic primitive/imported-mesh bounds contain their complete source geometry.
+  Evidence (2026-10-12, lane render): unit test
+  `scene_renderer::tests::automatic_bounds_contain_every_vertex_of_primitives_and_imported_meshes`
+  takes all 15 `PrimitiveShape`s and the 7 primitives imported from the
+  four `samples/vertical_slice` glTF files (copied to a temp folder, since
+  import cooks next to the source), and checks every vertex lies in the
+  culling box `PreparedMesh` caches, its bounding sphere, and the
+  `world_aabb` and `world_sphere` under a rotated, unevenly scaled, moved
+  model matrix. A sphere sized by the largest half extent fails it, and so
+  do a world box from two corners and a mesh box that skips the last
+  vertex. Full check: workspace lib 965 passed, gpu-tests run 1126
+  passed.
+- [x] GPU-owned objects are culled from the current GPU transform without full-state CPU readback.
+  Already true: the cull shader takes a GPU-owned instance's model matrix
+  from the physics state buffer (`physics_states.data[render.physics.x]`),
+  not from its extracted CPU transform. Evidence (2026-10-12, lane
+  render): new GPU test
+  `scene_renderer::tests::gpu_bodies_are_culled_where_the_gpu_moved_them_without_state_readback`
+  drops a GPU body from 3 m above a ±1 m view under GPU gravity; every
+  frame takes the GPU path with `physics_state_bytes` 0, the body is
+  culled for more than 20 frames, then drawn at the view center while its
+  CPU transform is still at 3 m. With the shader reading the CPU model
+  instead, the body is never drawn and the test fails. Full check:
+  workspace lib 973 passed, gpu-tests run 1139 passed.
+- [x] Objects outside the camera stop producing render work but continue physics simulation.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::culled_cpu_bodies_keep_simulating` drops a CPU
+  rigid body through a real `App` from 6 m above a ±1 m view; every frame
+  that extracts it off view, the CPU frustum path culls it (one culled
+  instance, nothing drawn) while its height keeps falling, and once it
+  reaches the view center it is drawn after more than 30 culled frames.
+  GPU-owned bodies: `culled_gpu_bodies_keep_simulating` checks zero
+  indirect instances and a GPU rule event every tick. Disabling the CPU
+  frustum test fails the new test. Full check: workspace lib 965
+  passed, gpu-tests run 1127 passed.
+- [x] `CullingMode::Auto` skips culling overhead below its tested scene-size threshold.
+  Evidence (2026-10-12, lane render, RTX 3060): the ignored timing test
+  `scene_renderer::tests::auto_culling_break_even` renders 8 to 1024
+  spheres in a row two thirds off view at 640x360, drawing everything
+  against CPU frustum culling, with one shared material and with one per
+  object (median of 100 frames after 20 warm-up). Three runs: up to 128
+  instances the two stay within noise (128: 168/165, 175/173 us shared;
+  485/490, 491/496 us per object); at 256 culling pays (per object
+  725/677, 778/703 us) and at 512 clearly (1094/720 us). So
+  `AUTO_DIRECT_MAX_INSTANCES` went from an untimed 64 to 128: `Auto` draws
+  scenes under 128 instances with no cull work, as the existing tests
+  check (`select_culling_path` unit test; GPU test
+  `gpu_bodies_are_not_culled_by_their_stale_cpu_transform` sees no
+  Culling pass). Rerun with `cargo test --release --features gpu-tests
+  --lib auto_culling_break_even -- --ignored --nocapture`. Limit:
+  measured on one discrete GPU; an integrated GPU may want a lower value.
+  Full check: workspace lib 973 passed, gpu-tests run 1139 passed.
+- [x] Capability fallback behavior on the low-end baseline.
+  Evidence (2026-10-12, lane render): GPU test
+  `low_end_capabilities_fall_back_and_draw_the_eco_image` gives the
+  renderer the low-end baseline (integrated GPU, 1 GiB, no optional
+  feature, no timestamps, no MSAA) and draws a scene of 4096 instances and
+  the Eco light budget plus 3 point lights with quality, culling and
+  anti-aliasing on `Auto`. The frame resolves to `Eco`, culls on the CPU,
+  draws with 1 sample, keeps the Eco light budget and reports the 3
+  dropped lights; the image equals the same scene forced to `Eco` on the
+  real device. Making `resolve_quality` ignore integrated GPUs fails it
+  (`Balanced`), and so does dropping the integrated/Eco culling threshold
+  (`Gpu`). Limit: the baseline is emulated on this device's capabilities;
+  real low-end hardware is still untested. Full check: workspace lib 973
+  passed, gpu-tests run 1140 passed.
 
 ### Golden-image tests
 
-- [ ] Primitive normals.
-- [ ] glTF texture channels and color spaces.
-- [ ] Alpha mask and blend modes.
-- [ ] Directional shadow depth.
-- [ ] PBR reference spheres.
-- [ ] Tone mapping.
-- [ ] Editor compositing.
+- [x] Primitive normals.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::primitive_normals_match_their_golden_image`
+  renders all 15 `PrimitiveShape`s tilted in a 5 by 3 grid in the Normals
+  debug view (160x96) and compares with
+  `src/rendering/golden/primitive_normals.png` (tolerance 8 per channel;
+  `RUSTING_UPDATE_GOLDEN=1` rewrites it). Mirroring the cube's normal x
+  fails it (difference 162). Full check: workspace lib 964 passed,
+  gpu-tests run 1119 passed.
+- [x] glTF texture channels and color spaces.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::gltf_texture_channels_and_color_spaces_match_their_golden_image`
+  writes a glTF with six quads, one texture slot each (sRGB base color and
+  emissive, linear metallic-roughness in G and B, occlusion in R, normal
+  map, base color times a factor), each image carrying a ramp in the
+  channel its slot reads and junk in the others, imports it with
+  `import_gltf`, renders it lit and compares with
+  `src/rendering/golden/gltf_texture_channels.png` (tolerance 8).
+  Importing base color as linear fails it (difference 72), and so does
+  reading occlusion from G (difference 50). Full check: workspace lib
+  964 passed, gpu-tests run 1120 passed.
+- [x] Alpha mask and blend modes.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::alpha_mask_and_blend_modes_match_their_golden_image`
+  draws unlit quads over a checkerboard: opaque ignoring a texture alpha
+  ramp, mask cut at 0.5, blend fading with the ramp and with a color alpha
+  of 0.5, two overlapping blended quads listed front first, and a mask
+  with cutoff 1.01 that hides its quad; compared with
+  `src/rendering/golden/alpha_modes.png` (tolerance 8). Skipping the mask
+  discard fails it (difference 255), and so does skipping the back to
+  front sort of blended instances (difference 65). Full check: workspace
+  lib 964 passed, gpu-tests run 1121 passed.
+- [x] Directional shadow depth.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::directional_shadow_depth_matches_its_golden_image`
+  looks straight down at a floor under a leaning sun with shadows on: a
+  cube resting on it, a ball floating 1 m up and an upright post, so each
+  shadow must start at its caster's base or sit detached by its height;
+  compared with `src/rendering/golden/directional_shadow_depth.png`
+  (tolerance 8). Sampling the shadow map from ten times the normal offset
+  fails it (difference 90), and so does comparing against depth 0.02
+  nearer the light (difference 90). Full check: workspace lib 964
+  passed, gpu-tests run 1122 passed.
+- [x] PBR reference spheres.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::pbr_reference_spheres_match_their_golden_image`
+  draws the classic chart, one orange with roughness 0.1 to 0.9 across, a
+  dielectric row over a metal row, lit by a sun from the upper left and a
+  grazing back light on the right rims; compared with
+  `src/rendering/golden/pbr_reference_spheres.png` (tolerance 8). An
+  untinted metal F0 fails it (difference 175), and so does dropping the
+  Schlick Fresnel term (difference 47; the back light was added after the
+  head-on sun alone let that pass). Full check: workspace lib 964
+  passed, gpu-tests run 1123 passed.
+- [x] Tone mapping.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::tone_mapping_matches_its_golden_images` renders
+  two emissive HDR ramps, 1/16 to about 11, grey over a saturated orange,
+  once per mapper; compared with `src/rendering/golden/tone_mapping_linear.png`,
+  `tone_mapping_reinhard.png` and `tone_mapping_aces.png` (tolerance 8).
+  Reinhard on the largest channel instead of per channel fails it
+  (difference 101), and so does an ACES denominator constant of 0.2
+  instead of 0.14 (difference 11). Full check: workspace lib 964
+  passed, gpu-tests run 1124 passed.
+- [x] Editor compositing.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::editor_compositing_matches_its_golden_image`
+  follows the editor's frame: the scene renders offscreen into a sampled
+  32x24 image, as `scene_view_target` makes, and `EguiPainter` shows it as
+  `editor::SCENE_VIEW_TEXTURE` at (16, 12) of a 64x48 window, under a
+  workspace fill and a header with text, with a translucent overlay and an
+  outline drawn over the view. Every view pixel outside the overlay and
+  outline equals the directly rendered scene byte for byte (unscaled,
+  colors unchanged), and the whole window matches
+  `src/rendering/golden/editor_compositing.png` (tolerance 8). Mutation
+  checks: sampling the scene texture without its sRGB re-encode fails the
+  byte comparison on the background; a non-premultiplied source blend
+  fails the golden image (difference 50). Full check: lib 977 passed,
+  gpu-tests 1149 passed.
 
 ### Physics tests
 

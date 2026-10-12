@@ -244,6 +244,13 @@ each one's fields, defaults and an example:
 - `rusting.procedural_sky`: Daylight sky computed from the sun (the shadow-casting directional light, else the first one): blue overhead, pale at the horizon, orange at sunset, dark at night, with a sun disc of sun_size degrees.
 - `rusting.fog_volume`: A box of uniform fog of half size extents around the object, turned and scaled with it: mist in a valley, smoke in a room.
 - `rusting.decal`: Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain.
+- `rusting.sprite`: A flat image of size (world units, before the object's scale) in the object's XY plane, centered on it and facing +Z: a 2D character, a pickup, a background card.
+- `rusting.sprite_animation`: Plays a sprite sheet on the rusting.sprite of the same object by setting its region.
+- `rusting.light_2d`: A round light for rusting.sprite objects, centered on this object: it adds color (linear rgb) times intensity to sprites within radius world units in the XY plane, fading smoothly to nothing at the edge.
+- `rusting.light_occluder_2d`: A closed polygon (points, in the object's XY plane) that casts shadows from every rusting.light_2d: a sprite pixel whose straight line to a light crosses one of its edges gets none of that light.
+- `rusting.camera_2d`: Put on the object with rusting.camera (no parent).
+- `rusting.particles_2d`: Put on an object with rusting.particle_emitter: its particles (CPU or GPU simulated) draw in the 2D pass with rusting.sprite objects instead of in the 3D scene, in canvas order at layer and the emitter's world z, after tone mapping and without a depth test.
+- `rusting.ambient_2d`: The light every rusting.sprite gets before any rusting.light_2d: color (linear rgb) multiplies each sprite, so a dark value makes a night scene that only lights reveal.
 - `rusting.post_volume`: Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside.
 - `rusting.bloom`: Glow around pixels brighter than threshold (linear, before exposure), spread over the screen before tone mapping.
 - `rusting.auto_exposure`: Eye adaptation: every frame the renderer measures the average brightness of the lit image and moves exposure toward key / average, clamped to min_exposure..max_exposure, at speed per second (the first frame adapts at once).
@@ -275,6 +282,7 @@ each one's fields, defaults and an example:
 - `rusting.morph`: Blend shape (morph target) weights for the object's mesh, one per shape, usually 0 to 1.
 - `rusting.fluid_block`: Particle fluid: a block of count_x by count_y by count_z particles resting on the floor of a box centered on the entity.
 - `rusting.soft_block`: XPBD soft body: a block of count_x by count_y by count_z cubes of spacing metres centered on the entity, each cut into six tetrahedra that keep their edge lengths and volumes.
+- `rusting.text`: Text standing in the world: signs, labels, numbers over objects.
 - `rusting.cloth`: XPBD cloth: a sheet of count_x by count_y squares of spacing metres in the entity's XY plane, centered on it, each cut into two triangles.
 - `rusting.gravity_volume`: Replaces the scene gravity for dynamic CPU bodies overlapping this object's sensor collider (it needs a CPU physics body, usually Fixed, with sensor true): gravity [0, 0, 0] is a zero-g room, a sideways vector a wind tunnel, and toward_center above 0 pulls toward the object's centre at that many m/s² for a small planet (gravity is then ignored).
 - `rusting.mesh_surfaces`: Per-triangle surfaces for a collider with shape "TriangleMesh" on the same object.

@@ -43,14 +43,16 @@ use bevy_ecs::prelude::{Component, Has, Resource, World};
 use nalgebra::Vector3;
 
 use super::cpu_physics::next_spawn_order;
+use super::hierarchy;
+use crate::Transform;
 use crate::assets::{AssetServer, MeshAsset, MeshVertex};
 use crate::runtime::{
-    sim_math, Collider, ColliderShape, CollisionLayers, EventQueue, FrameTime,
-    GpuStateMirror, Heightfield, MeshRenderer, Name, PhysicsBody,
-    PhysicsSyncMode, PhysicsWorld, RandomSeed, RigidBody, RigidBodyKind,
-    SceneId, SimulationClass, Sleeping, SpawnOrder,
+    Children, Collider, ColliderShape, CollisionLayers, Decal, EventQueue,
+    FrameTime, GpuStateMirror, Heightfield, MeshRenderer, Name,
+    ParticleEmitter, PhysicsBody, PhysicsSyncMode, PhysicsWorld, RandomSeed,
+    RigidBody, RigidBodyKind, SceneId, SimulationClass, Sleeping, SpawnOrder,
+    sim_math,
 };
-use crate::Transform;
 
 /// Most pieces one fracture makes, Voronoi cells and slice halves
 /// together. Fracture settings come from scene files, and cutting costs
@@ -235,9 +237,13 @@ impl Fracture {
             }
             cells = halves;
         }
+        let surface = Surface::new(mesh);
         FracturedMesh {
             links: links(&cells, size * size * 1e-6),
-            pieces: cells.iter().map(piece_mesh).collect(),
+            pieces: cells
+                .iter()
+                .map(|cell| piece_mesh(cell, Some(&surface)))
+                .collect(),
         }
     }
 }
@@ -381,6 +387,18 @@ fn shatter(
         }
     }
     let name = world.get::<Name>(entity).map(|name| name.0.clone());
+    // Decals and particle emitters on the object ride its pieces.
+    let riders: Vec<Entity> = world
+        .get::<Children>(entity)
+        .map(|children| children.0.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&child| {
+            world.get::<Decal>(child).is_some()
+                || world.get::<ParticleEmitter>(child).is_some()
+        })
+        .collect();
+    let centers: Vec<V> = pieces.iter().map(|(_, center, _)| *center).collect();
     world.despawn(entity);
     let mut group = None;
     let mut spawned = Vec::with_capacity(pieces.len());
@@ -428,6 +446,34 @@ fn shatter(
             piece.insert(layers);
         }
         spawned.push(piece.id());
+    }
+    // Pieces keep the object's rotation and scale, so a rider keeps its
+    // place by moving its local position by the piece's center.
+    // ponytail: the nearest piece center, not the piece under a decal;
+    // pick by projected area if decals land on the wrong piece.
+    for rider in riders {
+        if world
+            .get::<Decal>(rider)
+            .is_some_and(|decal| !decal.survive_fracture)
+        {
+            world.despawn(rider);
+            continue;
+        }
+        let Some(local) = world.get::<Transform>(rider).copied() else {
+            continue;
+        };
+        let at = V::from(local.position);
+        let Some((k, center)) = centers.iter().enumerate().min_by(|a, b| {
+            (a.1 - at)
+                .norm_squared()
+                .total_cmp(&(b.1 - at).norm_squared())
+        }) else {
+            continue;
+        };
+        if hierarchy::set_parent(world, rider, spawned[k]).is_ok() {
+            world.get_mut::<Transform>(rider).unwrap().position =
+                (at - center).into();
+        }
     }
     if let Some(mut events) = world.get_resource_mut::<EventQueue<Fractured>>()
     {
@@ -953,7 +999,11 @@ fn overlap(a: &[V], b: &[V]) -> f32 {
 }
 
 /// Flat-shaded triangles of a cell's faces.
-fn piece_mesh(cell: &Cell) -> MeshAsset {
+/// The mesh of `cell`. Faces on the source surface take the normal, UV
+/// and tangent of `source` where they lie, so a piece looks like the part
+/// of the object it was; cut faces get flat normals and planar UVs in
+/// meters.
+fn piece_mesh(cell: &Cell, source: Option<&Surface>) -> MeshAsset {
     let mut mesh = MeshAsset::default();
     for face in cell {
         let normal = face_normal(&face.points);
@@ -962,12 +1012,21 @@ fn piece_mesh(cell: &Cell) -> MeshAsset {
             .unwrap_or_else(V::x);
         let v = normal.cross(&u);
         let first = mesh.vertices.len() as u32;
-        mesh.vertices.extend(face.points.iter().map(|p| MeshVertex {
-            position: (*p).into(),
-            normal: normal.into(),
-            uv: [p.dot(&u), p.dot(&v)],
-            tangent: [u.x, u.y, u.z, 1.0],
-            color: [1.0; 4],
+        let facing = source
+            .filter(|_| face.cut == SURFACE)
+            .map(|source| (source, source.facing(normal)));
+        mesh.vertices.extend(face.points.iter().map(|p| {
+            let cut = MeshVertex {
+                position: (*p).into(),
+                normal: normal.into(),
+                uv: [p.dot(&u), p.dot(&v)],
+                tangent: [u.x, u.y, u.z, 1.0],
+                color: [1.0; 4],
+            };
+            facing
+                .as_ref()
+                .and_then(|(source, near)| source.vertex(near, *p, normal))
+                .unwrap_or(cut)
         }));
         for k in 1..face.points.len() as u32 - 1 {
             mesh.indices.extend([first, first + k, first + k + 1]);
@@ -1523,13 +1582,134 @@ fn stamp(field: &mut Heightfield, transform: &Transform, points: &[V]) -> bool {
     true
 }
 
+/// The triangles of a source mesh with their unit normals.
+struct Surface<'a> {
+    vertices: &'a [MeshVertex],
+    triangles: Vec<([usize; 3], [V; 3], V)>,
+}
+
+impl<'a> Surface<'a> {
+    fn new(mesh: &'a MeshAsset) -> Self {
+        let indices: Vec<usize> = if mesh.indices.is_empty() {
+            (0..mesh.vertices.len()).collect()
+        } else {
+            mesh.indices.iter().map(|&i| i as usize).collect()
+        };
+        let triangles = indices
+            .chunks_exact(3)
+            .filter(|t| t.iter().all(|&i| i < mesh.vertices.len()))
+            .filter_map(|t| {
+                let corners = [t[0], t[1], t[2]];
+                let points =
+                    corners.map(|i| V::from(mesh.vertices[i].position));
+                let [a, b, c] = points;
+                let normal = (b - a).cross(&(c - a)).try_normalize(1e-12)?;
+                Some((corners, points, normal))
+            })
+            .collect();
+        Self {
+            vertices: &mesh.vertices,
+            triangles,
+        }
+    }
+
+    /// The triangles facing along `normal`: hull faces lie on triangle
+    /// planes, so only these can hold a face's points.
+    // ponytail: scans every triangle per face; a normal-binned index if
+    // meshes of many thousand triangles break often.
+    fn facing(&self, normal: V) -> Vec<usize> {
+        let within = |cos: f32| -> Vec<usize> {
+            (0..self.triangles.len())
+                .filter(|&k| self.triangles[k].2.dot(&normal) >= cos)
+                .collect()
+        };
+        // A face on the plane of some triangle; else a box side near one.
+        Some(within(0.999))
+            .filter(|near| !near.is_empty())
+            .unwrap_or_else(|| within(0.9))
+    }
+
+    /// The source vertex at `p`, read from the nearest of the `facing`
+    /// triangles, with `p` as its position.
+    fn vertex(&self, facing: &[usize], p: V, normal: V) -> Option<MeshVertex> {
+        let mut best: Option<(f32, [usize; 3], [f32; 3])> = None;
+        for (corners, points, n) in facing.iter().map(|&k| &self.triangles[k]) {
+            let plane = n.dot(&(p - points[0]));
+            if best.as_ref().is_some_and(|(d, ..)| plane * plane >= *d) {
+                continue;
+            }
+            let (distance, weights) = closest_on_triangle(p, *points, *n);
+            if best.as_ref().is_none_or(|(d, ..)| distance < *d) {
+                best = Some((distance, *corners, weights));
+            }
+        }
+        let (_, corners, w) = best?;
+        let corners = corners.map(|i| &self.vertices[i]);
+        let mix = |f: &dyn Fn(&MeshVertex) -> V| {
+            (0..3).map(|k| f(corners[k]) * w[k]).sum::<V>()
+        };
+        let mut shade = mix(&|x| V::from(x.normal))
+            .try_normalize(1e-12)
+            .unwrap_or(normal);
+        if shade.dot(&normal) < 0.0 {
+            shade = normal;
+        }
+        let tangent =
+            mix(&|x| V::new(x.tangent[0], x.tangent[1], x.tangent[2]))
+                .try_normalize(1e-12)
+                .unwrap_or_else(V::x);
+        let uv = (0..3).fold([0.0; 2], |uv, k| {
+            [
+                uv[0] + corners[k].uv[0] * w[k],
+                uv[1] + corners[k].uv[1] * w[k],
+            ]
+        });
+        Some(MeshVertex {
+            position: p.into(),
+            normal: shade.into(),
+            uv,
+            tangent: [tangent.x, tangent.y, tangent.z, corners[0].tangent[3]],
+            color: corners[0].color,
+        })
+    }
+}
+
+/// Squared distance from `p` to the triangle and the barycentric weights
+/// of its closest point.
+fn closest_on_triangle(p: V, [a, b, c]: [V; 3], n: V) -> (f32, [f32; 3]) {
+    let q = p - n * n.dot(&(p - a));
+    let whole = (b - a).cross(&(c - a)).dot(&n);
+    let w = [
+        (c - b).cross(&(q - b)).dot(&n) / whole,
+        (a - c).cross(&(q - c)).dot(&n) / whole,
+        (b - a).cross(&(q - a)).dot(&n) / whole,
+    ];
+    if w.iter().all(|&x| x >= 0.0) {
+        return ((p - q).norm_squared(), w);
+    }
+    let mut best = (f32::INFINITY, w);
+    for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+        let [from, to] = [[a, b, c][i], [a, b, c][j]];
+        let edge = to - from;
+        let t = ((p - from).dot(&edge) / edge.norm_squared()).clamp(0.0, 1.0);
+        let distance = (p - (from + edge * t)).norm_squared();
+        if distance < best.0 {
+            let mut weights = [0.0; 3];
+            weights[i] = 1.0 - t;
+            weights[j] = t;
+            best = (distance, weights);
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bevy_ecs::prelude::With;
 
     fn box_mesh(half: [f32; 3]) -> MeshAsset {
-        piece_mesh(&box_cell(-V::from(half), V::from(half)))
+        piece_mesh(&box_cell(-V::from(half), V::from(half)), None)
     }
 
     fn volume(mesh: &MeshAsset) -> f32 {
@@ -1561,6 +1741,48 @@ mod tests {
         reached.iter().all(|&r| r)
     }
 
+    #[test]
+    fn pieces_keep_the_normals_and_uvs_of_the_surface_they_came_from() {
+        use crate::assets::{PrimitiveShape, procedural_primitive_mesh};
+        let fracture = Fracture {
+            pieces: 6,
+            slices: vec![[1.0, 0.0, 0.0, 0.1]],
+            ..Fracture::default()
+        };
+        for shape in [PrimitiveShape::Cube, PrimitiveShape::Sphere] {
+            let source = procedural_primitive_mesh(shape);
+            let pieces = fracture.fracture(&source).pieces;
+            assert!(pieces.len() > 2, "{shape:?}");
+            let all: Vec<&MeshVertex> =
+                pieces.iter().flat_map(|piece| &piece.vertices).collect();
+            // Every source vertex the cut kept is a piece corner with the
+            // source's own normal and UV (one of them on a UV seam).
+            let mut matched = 0;
+            for vertex in &source.vertices {
+                let p = V::from(vertex.position);
+                let at = |x: &MeshVertex| {
+                    (V::from(x.position) - p).norm() < 1e-4
+                        && V::from(x.normal).dot(&V::from(vertex.normal))
+                            > 0.999
+                };
+                for piece in all.iter().filter(|piece| at(piece)) {
+                    matched += 1;
+                    let near = |x: &&MeshVertex| {
+                        (0..2).all(|k| (piece.uv[k] - x.uv[k]).abs() < 1e-3)
+                    };
+                    assert!(
+                        source
+                            .vertices
+                            .iter()
+                            .filter(|x| at(x))
+                            .any(|x| near(&x)),
+                        "{shape:?}: {vertex:?} became {piece:?}"
+                    );
+                }
+            }
+            assert!(matched >= 8, "{shape:?}: only {matched} corners kept");
+        }
+    }
     #[test]
     fn two_slices_quarter_a_box_and_link_only_face_neighbours() {
         let fracture = Fracture {
@@ -1714,6 +1936,140 @@ mod tests {
     }
 
     #[test]
+    fn emitters_on_a_breaking_object_burst_at_the_break() {
+        use crate::runtime::{Parent, ParticleEmitter, ParticleSystem};
+        let run_break = |on_fracture: bool| {
+            let mut app = ground();
+            let hard = add_crate(&mut app, 2.0, 3.0, Fracture::default());
+            // Above the crate's top, so the burst leaves upward.
+            let emitter = app.spawn((
+                crate::runtime::SceneId(uuid::Uuid::from_u128(9)),
+                Transform::new([0.0, 0.6, 0.0]),
+                ParticleEmitter {
+                    autoplay: false,
+                    rate: 0.0,
+                    on_fracture,
+                    impact_count: 8,
+                    spread: 0.0,
+                    speed: [2.0, 2.0],
+                    lifetime: [100.0, 100.0],
+                    gravity: 0.0,
+                    drag: 0.0,
+                    ..ParticleEmitter::default()
+                },
+            ));
+            app.set_parent(emitter, hard).unwrap();
+            let mut breaks = Vec::new();
+            let mut alive_before = 0;
+            for _ in 0..60 {
+                if app.world().get_entity(hard).is_err() {
+                    break;
+                }
+                alive_before = app
+                    .world()
+                    .get::<ParticleSystem>(emitter)
+                    .map_or(0, ParticleSystem::alive);
+                run(&mut app, 1);
+            }
+            for _ in 0..3 {
+                run(&mut app, 1);
+                let events = app.world().resource::<EventQueue<Fractured>>();
+                breaks.extend(events.iter().cloned());
+            }
+            assert_eq!(alive_before, 0, "nothing before the break");
+            assert_eq!(breaks.len(), 1);
+            let world = app.world();
+            assert!(
+                world
+                    .get::<Debris>(world.get::<Parent>(emitter).unwrap().0)
+                    .is_some()
+            );
+            let system = world.get::<ParticleSystem>(emitter).unwrap();
+            (breaks[0].point, system.particles.clone())
+        };
+        let (point, particles) = run_break(true);
+        assert_eq!(particles.len(), 8);
+        for particle in &particles {
+            // Launched at 2 m/s from under the crate up toward the emitter.
+            let [x, y, z] = particle.velocity;
+            assert!(y > 1.5, "{particle:?}");
+            assert!((x * x + y * y + z * z - 4.0).abs() < 1e-3, "{particle:?}");
+            assert!(
+                (particle.position[0] - point[0]).abs() < 0.5,
+                "{particle:?}"
+            );
+        }
+        assert_eq!(run_break(true).1, particles, "the same bits again");
+        assert!(run_break(false).1.is_empty(), "off: no burst");
+    }
+    #[test]
+    fn decals_move_onto_the_nearest_piece_or_leave_with_the_object() {
+        use crate::runtime::{Decal, Parent, RenderExtractPlugin, RenderWorld};
+        use bevy_ecs::query::With;
+        let mut app = ground();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let hard = add_crate(&mut app, 2.0, 3.0, Fracture::default());
+        // A crack on the crate's +X face, and a label that belongs to the
+        // whole crate.
+        let crack =
+            app.spawn((Transform::new([0.5, 0.2, 0.1]), Decal::default()));
+        let label = app.spawn((
+            Transform::new([0.0, 0.0, 0.5]),
+            Decal {
+                survive_fracture: false,
+                ..Decal::default()
+            },
+        ));
+        app.set_parent(crack, hard).unwrap();
+        app.set_parent(label, hard).unwrap();
+        app.update(std::time::Duration::ZERO).unwrap();
+        let world_position = |app: &crate::runtime::App, entity| {
+            let matrix = nalgebra::Matrix4::from(
+                app.world()
+                    .get::<crate::runtime::GlobalTransform>(entity)
+                    .unwrap()
+                    .matrix,
+            );
+            V::new(matrix[(0, 3)], matrix[(1, 3)], matrix[(2, 3)])
+        };
+        let mut before = V::zeros();
+        for _ in 0..60 {
+            if app.world().get_entity(hard).is_err() {
+                break;
+            }
+            before = world_position(&app, crack);
+            run(&mut app, 1);
+        }
+        let world = app.world_mut();
+        let pieces: Vec<Entity> = world
+            .query_filtered::<Entity, With<Debris>>()
+            .iter(world)
+            .collect();
+        assert_eq!(pieces.len(), 6, "the crate breaks");
+        let world = app.world();
+        assert!(world.get_entity(label).is_err(), "the label goes");
+        let piece = world.get::<Parent>(crack).unwrap().0;
+        assert!(pieces.contains(&piece));
+        let after = world_position(&app, crack);
+        // Where it was a tick ago, give or take the fall.
+        assert!((after - before).norm() < 0.2, "{before} to {after}");
+        let distance = |entity| {
+            (V::from(world.get::<Transform>(entity).unwrap().position) - after)
+                .norm()
+        };
+        let nearest = distance(piece);
+        assert!(pieces.iter().all(|&other| distance(other) >= nearest));
+        let decals = &world.resource::<RenderWorld>().decals;
+        assert_eq!(decals.len(), 1);
+        assert!(decals[0].1.survive_fracture);
+        // It rides the piece as the debris tumbles.
+        run(&mut app, 30);
+        let world = app.world();
+        let piece_at = V::from(world.get::<Transform>(piece).unwrap().position);
+        let moved = (piece_at - world_position(&app, crack)).norm();
+        assert!((moved - nearest).abs() < 1e-4, "{nearest} then {moved}");
+    }
+    #[test]
     fn a_break_sends_one_fractured_event_and_a_soft_landing_none() {
         let mut app = ground();
         let soft = add_crate(&mut app, -2.0, 0.2, Fracture::default());
@@ -1746,10 +2102,12 @@ mod tests {
         // The pieces it names are the debris now in the world.
         let world = app.world_mut();
         assert_eq!(event.pieces.len(), 6);
-        assert!(event
-            .pieces
-            .iter()
-            .all(|&e| world.get::<Debris>(e).is_some()));
+        assert!(
+            event
+                .pieces
+                .iter()
+                .all(|&e| world.get::<Debris>(e).is_some())
+        );
         assert!(world.get_entity(hard).is_err());
     }
 
@@ -1881,10 +2239,12 @@ mod tests {
         }
         .fracture(&box_mesh([1.0; 3]));
         assert!(broken.pieces.len() <= MAX_FRACTURE_PIECES);
-        assert!(Fracture::default()
-            .fracture(&MeshAsset::default())
-            .pieces
-            .is_empty());
+        assert!(
+            Fracture::default()
+                .fracture(&MeshAsset::default())
+                .pieces
+                .is_empty()
+        );
     }
 
     /// An 8 by 8 m flat heightfield at the origin, in 4-cell chunks that
@@ -2028,18 +2388,22 @@ mod tests {
         },));
         run(&mut app, 60);
         let world = app.world();
-        assert!(world
-            .get::<TerrainFracture>(terrain)
-            .unwrap()
-            .broken
-            .is_empty());
-        assert!(world
-            .get::<Heightfield>(terrain)
-            .unwrap()
-            .heights
-            .iter()
-            .flatten()
-            .all(|&h| h == 0.0));
+        assert!(
+            world
+                .get::<TerrainFracture>(terrain)
+                .unwrap()
+                .broken
+                .is_empty()
+        );
+        assert!(
+            world
+                .get::<Heightfield>(terrain)
+                .unwrap()
+                .heights
+                .iter()
+                .flatten()
+                .all(|&h| h == 0.0)
+        );
     }
 
     #[test]

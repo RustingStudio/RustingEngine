@@ -240,7 +240,49 @@ most four distinct images:
    "color": [1, 1, 1, 1], "extents": [0.5, 0.5, 0.2]}}}
 ```
 
-Decals change the surface color only, not its normals or roughness.
+Set `roughness` (0 to 1) to paint roughness with the same coverage: a
+dark decal with roughness 0.1 is a wet stain or a puddle that catches
+highlights. Leave it `null` to keep the surface's. Decals do not change
+normals.
+
+Make a decal a child of the object it marks, so it moves with it. When that
+object breaks (`rusting.fracture`), the decal moves onto the piece nearest
+it and stays on that piece's surface. Set `survive_fracture` to false for a
+mark that belongs to the whole object, such as a label, and it is removed
+with the object.
+
+## Broken objects
+
+The pieces of a broken object (`rusting.fracture`) use the object's
+material. Their outer faces keep the object's normals and texture
+coordinates, so on the tick it breaks the pieces look like the object did.
+The new cut faces inside get flat normals and the texture laid flat on
+them at one repeat per meter. A curved object breaks into flat-sided
+pieces, because each piece is convex.
+
+## Cloth and soft blocks
+
+`rusting.cloth` and `rusting.soft_block` take a `color` (linear RGBA) and
+a `texture` (asset path), and the color is multiplied into the image. A
+cloth sheet shows the image once across the sheet, with its top row along
+the top edge. A soft block shows the image once on each side, upright on
+the four walls. The image is fixed to the particles, so it stretches,
+squashes and tears with the body. Blocks or sheets that leave both unset
+share one plain material.
+
+A `rusting.fluid_block` surface draws as translucent water for the
+liquid solvers and as opaque sand for `Granular`, so a heap of grains
+reads as a heap and not as a puddle.
+
+## Text in the world
+
+`rusting.text` puts text on a sign, over a door or above an object. It
+uses the same 5 x 7 pixel font as `rusting asset generate <root> font
+pixel`, so signs match the chunky placeholder look. `size` is the height
+of a capital in meters; 0.3 to 0.5 reads well at room scale. The text is
+unlit, so pick a `color` that stands out from the wall behind it. It faces
++Z: turn the entity to aim it. Lines split at `\n` stack downward, each
+centered.
 
 ## Mesh kit
 
@@ -403,7 +445,11 @@ in the window's top-right corner. F3 turns the same report on and off
 while the game runs; the game also sees the F3 press. The CPU part splits into `fixed` (physics and
 fixed systems), `update` (the game's systems), `post_update` (transform
 propagation and other engine work) and `extract`; a scenario run reports
-the same split per tick as `perf.stages_ms_mean`. `rusting test` captures render offscreen and
+the same split per tick as `perf.stages_ms_mean`. In a second with key or
+mouse presses, the line ends with `input latency p50 ... max ... ms`: the
+time from a press to the present of the first frame that read it, plus
+that frame's GPU time. The display's scan-out and the monitor's own delay
+come on top and need a camera or photodiode to measure. `rusting test` captures render offscreen and
 read every frame back, so their frame times run higher than the window's;
 use them as a regression guard, not as the frame budget.
 To measure at a set size, put `"window": [1920, 1080]` in `project.json`:

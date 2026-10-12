@@ -1098,3 +1098,44 @@ void main() {
 "
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn post_effect_parameters_match_their_shader_blocks() {
+        assert_shader_layout!(
+            BloomParams = bloom_prefilter_shader::Params {
+                threshold: threshold,
+                spread: spread,
+            }
+        );
+        assert_shader_layout!(
+            BloomParams = bloom_up_shader::Params {
+                threshold: threshold,
+                spread: spread,
+            }
+        );
+        assert_shader_layout!(
+            OcclusionParams = occlusion_trace_shader::Params {
+                view_projection: view_projection,
+                inverse_view_projection: inverse_view_projection,
+                viewport: viewport,
+                forward: forward,
+                settings: settings,
+                previous_view_projection: previous_view_projection,
+            }
+        );
+        assert_shader_layout!(
+            OcclusionParams = occlusion_blur_shader::Params {
+                view_projection: view_projection,
+                inverse_view_projection: inverse_view_projection,
+                viewport: viewport,
+                forward: forward,
+                settings: settings,
+                previous_view_projection: previous_view_projection,
+            }
+        );
+    }
+}

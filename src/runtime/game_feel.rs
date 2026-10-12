@@ -1871,6 +1871,13 @@ pub struct Decal {
     pub color: [f32; 4],
     /// Half size of the box in the object's local axes, in metres.
     pub extents: [f32; 3],
+    /// Roughness painted with the image, by its coverage: low for a wet
+    /// stain or a puddle. `None` keeps the surface's.
+    pub roughness: Option<f32>,
+    /// When its parent object breaks ([`super::Fracture`]): true moves the
+    /// decal onto the piece nearest it, so it stays on that piece's surface;
+    /// false removes it with the object.
+    pub survive_fracture: bool,
     /// The loaded `texture`, set by the engine.
     #[serde(skip)]
     pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
@@ -1882,6 +1889,8 @@ impl Default for Decal {
             texture: std::path::PathBuf::new(),
             color: [1.0; 4],
             extents: [0.5, 0.5, 0.25],
+            roughness: None,
+            survive_fracture: true,
             handle: None,
         }
     }
@@ -1960,7 +1969,7 @@ impl Default for ColorLut {
 }
 
 /// Loads the image of each added or changed [`EnvironmentMap`],
-/// [`LightCookie`], [`Decal`] and [`ColorLut`]. An image whose load failed (file missing or not written
+/// [`LightCookie`], [`Decal`], [`ColorLut`] and [`super::Sprite`]. An image whose load failed (file missing or not written
 /// yet) is tried again about every two seconds.
 pub(super) fn load_environment_maps(
     assets: Option<ResMut<crate::assets::AssetServer>>,
@@ -1968,6 +1977,7 @@ pub(super) fn load_environment_maps(
     mut cookies: Query<&mut LightCookie>,
     mut luts: Query<&mut ColorLut>,
     mut decals: Query<&mut Decal>,
+    mut sprites: Query<&mut super::Sprite>,
     mut frame: bevy_ecs::prelude::Local<u32>,
 ) {
     let Some(mut assets) = assets else {
@@ -2021,6 +2031,32 @@ pub(super) fn load_environment_maps(
             bevy_ecs::change_detection::DetectChanges::is_changed(&decal);
         let decal = decal.bypass_change_detection();
         load(changed, &decal.texture, &mut decal.handle, "decal");
+    }
+    for mut sprite in &mut sprites {
+        let changed =
+            bevy_ecs::change_detection::DetectChanges::is_changed(&sprite);
+        let sprite = sprite.bypass_change_detection();
+        load(changed, &sprite.texture, &mut sprite.handle, "sprite");
+        load(
+            changed,
+            &sprite.normal_map,
+            &mut sprite.normal_handle,
+            "sprite normal map",
+        );
+    }
+    // Normal maps are data, not color, whatever their file says.
+    // ponytail: a hot reload of the file turns it back to sRGB until the
+    // sprite changes; flag linear at decode if that bites.
+    for sprite in &sprites {
+        let Some(handle) = sprite.normal_handle else {
+            continue;
+        };
+        if assets.textures.get(handle).is_some_and(|texture| {
+            texture.color_space == crate::assets::TextureColorSpace::Srgb
+        }) {
+            assets.textures.get_mut(handle).unwrap().color_space =
+                crate::assets::TextureColorSpace::Linear;
+        }
     }
 }
 

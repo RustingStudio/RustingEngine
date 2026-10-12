@@ -145,6 +145,21 @@ fn outline(rows: &[u8; 9], bold: bool) -> Vec<Rect> {
     rects
 }
 
+/// The pixel rectangles `[left, bottom, right, top]` of `c` in the pixel
+/// preset, in pixels: the baseline is at 0, capitals are 7 tall and each
+/// glyph advances 6. Characters outside printable ASCII draw as `?`.
+pub fn glyph_pixels(c: char) -> Vec<[i16; 4]> {
+    let index = if (' '..='~').contains(&c) {
+        c as usize - usize::from(b' ')
+    } else {
+        usize::from(b'?' - b' ')
+    };
+    outline(&GLYPHS[index], false)
+        .into_iter()
+        .map(|rect| rect.map(|value| value / PIXEL))
+        .collect()
+}
+
 /// A `glyf` record for the rectangles; empty for a blank glyph.
 fn glyph_record(rects: &[Rect]) -> Vec<u8> {
     if rects.is_empty() {

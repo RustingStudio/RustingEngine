@@ -7,9 +7,12 @@ use bevy_ecs::entity::Entity;
 
 use super::TypeRegistry;
 use crate::assets::{AlphaMode, MaterialAsset, MaterialModel};
+use crate::runtime::Camera2d;
 use crate::runtime::ClothSheet;
 use crate::runtime::ConvexDecomposition;
 use crate::runtime::Rope;
+use crate::runtime::WorldText;
+use crate::runtime::{Ambient2d, Light2d, LightOccluder2d, Particles2d};
 use crate::runtime::{
     AmbientLight, AmbientOcclusion, Antialiasing, Articulation, AutoExposure,
     AutoSimulation, AxisLock, AxisMotion, Bloom, BurstEmitter, CameraScreen,
@@ -25,10 +28,10 @@ use crate::runtime::{
     PlayerController, Polygon2d, PostShader, PostVolume, ProceduralSky,
     QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
     ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
-    SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, SurfaceClip, Terrain, TerrainFracture,
-    TerrainLayer, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
-    TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
+    SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Sprite,
+    SpriteAnimation, Squash, StateAction, StateTransition, SurfaceClip,
+    Terrain, TerrainFracture, TerrainLayer, TileKind, TileMap, ToneMapper,
+    ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -468,6 +471,7 @@ crate::reflect! {
         },
         impact_count: u32 { doc: "particles per impact or settle" },
         on_settle: bool { doc: "spawn impact_count particles when the body falls asleep" },
+        on_fracture: bool { doc: "spawn impact_count particles at the break when the parent object breaks" },
         shape: EmitterShape,
         shape_size: [f32; 3] {
             unit: "m", min: 0.0,
@@ -751,6 +755,8 @@ crate::reflect! {
         tear_strain: f32 { unit: "factor", min: 0.0, doc: "edges stretched past rest times 1 + this tear; 0 never" },
         substeps: u32 { unit: "substeps", min: 1.0, max: 64.0 },
         visible: bool { doc: "draw the outer faces" },
+        color: [f32; 4] { unit: "linear RGBA", doc: "block color, multiplied into texture" },
+        texture: PathBuf { unit: "asset path", doc: "image laid once on each side of the block, upright on the walls; empty for plain color" },
     }
 }
 
@@ -774,6 +780,14 @@ crate::reflect! {
         visible: bool { doc: "draw both sides of the sheet" },
         color: [f32; 4] { unit: "linear RGBA", doc: "sheet color, multiplied into texture" },
         texture: PathBuf { unit: "asset path", doc: "image stretched once over the sheet, top row at the top edge; empty for plain color" },
+    }
+}
+
+crate::reflect! {
+    struct WorldText {
+        text: String { doc: "lines split at \\n; characters outside printable ASCII draw as ?" },
+        size: f32 { unit: "m", min: 0.01, doc: "height of a capital letter" },
+        color: [f32; 4] { unit: "linear RGBA", doc: "unlit text color" },
     }
 }
 
@@ -1402,7 +1416,102 @@ crate::reflect! {
             unit: "m", min: 0.0,
             doc: "half size of the box; it projects along local -Z",
         },
+        roughness: Option<f32> {
+            min: 0.0, max: 1.0,
+            doc: "roughness painted by coverage, low for wet stains; null keeps the surface's",
+        },
+        survive_fracture: bool {
+            doc: "false: removed when its parent breaks; true: moves onto the nearest piece",
+        },
         #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+    }
+}
+
+crate::reflect! {
+    struct Sprite {
+        texture: PathBuf {
+            unit: "asset path",
+            doc: "image drawn on the sprite; empty draws color",
+        },
+        color: [f32; 4] {
+            unit: "linear rgba", min: 0.0,
+            doc: "multiplies the image",
+        },
+        size: [f32; 2] {
+            unit: "m", min: 0.0,
+            doc: "width and height before the object's scale",
+        },
+        region: [f32; 4] {
+            min: 0.0, max: 1.0,
+            doc: "part of the image to draw, [u0, v0, u1, v1] with v down",
+        },
+        flip_x: bool,
+        flip_y: bool,
+        layer: i32 {
+            doc: "canvas layer; higher layers draw over lower ones whatever their z",
+        },
+        #[skip] handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+        normal_map: PathBuf {
+            unit: "asset path",
+            doc: "tangent-space normal map (green up) that 2D lights shade; empty is flat",
+        },
+        #[skip] normal_handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
+        in_scene: bool {
+            doc: "draw inside the 3D scene, hidden by nearer meshes, instead of over it",
+        },
+    }
+}
+
+crate::reflect! {
+    struct SpriteAnimation {
+        columns: u32 { min: 1.0, doc: "frames across the sheet" },
+        rows: u32 { min: 1.0, doc: "frames down the sheet" },
+        first: u32 { doc: "first frame shown, counted row by row from the top left" },
+        count: u32 { min: 1.0, doc: "frames in the animation" },
+        fps: f32 { unit: "frames/s", min: 0.0 },
+        looping: bool { doc: "start over after the last frame; otherwise hold it" },
+        #[skip] elapsed: f64,
+    }
+}
+
+crate::reflect! {
+    struct Light2d {
+        color: [f32; 3] { unit: "linear rgb", min: 0.0 },
+        intensity: f32 { min: 0.0 },
+        radius: f32 { unit: "m", min: 0.0, doc: "sprites farther than this in XY get none of the light" },
+        height: f32 { unit: "m", min: 0.0, doc: "above the sprites; only normal-mapped sprites see it" },
+    }
+}
+
+crate::reflect! {
+    struct LightOccluder2d {
+        points: Vec<[f32; 2]> { unit: "m", doc: "closed outline in the object's XY plane that blocks 2D lights" },
+    }
+}
+
+crate::reflect! {
+    struct Camera2d {
+        target: String { doc: "name of the object to follow; empty stays put" },
+        offset: [f32; 2] { unit: "m", doc: "from the target to the view center" },
+        smoothing: f32 { unit: "s", min: 0.0, doc: "time to close about two thirds of the gap; 0 snaps" },
+        limits: Option<[f32; 4]> { unit: "m", doc: "min x, min y, max x, max y the orthographic view stays inside" },
+        pixels_per_unit: f32 { min: 0.0, doc: "art pixels per metre; above 0 zooms to whole screen pixels per art pixel and snaps to screen pixels" },
+        #[skip] center: Option<[f32; 2]>,
+    }
+}
+
+crate::reflect! {
+    struct Particles2d {
+        layer: i32 { doc: "canvas layer; higher layers draw over lower ones whatever their z" },
+    }
+}
+
+crate::reflect! {
+    struct Ambient2d {
+        color: [f32; 3] {
+            unit: "linear rgb", min: 0.0,
+            doc: "light every sprite gets before 2D lights; without one sprites keep full color",
+        },
     }
 }
 

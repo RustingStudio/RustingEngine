@@ -2963,6 +2963,53 @@ fn impacts_and_settling_spawn_particles_where_the_body_hits() {
 }
 
 #[test]
+fn a_2d_body_landing_emits_particles_drawn_in_the_2d_pass() {
+    let mut app = App::new();
+    app.add_plugin(RenderExtractPlugin).unwrap();
+    cpu_ground(app.world_mut());
+    let body = cpu_body(
+        app.world_mut(),
+        [0.0, 1.5, 0.0],
+        UNIT_BOX,
+        RigidBodyKind::Dynamic,
+    );
+    app.world_mut().entity_mut(body).insert((
+        ParticleEmitter {
+            autoplay: false,
+            rate: 0.0,
+            impact_speed: 1.0,
+            impact_count: 4,
+            lifetime: [100.0, 100.0],
+            ..ParticleEmitter::default()
+        },
+        crate::runtime::Particles2d { layer: 3 },
+    ));
+    let mut landed = None;
+    for _ in 0..120 {
+        run_fixed_steps(&mut app, 1);
+        let render_world = app.world().resource::<RenderWorld>();
+        if let Some(batch) = render_world.particles.iter().find(|batch| {
+            batch.entity == Some(body) && !batch.instances.is_empty()
+        }) {
+            landed = Some((
+                batch.instances.clone(),
+                render_world.particles_2d.clone(),
+            ));
+            break;
+        }
+    }
+    let (instances, particles_2d) =
+        landed.expect("the landing emitted nothing");
+    // Spawned at the floor contact, and drawn with the sprites on layer 3.
+    assert!(instances.len() % 4 == 0, "{}", instances.len());
+    for instance in &instances {
+        assert!(instance.position[1].abs() < 0.2, "{instance:?}");
+    }
+    assert_eq!(particles_2d.len(), 1);
+    assert_eq!((particles_2d[0].0, particles_2d[0].1), (body, 3));
+}
+
+#[test]
 fn landing_fires_one_sound_and_a_seeded_burst_that_expires() {
     let run = || {
         let mut app = App::new();
@@ -6493,7 +6540,7 @@ fn soft_blocks_round_trip_through_scenes_and_land_on_a_box() {
     };
     let mut app = App::new();
     app.add_plugin(crate::assets::AssetPlugin).unwrap();
-    app.spawn((Transform::new([0.0, 1.0, 0.0]), block));
+    app.spawn((Transform::new([0.0, 1.0, 0.0]), block.clone()));
     app.spawn((
         Transform::new([0.0, -0.5, 0.0]),
         PhysicsBody::default(),

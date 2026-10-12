@@ -59,6 +59,7 @@ mod ui;
 mod vehicle;
 pub mod water;
 mod waypoints;
+pub mod world_text;
 
 pub use actions::{
     bind_input_actions, parse_input, ActionMap, InputAction, InputBinding,
@@ -146,6 +147,7 @@ pub use ui::{RuntimeUi, UiTheme};
 pub use vehicle::{Vehicle, Wheel};
 pub use water::{WaterBody, WaterMesh};
 pub use waypoints::WaypointGraph;
+pub use world_text::{WorldText, WorldTextMesh};
 
 use std::hash::Hasher;
 use std::time::{Duration, Instant};
@@ -329,6 +331,7 @@ impl Default for App {
                     game_feel::decay_camera_shake,
                     game_feel::fade_flashes,
                     game_feel::run_state_machines,
+                    two_d::animate_sprites,
                 )
                     .chain(),
                 animation::advance_animations,
@@ -336,6 +339,7 @@ impl Default for App {
                     fluid::spawn_fluid_volumes,
                     soft_body::spawn_soft_bodies,
                     cloth::spawn_cloths,
+                    world_text::sync_world_texts,
                 )
                     .chain(),
                 fluid::couple_fluids,
@@ -356,6 +360,7 @@ impl Default for App {
         app.add_system(ScheduleStage::Update, player::player_look);
         app.add_system(ScheduleStage::Update, game_feel::trigger_on_gpu_events);
         app.add_system(ScheduleStage::Update, actions::bind_input_actions);
+        app.add_system(ScheduleStage::Update, particles::emit_on_fractures);
         app.add_event::<SoundEvent>();
         app.insert_resource(AudioQueue::default());
         app.add_event::<HudButtonPressed>();
@@ -365,6 +370,11 @@ impl Default for App {
         app.add_system(
             ScheduleStage::PostUpdate,
             game_feel::draw_hud.after(propagate_transforms),
+        );
+        // After propagation, so the camera follows where targets are now.
+        app.add_system(
+            ScheduleStage::PostUpdate,
+            two_d::follow_cameras_2d.after(propagate_transforms),
         );
         app.add_system(ScheduleStage::Update, two_d::build_tile_maps);
         app.add_system(

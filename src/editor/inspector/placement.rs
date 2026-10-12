@@ -12,14 +12,16 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::World;
 
 use crate::runtime::{
-    AmbientLight, AmbientOcclusion, AutoExposure, Bloom, Camera,
-    DirectionalLight, Fog, MeshRenderer, Name, PointLight, SceneBackground,
-    SkyLight, SpotLight, ToneMapping, AMBIENT_LIGHT_COMPONENT,
-    AMBIENT_OCCLUSION_COMPONENT, AUTO_EXPOSURE_COMPONENT, BACKGROUND_COMPONENT,
-    BLOOM_COMPONENT, DECAL_COMPONENT, ENVIRONMENT_MAP_COMPONENT, FOG_COMPONENT,
-    FOG_VOLUME_COMPONENT, HUD_ELEMENT_COMPONENT, POST_VOLUME_COMPONENT,
-    PROCEDURAL_SKY_COMPONENT, SKY_LIGHT_COMPONENT, TILE_MAP_COMPONENT,
-    TONE_MAPPING_COMPONENT,
+    AMBIENT_2D_COMPONENT, AMBIENT_LIGHT_COMPONENT, AMBIENT_OCCLUSION_COMPONENT,
+    AUTO_EXPOSURE_COMPONENT, AmbientLight, AmbientOcclusion, AutoExposure,
+    BACKGROUND_COMPONENT, BLOOM_COMPONENT, Bloom, CAMERA_2D_COMPONENT, Camera,
+    DECAL_COMPONENT, DirectionalLight, ENVIRONMENT_MAP_COMPONENT,
+    FOG_COMPONENT, FOG_VOLUME_COMPONENT, Fog, HUD_ELEMENT_COMPONENT,
+    LIGHT_2D_COMPONENT, LIGHT_OCCLUDER_2D_COMPONENT, MeshRenderer, Name,
+    PARTICLES_2D_COMPONENT, POST_VOLUME_COMPONENT, PROCEDURAL_SKY_COMPONENT,
+    PointLight, SKY_LIGHT_COMPONENT, SPRITE_ANIMATION_COMPONENT,
+    SPRITE_COMPONENT, SceneBackground, SkyLight, SpotLight, TILE_MAP_COMPONENT,
+    TONE_MAPPING_COMPONENT, ToneMapping,
 };
 use crate::runtime::{
     ANIMATION_COMPONENT, ARTICULATION_COMPONENT, AUTO_SIMULATION_COMPONENT,
@@ -28,8 +30,8 @@ use crate::runtime::{
     FLUID_BLOCK_COMPONENT, FOLIAGE_COMPONENT, FORCE_FIELD_COMPONENT,
     FRACTURE_COMPONENT, GRAVITY_VOLUME_COMPONENT, HEALTH_COMPONENT,
     HEIGHTFIELD_COMPONENT, IK_COMPONENT, INPUT_ACTION_COMPONENT,
-    JOINT_COMPONENT, LIGHTMAP_COMPONENT, LIGHT_COOKIE_COMPONENT,
-    LIGHT_PROBE_GRID_COMPONENT, LOOT_TABLE_COMPONENT, MESH_SURFACES_COMPONENT,
+    JOINT_COMPONENT, LIGHT_COOKIE_COMPONENT, LIGHT_PROBE_GRID_COMPONENT,
+    LIGHTMAP_COMPONENT, LOOT_TABLE_COMPONENT, MESH_SURFACES_COMPONENT,
     MORPH_COMPONENT, OBJECT_STATE_COMPONENT, PARTICLE_EMITTER_COMPONENT,
     PARTICLE_SHADER_COMPONENT, PHYSICS_MATERIAL_COMPONENT,
     PHYSICS_SYNC_COMPONENT, PICKUP_COMPONENT, PLATFORMER_CONTROLLER_COMPONENT,
@@ -38,7 +40,7 @@ use crate::runtime::{
     ROPE_COMPONENT, SCENE_INSTANCE_COMPONENT, SKIN_COMPONENT,
     SLIDE_SOUND_COMPONENT, SOFT_BLOCK_COMPONENT, SOUND_CUE_COMPONENT,
     TERRAIN_COMPONENT, TERRAIN_FRACTURE_COMPONENT, TWEEN_COMPONENT,
-    VEHICLE_COMPONENT, WATER_COMPONENT,
+    VEHICLE_COMPONENT, WATER_COMPONENT, WORLD_TEXT_COMPONENT,
 };
 use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
@@ -289,6 +291,10 @@ pub(in crate::editor) fn component_help(
             "A sheet of cloth that hangs, folds, flaps in the wind, drapes over colliders and can tear.",
             "Flags, curtains, banners, capes on a body, tarps over crates.",
         ),
+        WORLD_TEXT_COMPONENT => (
+            "Text standing in the world, drawn in a chunky pixel font that faces the object's +Z.",
+            "Shop signs, door labels, numbers over objects, floor markings.",
+        ),
         SOFT_BLOCK_COMPONENT => (
             "A block of jelly that wobbles, keeps its volume, lands on colliders and can tear.",
             "Jelly cubes, squishy cushions, soft obstacles that push bodies back.",
@@ -492,6 +498,34 @@ pub(in crate::editor) fn component_help(
             "Paints an image onto the surfaces inside a box.",
             "Posters, cracks, stains, road markings.",
         ),
+        SPRITE_COMPONENT => (
+            "Draws a flat image in this object's XY plane, layered in 2D canvas order.",
+            "2D characters, pickups, background cards.",
+        ),
+        SPRITE_ANIMATION_COMPONENT => (
+            "Plays frames of a sprite sheet on this object's sprite.",
+            "Walk cycles, blinking pickups, flickering torches.",
+        ),
+        LIGHT_2D_COMPONENT => (
+            "Lights nearby sprites with a round glow centered on this object.",
+            "Torches, lamps, glowing pickups in 2D scenes.",
+        ),
+        LIGHT_OCCLUDER_2D_COMPONENT => (
+            "Blocks 2D lights with a polygon so it casts shadows.",
+            "Walls, pillars, crates that throw shadows from torches.",
+        ),
+        CAMERA_2D_COMPONENT => (
+            "Follows a target smoothly, stays inside limits, and can snap to pixels.",
+            "Side-view and top-down 2D cameras, crisp pixel art.",
+        ),
+        PARTICLES_2D_COMPONENT => (
+            "Draws this object's particles with the sprites, in canvas order.",
+            "Dust, sparks and magic in 2D scenes.",
+        ),
+        AMBIENT_2D_COMPONENT => (
+            "Sets the light every sprite gets before 2D lights.",
+            "Night scenes, dark caves that only lights reveal.",
+        ),
         FOG_VOLUME_COMPONENT => (
             "Fills a box around this object with fog, seen from outside too.",
             "Mist in a valley, smoke in one room.",
@@ -560,11 +594,11 @@ pub(in crate::editor) fn component_label(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Transform;
     use crate::runtime::App;
     use crate::runtime::{
         PICKUP_COMPONENT, SCENE_INSTANCE_COMPONENT, TWEEN_COMPONENT,
     };
-    use crate::Transform;
 
     #[test]
     fn every_engine_component_has_specific_help() {

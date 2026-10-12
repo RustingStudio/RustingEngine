@@ -1160,6 +1160,8 @@ pub const FLUID_BLOCK_COMPONENT: &str = "rusting.fluid_block";
 pub const SOFT_BLOCK_COMPONENT: &str = "rusting.soft_block";
 /// Registry name of the built-in cloth sheet.
 pub const CLOTH_COMPONENT: &str = "rusting.cloth";
+/// Registry name of the built-in world-space text.
+pub const WORLD_TEXT_COMPONENT: &str = "rusting.text";
 pub const WATER_COMPONENT: &str = "rusting.water";
 pub const GRAVITY_VOLUME_COMPONENT: &str = "rusting.gravity_volume";
 pub const VEHICLE_COMPONENT: &str = "rusting.vehicle";
@@ -1210,6 +1212,13 @@ pub const PROCEDURAL_SKY_COMPONENT: &str = "rusting.procedural_sky";
 pub const FOG_VOLUME_COMPONENT: &str = "rusting.fog_volume";
 /// Registry name of the built-in projected image.
 pub const DECAL_COMPONENT: &str = "rusting.decal";
+pub const SPRITE_COMPONENT: &str = "rusting.sprite";
+pub const SPRITE_ANIMATION_COMPONENT: &str = "rusting.sprite_animation";
+pub const AMBIENT_2D_COMPONENT: &str = "rusting.ambient_2d";
+pub const LIGHT_2D_COMPONENT: &str = "rusting.light_2d";
+pub const LIGHT_OCCLUDER_2D_COMPONENT: &str = "rusting.light_occluder_2d";
+pub const PARTICLES_2D_COMPONENT: &str = "rusting.particles_2d";
+pub const CAMERA_2D_COMPONENT: &str = "rusting.camera_2d";
 /// Registry name of the built-in fog and grading area.
 pub const POST_VOLUME_COMPONENT: &str = "rusting.post_volume";
 pub const CAMERA_SCREEN_COMPONENT: &str = "rusting.camera_screen";
@@ -1336,6 +1345,9 @@ impl Default for SceneComponentRegistry {
             .register::<super::ClothSheet>(CLOTH_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
+            .register::<super::WorldText>(WORLD_TEXT_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
             .register::<super::WaterBody>(WATER_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
@@ -1430,6 +1442,27 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::Decal>(DECAL_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Sprite>(SPRITE_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::SpriteAnimation>(SPRITE_ANIMATION_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Ambient2d>(AMBIENT_2D_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Light2d>(LIGHT_2D_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::LightOccluder2d>(LIGHT_OCCLUDER_2D_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Particles2d>(PARTICLES_2D_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Camera2d>(CAMERA_2D_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::ProceduralSky>(PROCEDURAL_SKY_COMPONENT)

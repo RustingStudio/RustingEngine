@@ -56,6 +56,8 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     mat4 decals[16];
     vec4 decal_axes[16];
     vec4 decal_colors[16];
+    // Roughness in x, painted when y is 1.
+    vec4 decal_surfaces[16];
 } shadow;
 layout(set = 2, binding = 2) uniform sampler2D environment_map;
 layout(set = 2, binding = 3) uniform sampler2D scene_color;
@@ -105,9 +107,11 @@ vec4 decal_at(int slot, vec2 uv) {
     if (slot == 2) return texture(decal_images[2], uv);
     return texture(decal_images[3], uv);
 }
-// `color` with every decal whose box holds `position` painted over it in
-// order, faded out on surfaces turned away from the projection.
-vec3 paint_decals(vec3 color, vec3 position, vec3 normal) {
+// `color` (and `roughness`, for decals that set one) with every decal whose
+// box holds `position` painted over it in order, faded out on surfaces
+// turned away from the projection.
+vec3 paint_decals(vec3 color, inout float roughness, vec3 position,
+    vec3 normal) {
     for (int i = 0; i < int(shadow.decal_info.x); ++i) {
         vec3 p = (shadow.decals[i] * vec4(position, 1.0)).xyz;
         if (any(greaterThan(abs(p), vec3(1.0)))) {
@@ -117,8 +121,11 @@ vec3 paint_decals(vec3 color, vec3 position, vec3 normal) {
         // Image top along +Y; texture rows run down.
         vec4 paint = decal_at(int(floor(shadow.decal_axes[i].w + 0.5)),
             vec2(p.x, -p.y) * 0.5 + 0.5) * shadow.decal_colors[i];
-        color = mix(color, paint.rgb,
-            clamp(paint.a, 0.0, 1.0) * smoothstep(0.1, 0.3, facing));
+        float coverage =
+            clamp(paint.a, 0.0, 1.0) * smoothstep(0.1, 0.3, facing);
+        color = mix(color, paint.rgb, coverage);
+        roughness = mix(roughness, shadow.decal_surfaces[i].x,
+            coverage * shadow.decal_surfaces[i].y);
     }
     return color;
 }
@@ -467,8 +474,8 @@ void main() {
         discard;
     }
     float alpha = v_alpha.x == 2u ? base_color.a : 1.0;
-    base_color.rgb = paint_decals(base_color.rgb, v_world_position,
-        normalize(v_normal));
+    base_color.rgb = paint_decals(base_color.rgb, s.roughness,
+        v_world_position, normalize(v_normal));
     // Opacity 0 draws nothing: reflections are not scaled by alpha, so a
     // fully clear surface would otherwise still show a faint mirror.
     if (v_alpha.x == 2u && alpha <= 0.0 && v_transmission.x <= 0.0) {

@@ -14,6 +14,45 @@
 - GPU debris put to sleep by the GPU solver now counts as asleep, so the `DebrisBudget` can free dug terrain slabs at the cap
 - `TerrainFracture::refreeze` freezes debris that rests asleep on the terrain back into its heights and sends a `Refrozen` event
 - `DebrisAggregation` merges small sleeping debris into one static body per grid cell
+- Rendering: `Sprite::in_scene` draws a sprite inside the 3D scene, hidden by nearer meshes, instead of over it
+- Rendering: `rusting.camera_2d` follows a target with smoothing, limits, and a pixel-perfect mode
+- Rendering: impact and settle particles of 2D bodies draw in the 2D pass
+- Rendering: `rusting.particles_2d` draws particle emitters with the sprites in 2D canvas order
+- Rendering: sprites take a normal map that 2D lights shade
+- Rendering: 2D light occluder polygons cast shadows on sprites
+- Rendering: round 2D lights and a 2D ambient color light sprites in the sprite pass
+- Rendering: `rusting.sprite_animation` plays grid sprite sheets on a sprite, frame-stepped on the fixed tick
+- Rendering: 2D sprite pass draws `rusting.sprite` in canvas order over the frame, one instanced draw per image batch
+- Rendering: `rusting.sprite` component with canvas-ordered extraction and image batching for the 2D renderer
+- Rendering: the `[rusting] perf` line reports press-to-present input latency
+- Rendering: the FPS limiter keeps its cadence through late wakes and uneven frames instead of drifting slower
+- Rendering: `FrameGraph` schedules a frame's enabled passes, their barriers, and transient resource lifetimes
+- Tests: editor compositing golden image: the offscreen scene view drawn through egui under panels and overlays
+- Tests: `assert_shader_layout!` checks render upload types field by field against the shader-reflected blocks
+- Tests: a `shaders` CI job compiles every shader file with `glslc` through `scripts/check_shaders.sh`
+- Tests: resize, minimize to a zero-sized surface, and restore redraw the scene correctly at each size
+- Rendering: windows pick an RGBA swapchain on surfaces that prefer it instead of failing on a forced BGRA format
+- Tests: the renderer shuts down validation-clean with frames in flight; `rendering::validation_error_count` counts validation-layer errors
+- Tests: unloaded meshes and textures free their GPU data only after the frames that read them complete
+- Tests: the low-end capability baseline falls back to Eco, CPU culling, no MSAA and the Eco light budget, and draws the Eco image
+- Rendering: `CullingMode::Auto` draws scenes under 128 instances with no culling (was 64), the break-even measured on an RTX 3060
+- Tests: GPU bodies are culled where the GPU moved them, with no state read back
+- Rendering: `rusting.text` draws text in the world (signs, labels) with the built-in pixel font
+- Fluids: Granular fluid blocks draw an opaque sand surface instead of translucent water
+- Rendering: decals take a `roughness` painted with their coverage, so a dark decal can be a wet stain or a puddle that catches highlights
+- Tests: a golden-image test of every primitive's normals
+- Tests: a golden-image test of glTF texture channels and color spaces
+- Tests: a golden-image test of alpha mask and blend modes
+- Tests: a golden-image test of directional shadow depth
+- Tests: a golden-image test of PBR reference spheres
+- Tests: golden-image tests of the Linear, Reinhard and ACES tone mappers
+- Tests: every culling mode and path draws the same image as no culling
+- Tests: automatic culling bounds contain every vertex of the primitives and imported sample meshes
+- Tests: a culled CPU rigid body keeps falling off view and is drawn once it enters the view
+- Decals: `survive_fracture` moves a decal onto the nearest debris piece when its parent breaks, or removes it with the object
+- Particles: `on_fracture` bursts `impact_count` particles at the break point when an emitter's parent object fractures
+- Fracture: debris pieces keep the broken object's normals and texture coordinates on their outer faces
+- Soft blocks: `color` and `texture`, laid once on each side of the block and fixed to the particles
 
 ### Fixed
 

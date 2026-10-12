@@ -163,6 +163,16 @@ pub struct RenderWorld {
     /// each [`Decal`](super::Decal) whose image is loaded or that has none,
     /// in entity order.
     pub decals: Vec<([[f32; 4]; 4], super::Decal)>,
+    /// Each [`Sprite`](super::Sprite) whose image is loaded or that has
+    /// none, in canvas order.
+    pub sprites: Vec<ExtractedSprite>,
+    /// Each [`Light2d`](super::Light2d) in entity order.
+    pub lights_2d: Vec<ExtractedLight2d>,
+    /// World-space edges `[ax, ay, bx, by]` of each
+    /// [`LightOccluder2d`](super::LightOccluder2d) in entity order.
+    pub occluder_edges_2d: Vec<[f32; 4]>,
+    /// The first [`Ambient2d`](super::Ambient2d) color in entity order.
+    pub ambient_2d: Option<[f32; 3]>,
     pub bloom: Option<super::Bloom>,
     pub auto_exposure: Option<super::AutoExposure>,
     pub depth_of_field: Option<super::DepthOfField>,
@@ -189,6 +199,9 @@ pub struct RenderWorld {
     pub particles: Vec<super::ParticleBatch>,
     /// Visible GPU-simulated emitters, in entity order.
     pub gpu_particles: Vec<super::GpuParticleBatch>,
+    /// Emitters drawn in the 2D pass, with their canvas layer and world z,
+    /// in canvas order.
+    pub particles_2d: Vec<(Entity, i32, f32)>,
     /// Meshes the renderer deforms on the GPU this frame, with
     /// [`super::GpuSkinning`]; empty otherwise.
     pub skin_jobs: Vec<super::SkinJob>,
@@ -264,6 +277,58 @@ pub struct RenderWorld {
     renderables_signature: Option<u64>,
     /// Tick and component counts seen by the last signature hash.
     renderables_fingerprint: Option<(Tick, [usize; 8])>,
+}
+
+/// One [`Sprite`](super::Sprite) ready to draw.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExtractedSprite {
+    /// Maps the unit quad, -0.5..0.5 in X and Y, to world space.
+    pub matrix: [[f32; 4]; 4],
+    pub color: [f32; 4],
+    /// Image coordinates at the quad's `[left, top, right, bottom]`, with
+    /// the flips applied.
+    pub uv: [f32; 4],
+    /// `None` draws plain color.
+    pub texture: Option<Handle<crate::assets::TextureAsset>>,
+    /// Tangent-space normal map; `None` lights the sprite flat.
+    pub normal_map: Option<Handle<crate::assets::TextureAsset>>,
+    pub layer: i32,
+    /// Drawn inside the 3D scene; these sort before every canvas sprite.
+    pub in_scene: bool,
+}
+
+/// One [`Light2d`](super::Light2d) ready to light sprites.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExtractedLight2d {
+    /// World position; only X and Y light.
+    pub position: [f32; 3],
+    /// Color times intensity.
+    pub color: [f32; 3],
+    pub radius: f32,
+    /// Height above the sprites, for normal-mapped ones.
+    pub height: f32,
+}
+
+/// Splits canvas-ordered sprites into runs that share an image, one draw
+/// call each. Batching never reorders sprites, so overlaps stay correct.
+pub fn sprite_batches(
+    sprites: &[ExtractedSprite],
+) -> Vec<std::ops::Range<usize>> {
+    let mut batches: Vec<std::ops::Range<usize>> = Vec::new();
+    for (index, sprite) in sprites.iter().enumerate() {
+        match batches.last_mut() {
+            Some(batch)
+                if (
+                    sprites[batch.start].texture,
+                    sprites[batch.start].normal_map,
+                ) == (sprite.texture, sprite.normal_map) =>
+            {
+                batch.end = index + 1;
+            }
+            _ => batches.push(index..index + 1),
+        }
+    }
+    batches
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -415,6 +480,103 @@ pub fn extract_render_world(world: &mut World) {
             .map(|(_, matrix, decal)| (matrix, decal))
             .collect()
     };
+    let sprites = {
+        let mut query =
+            world.query::<(Entity, &GlobalTransform, &super::Sprite)>();
+        let mut sprites = query
+            .iter(world)
+            .filter(|(_, _, sprite)| {
+                sprite.handle.is_some() || sprite.texture.as_os_str().is_empty()
+            })
+            .map(|(entity, transform, sprite)| {
+                let [width, height] = sprite.size;
+                let matrix = nalgebra::Matrix4::from(transform.matrix)
+                    * nalgebra::Matrix4::new_nonuniform_scaling(
+                        &nalgebra::Vector3::new(width, height, 1.0),
+                    );
+                let [mut left, mut top, mut right, mut bottom] = sprite.region;
+                if sprite.flip_x {
+                    std::mem::swap(&mut left, &mut right);
+                }
+                if sprite.flip_y {
+                    std::mem::swap(&mut top, &mut bottom);
+                }
+                let extracted = ExtractedSprite {
+                    matrix: matrix.into(),
+                    color: sprite.color,
+                    uv: [left, top, right, bottom],
+                    texture: sprite.handle,
+                    normal_map: sprite.normal_handle,
+                    layer: sprite.layer,
+                    in_scene: sprite.in_scene,
+                };
+                (entity.index(), extracted)
+            })
+            .collect::<Vec<_>>();
+        sprites.sort_by(|(a_entity, a), (b_entity, b)| {
+            b.in_scene
+                .cmp(&a.in_scene)
+                .then(a.layer.cmp(&b.layer))
+                .then(a.matrix[3][2].total_cmp(&b.matrix[3][2]))
+                .then(a_entity.cmp(b_entity))
+        });
+        sprites.into_iter().map(|(_, sprite)| sprite).collect()
+    };
+    let lights_2d = {
+        let mut query =
+            world.query::<(Entity, &GlobalTransform, &super::Light2d)>();
+        let mut lights = query
+            .iter(world)
+            .map(|(entity, transform, light)| {
+                let position = transform.matrix[3];
+                let extracted = ExtractedLight2d {
+                    position: [position[0], position[1], position[2]],
+                    color: light.color.map(|channel| channel * light.intensity),
+                    radius: light.radius,
+                    height: light.height,
+                };
+                (entity.index(), extracted)
+            })
+            .collect::<Vec<_>>();
+        lights.sort_by_key(|(entity, _)| *entity);
+        lights.into_iter().map(|(_, light)| light).collect()
+    };
+    let occluder_edges_2d = {
+        let mut query =
+            world
+                .query::<(Entity, &GlobalTransform, &super::LightOccluder2d)>();
+        let mut occluders = query
+            .iter(world)
+            .map(|(entity, transform, occluder)| {
+                let m = transform.matrix;
+                let points = occluder
+                    .points
+                    .iter()
+                    .map(|&[x, y]| {
+                        [
+                            m[0][0] * x + m[1][0] * y + m[3][0],
+                            m[0][1] * x + m[1][1] * y + m[3][1],
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                let edges = (0..points.len())
+                    .map(|i| {
+                        let [a, b] =
+                            [points[i], points[(i + 1) % points.len()]];
+                        [a[0], a[1], b[0], b[1]]
+                    })
+                    .collect::<Vec<_>>();
+                (entity.index(), edges)
+            })
+            .collect::<Vec<_>>();
+        occluders.sort_by_key(|(entity, _)| *entity);
+        occluders.into_iter().flat_map(|(_, edges)| edges).collect()
+    };
+    let ambient_2d = world
+        .query::<(Entity, &super::Ambient2d)>()
+        .iter(world)
+        .min_by_key(|(entity, _)| entity.index())
+        .map(|(_, ambient)| ambient.color);
     let tone_mapping = collect_first::<ToneMapping>(world);
     let procedural_sky = collect_first::<super::ProceduralSky>(world);
     let eye = active_camera.as_ref().map(|camera| {
@@ -461,6 +623,24 @@ pub fn extract_render_world(world: &mut World) {
     let ambient_occlusion = collect_first::<super::AmbientOcclusion>(world);
     let particles = collect_particles(world);
     let gpu_particles = collect_gpu_particles(world);
+    let particles_2d = {
+        let mut query = world.query_filtered::<
+            (Entity, &GlobalTransform, &super::Particles2d),
+            With<super::ParticleEmitter>,
+        >();
+        let mut emitters = query
+            .iter(world)
+            .map(|(entity, transform, particles)| {
+                (entity, particles.layer, transform.matrix[3][2])
+            })
+            .collect::<Vec<_>>();
+        emitters.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then(a.2.total_cmp(&b.2))
+                .then(a.0.index().cmp(&b.0.index()))
+        });
+        emitters
+    };
     let particle_shaders = world
         .query_filtered::<(Entity, &super::ParticleShader), With<super::ParticleEmitter>>()
         .iter(world)
@@ -658,6 +838,10 @@ pub fn extract_render_world(world: &mut World) {
     render_world.procedural_sky = procedural_sky;
     render_world.fog_volumes = fog_volumes;
     render_world.decals = decals;
+    render_world.sprites = sprites;
+    render_world.lights_2d = lights_2d;
+    render_world.occluder_edges_2d = occluder_edges_2d;
+    render_world.ambient_2d = ambient_2d;
     render_world.bloom = bloom;
     render_world.auto_exposure = auto_exposure;
     render_world.depth_of_field = depth_of_field;
@@ -671,6 +855,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.ambient_occlusion = ambient_occlusion;
     render_world.particles = particles;
     render_world.gpu_particles = gpu_particles;
+    render_world.particles_2d = particles_2d;
     render_world.particle_shaders = particle_shaders;
     render_world.environment = environment;
     render_world.reflection_probes = reflection_probes;
@@ -1745,6 +1930,258 @@ mod tests {
         let corner = nalgebra::Matrix4::from(decals[0].0)
             * nalgebra::Vector4::new(1.0, 1.0, 1.0, 1.0);
         assert_eq!(corner, nalgebra::Vector4::new(3.0, 1.0, 0.5, 1.0));
+    }
+
+    #[test]
+    fn sprites_draw_in_canvas_order_and_batch_by_image() {
+        use crate::runtime::Sprite;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let mut textures = crate::assets::Assets::default();
+        let image = || crate::assets::TextureAsset {
+            size: [1, 1],
+            rgba8: vec![255; 4],
+            color_space: crate::assets::TextureColorSpace::Srgb,
+            sampler: crate::assets::TextureSampler::default(),
+        };
+        let a = textures.insert(image());
+        let b = textures.insert(image());
+        let sprite = |layer, handle, z: f32| {
+            (
+                Transform::new([0.0, 0.0, z]),
+                Sprite {
+                    texture: "x.png".into(),
+                    layer,
+                    handle: Some(handle),
+                    ..Sprite::default()
+                },
+            )
+        };
+        // Spawned out of order: the higher layer first, nearer z first.
+        app.spawn(sprite(1, a, -5.0));
+        app.spawn(sprite(0, b, 2.0));
+        app.spawn(sprite(0, a, 1.0));
+        app.spawn(sprite(0, a, 1.0));
+        app.spawn((
+            Transform::new([3.0, 0.0, 0.0]),
+            Sprite {
+                texture: "missing.png".into(),
+                ..Sprite::default()
+            },
+        ));
+        app.spawn((
+            Transform::new([3.0, 0.0, 0.0]),
+            Sprite {
+                size: [2.0, 4.0],
+                region: [0.25, 0.0, 0.5, 1.0],
+                flip_x: true,
+                layer: 0,
+                ..Sprite::default()
+            },
+        ));
+        app.update(Duration::ZERO).unwrap();
+        let sprites = &app.world().resource::<RenderWorld>().sprites;
+        assert_eq!(sprites.len(), 5, "the unloaded image is skipped");
+        let order: Vec<_> = sprites
+            .iter()
+            .map(|sprite| (sprite.layer, sprite.matrix[3][2], sprite.texture))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (0, 0.0, None),
+                (0, 1.0, Some(a)),
+                (0, 1.0, Some(a)),
+                (0, 2.0, Some(b)),
+                (1, -5.0, Some(a)),
+            ],
+            "layer, then z, then entity order"
+        );
+        assert_eq!(sprite_batches(sprites), [0..1, 1..3, 3..4, 4..5]);
+        let corner = nalgebra::Matrix4::from(sprites[0].matrix)
+            * nalgebra::Vector4::new(0.5, 0.5, 0.0, 1.0);
+        assert_eq!(corner, nalgebra::Vector4::new(4.0, 2.0, 0.0, 1.0));
+        assert_eq!(sprites[0].uv, [0.5, 0.0, 0.25, 1.0], "flip_x swaps u");
+    }
+
+    #[test]
+    fn in_scene_sprites_extract_before_every_canvas_sprite() {
+        use crate::runtime::Sprite;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let sprite = |layer, in_scene, z: f32| {
+            (
+                Transform::new([0.0, 0.0, z]),
+                Sprite {
+                    layer,
+                    in_scene,
+                    ..Sprite::default()
+                },
+            )
+        };
+        app.spawn(sprite(-3, false, 0.0));
+        app.spawn(sprite(5, true, 0.0));
+        app.spawn(sprite(0, true, -1.0));
+        app.update(Duration::ZERO).unwrap();
+        let order: Vec<_> = app
+            .world()
+            .resource::<RenderWorld>()
+            .sprites
+            .iter()
+            .map(|sprite| (sprite.in_scene, sprite.layer))
+            .collect();
+        assert_eq!(order, [(true, 0), (true, 5), (false, -3)]);
+    }
+
+    #[test]
+    fn sprite_normal_maps_load_as_linear_data_and_split_batches() {
+        use crate::runtime::Sprite;
+        let mut app = App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let normal = app
+            .world_mut()
+            .resource_mut::<crate::assets::AssetServer>()
+            .textures
+            .insert_with_path(
+                "bumps.png",
+                crate::assets::TextureAsset {
+                    size: [1, 1],
+                    rgba8: vec![128, 128, 255, 255],
+                    color_space: crate::assets::TextureColorSpace::Srgb,
+                    sampler: crate::assets::TextureSampler::default(),
+                },
+            )
+            .unwrap();
+        // Same image and layer; only the normal map differs.
+        app.spawn((Transform::default(), Sprite::default()));
+        app.spawn((
+            Transform::default(),
+            Sprite {
+                normal_map: "bumps.png".into(),
+                ..Sprite::default()
+            },
+        ));
+        app.update(Duration::ZERO).unwrap();
+        let assets = app.world().resource::<crate::assets::AssetServer>();
+        assert_eq!(
+            assets.textures.get(normal).unwrap().color_space,
+            crate::assets::TextureColorSpace::Linear
+        );
+        let sprites = &app.world().resource::<RenderWorld>().sprites;
+        assert_eq!(
+            sprites
+                .iter()
+                .map(|sprite| sprite.normal_map)
+                .collect::<Vec<_>>(),
+            [None, Some(normal)]
+        );
+        assert_eq!(sprite_batches(sprites), [0..1, 1..2]);
+    }
+
+    #[test]
+    fn light_occluders_2d_extract_closed_world_edges_in_entity_order() {
+        use crate::runtime::LightOccluder2d;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        // Scaled by 2 and moved, so points land in world space.
+        let mut transform = Transform::new([10.0, 20.0, 5.0]);
+        transform.scale = [2.0; 3];
+        app.spawn((
+            transform,
+            LightOccluder2d {
+                points: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            },
+        ));
+        app.spawn((
+            Transform::default(),
+            LightOccluder2d {
+                points: vec![[0.0, 0.0], [3.0, 0.0]],
+            },
+        ));
+        app.update(Duration::ZERO).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        assert_eq!(
+            render_world.occluder_edges_2d,
+            [
+                [10.0, 20.0, 12.0, 20.0],
+                [12.0, 20.0, 10.0, 22.0],
+                [10.0, 22.0, 10.0, 20.0],
+                [0.0, 0.0, 3.0, 0.0],
+                [3.0, 0.0, 0.0, 0.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn particles_2d_extract_emitters_in_canvas_order() {
+        use crate::runtime::{ParticleEmitter, Particles2d};
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let high = app.spawn((
+            Transform::new([0.0, 0.0, -5.0]),
+            ParticleEmitter::default(),
+            Particles2d { layer: 1 },
+        ));
+        let near = app.spawn((
+            Transform::new([0.0, 0.0, 2.0]),
+            ParticleEmitter::default(),
+            Particles2d { layer: 0 },
+        ));
+        let far = app.spawn((
+            Transform::new([0.0, 0.0, 1.0]),
+            ParticleEmitter::default(),
+            Particles2d { layer: 0 },
+        ));
+        // No emitter, so nothing to draw.
+        app.spawn((Transform::default(), Particles2d { layer: 0 }));
+        app.update(Duration::ZERO).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        assert_eq!(
+            render_world.particles_2d,
+            [(far, 0, 1.0), (near, 0, 2.0), (high, 1, -5.0)]
+        );
+    }
+
+    #[test]
+    fn lights_2d_extract_in_entity_order_with_the_first_ambient() {
+        use crate::runtime::{Ambient2d, Light2d};
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        app.spawn((
+            Transform::new([1.0, 2.0, 3.0]),
+            Light2d {
+                color: [1.0, 0.5, 0.0],
+                intensity: 2.0,
+                radius: 4.0,
+                height: 1.5,
+            },
+        ));
+        app.spawn((Transform::default(), Light2d::default()));
+        app.spawn(Ambient2d {
+            color: [0.1, 0.2, 0.3],
+        });
+        app.spawn(Ambient2d::default());
+        app.update(Duration::ZERO).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        assert_eq!(
+            render_world.lights_2d,
+            [
+                ExtractedLight2d {
+                    position: [1.0, 2.0, 3.0],
+                    color: [2.0, 1.0, 0.0],
+                    radius: 4.0,
+                    height: 1.5,
+                },
+                ExtractedLight2d {
+                    position: [0.0; 3],
+                    color: [1.0; 3],
+                    radius: 5.0,
+                    height: 0.5,
+                },
+            ]
+        );
+        assert_eq!(render_world.ambient_2d, Some([0.1, 0.2, 0.3]));
     }
 
     #[test]

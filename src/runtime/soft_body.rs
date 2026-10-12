@@ -728,6 +728,9 @@ pub struct SoftSkin {
     pub(super) entity: Option<bevy_ecs::prelude::Entity>,
     /// State hash the mesh was built from; a body at rest keeps its mesh.
     built_from: u64,
+    /// Particle positions at rest, which the skin's UVs come from; empty
+    /// for a skin without UVs.
+    pub(super) rest: Vec<[f32; 3]>,
 }
 
 impl SoftSkin {
@@ -739,6 +742,7 @@ impl SoftSkin {
             mesh: None,
             entity: None,
             built_from: 0,
+            rest: Vec::new(),
         }
     }
 }
@@ -798,7 +802,6 @@ pub const MAX_SOFT_BLOCK_PARTICLES: u64 = 4_096;
 #[derive(
     bevy_ecs::prelude::Component,
     Clone,
-    Copy,
     Debug,
     PartialEq,
     serde::Serialize,
@@ -823,6 +826,10 @@ pub struct SoftBlock {
     pub substeps: u32,
     /// Draw the outer faces.
     pub visible: bool,
+    /// Linear RGBA, multiplied into `texture`.
+    pub color: [f32; 4],
+    /// Image laid once on each side of the block; empty for plain color.
+    pub texture: std::path::PathBuf,
 }
 
 impl Default for SoftBlock {
@@ -839,6 +846,8 @@ impl Default for SoftBlock {
             tear_strain: 0.0,
             substeps: 10,
             visible: true,
+            color: JELLY_COLOR,
+            texture: std::path::PathBuf::new(),
         }
     }
 }
@@ -889,7 +898,9 @@ pub(super) fn spawn_soft_bodies(
                 if let Some(assets) =
                     assets.as_deref_mut().filter(|_| block.visible)
                 {
-                    volume.skin = Some(SoftSkin::new(jelly_material(assets)));
+                    let mut skin = SoftSkin::new(block_material(block, assets));
+                    skin.rest = volume.body.positions.clone();
+                    volume.skin = Some(skin);
                 }
                 commands.entity(entity).insert(volume);
             }
@@ -919,10 +930,46 @@ pub(super) fn named_material(
     })
 }
 
-fn jelly_material(
+/// Base color of a block with no `color` set.
+const JELLY_COLOR: [f32; 4] = [0.35, 0.8, 0.3, 1.0];
+
+/// The shared jelly material, or one of the block's own for another color
+/// or a texture.
+fn block_material(
+    block: &SoftBlock,
     assets: &mut crate::assets::AssetServer,
 ) -> crate::assets::Handle<crate::assets::MaterialAsset> {
-    named_material(assets, "Soft Block Jelly", [0.35, 0.8, 0.3, 1.0], 0.25)
+    if block.color == JELLY_COLOR && block.texture.as_os_str().is_empty() {
+        return named_material(assets, "Soft Block Jelly", JELLY_COLOR, 0.25);
+    }
+    textured_material(assets, "Soft Block", block.color, &block.texture, 0.25)
+}
+
+/// A new material of `color` times the image at `texture`; an empty path
+/// or an image that fails to load leaves the color.
+pub(super) fn textured_material(
+    assets: &mut crate::assets::AssetServer,
+    name: &str,
+    base_color: [f32; 4],
+    texture: &std::path::Path,
+    roughness: f32,
+) -> crate::assets::Handle<crate::assets::MaterialAsset> {
+    let texture = (!texture.as_os_str().is_empty())
+        .then(|| assets.load_texture(texture))
+        .and_then(|loaded| {
+            loaded
+                .map_err(|error| {
+                    eprintln!("{name} texture {texture:?}: {error}")
+                })
+                .ok()
+        });
+    assets.materials.insert(crate::assets::MaterialAsset {
+        name: name.into(),
+        base_color,
+        base_color_texture: texture,
+        roughness,
+        ..crate::assets::MaterialAsset::default()
+    })
 }
 
 /// The faces of a body's tetrahedra that no other tetrahedron shares, each
@@ -971,6 +1018,47 @@ pub fn skin_mesh(body: &SoftBody) -> crate::assets::MeshAsset {
     crate::assets::MeshAsset { vertices, indices }
 }
 
+/// [`skin_mesh`] with a vertex per triangle corner and UVs from `rest`,
+/// the particles at rest: each triangle takes the side of the rest box it
+/// faces most and the image fills that side once, upright on the four
+/// walls and with its top toward -Z on the top and bottom. The UVs stay
+/// with the particles, so the image squashes and tears with the body.
+/// Without one rest position per particle it is [`skin_mesh`].
+pub fn skin_uv_mesh(
+    body: &SoftBody,
+    rest: &[[f32; 3]],
+) -> crate::assets::MeshAsset {
+    let shared = skin_mesh(body);
+    if rest.len() != body.positions.len() || rest.is_empty() {
+        return shared;
+    }
+    let low = rest.iter().fold(vector(rest[0]), |m, &p| m.inf(&vector(p)));
+    let high = rest.iter().fold(vector(rest[0]), |m, &p| m.sup(&vector(p)));
+    let span = (high - low).map(|x| x.max(1e-12));
+    let mut mesh = crate::assets::MeshAsset::default();
+    for triangle in shared.indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|k| vector(rest[triangle[k] as usize]));
+        let normal = (b - a).cross(&(c - a));
+        let axis = normal.iamax();
+        let side = normal[axis].signum();
+        for &index in triangle {
+            // Each axis from 0 at the low side to 1 at the high side.
+            let t = (vector(rest[index as usize]) - low).component_div(&span);
+            let uv = match axis {
+                0 => [0.5 - side * (t.z - 0.5), 1.0 - t.y],
+                1 => [t.x, 0.5 + side * (t.z - 0.5)],
+                _ => [0.5 + side * (t.x - 0.5), 1.0 - t.y],
+            };
+            mesh.indices.push(mesh.vertices.len() as u32);
+            mesh.vertices.push(crate::assets::MeshVertex {
+                uv,
+                ..shared.vertices[index as usize]
+            });
+        }
+    }
+    mesh
+}
+
 /// Per fixed step, after [`step_soft_bodies`]: rebuilds the skin mesh of
 /// every visible soft body and cloth that moved, spawning its entity the
 /// first time. The entity carries the fluid surface markers, so the editor
@@ -1006,7 +1094,7 @@ pub(super) fn sync_soft_skins(
             owner,
             skin,
             hash,
-            || skin_mesh(&volume.body),
+            |skin| skin_uv_mesh(&volume.body, &skin.rest),
         );
     }
     for (owner, mut cloth) in &mut cloths {
@@ -1023,7 +1111,7 @@ pub(super) fn sync_soft_skins(
             owner,
             skin,
             hash,
-            || super::cloth::cloth_mesh(&cloth.cloth),
+            |_| super::cloth::cloth_mesh(&cloth.cloth),
         );
     }
 }
@@ -1036,7 +1124,7 @@ fn sync_skin(
     owner: bevy_ecs::prelude::Entity,
     skin: &mut SoftSkin,
     hash: u64,
-    build: impl FnOnce() -> crate::assets::MeshAsset,
+    build: impl FnOnce(&SoftSkin) -> crate::assets::MeshAsset,
 ) {
     let owned = skin.entity.is_some_and(|entity| {
         markers.get(entity).is_ok_and(|marker| marker.0 == owner)
@@ -1052,7 +1140,7 @@ fn sync_skin(
         return;
     }
     skin.built_from = hash;
-    let mesh = build();
+    let mesh = build(skin);
     match skin.mesh.and_then(|handle| assets.meshes.get_mut(handle)) {
         Some(slot) => *slot = mesh,
         None => {
@@ -1760,6 +1848,104 @@ mod tests {
                 assert!(vector(vertex.normal).dot(&outward) > 0.0);
             }
         }
+    }
+
+    #[test]
+    fn soft_skin_uvs_fill_each_side_once_and_stay_on_the_particles() {
+        let mut body =
+            SoftBody::block([0.0; 3], [2, 2, 2], 0.5, 1000.0).unwrap();
+        let rest = body.positions.clone();
+        let mesh = skin_uv_mesh(&body, &rest);
+        assert_eq!(mesh.indices.len(), skin_mesh(&body).indices.len());
+        // The block spans 0..1 on every axis, so rest coordinates are the
+        // box fractions. Each side's expected UVs, looking at it from out.
+        type Uv = fn(Vector3<f32>) -> [f32; 2];
+        let sides: [(usize, f32, Uv); 6] = [
+            (2, 1.0, |p| [p.x, 1.0 - p.y]),
+            (2, 0.0, |p| [1.0 - p.x, 1.0 - p.y]),
+            (0, 1.0, |p| [1.0 - p.z, 1.0 - p.y]),
+            (0, 0.0, |p| [p.z, 1.0 - p.y]),
+            (1, 1.0, |p| [p.x, p.z]),
+            (1, 0.0, |p| [p.x, 1.0 - p.z]),
+        ];
+        let check = |mesh: &crate::assets::MeshAsset,
+                     positions: &[[f32; 3]]| {
+            let mut seen = [0; 6];
+            for triangle in mesh.indices.chunks_exact(3) {
+                let corners = [0, 1, 2].map(|k| triangle[k] as usize);
+                let at = corners.map(|i| {
+                    // Each corner vertex sits on one particle.
+                    let p = mesh.vertices[i].position;
+                    let particle = positions.iter().position(|&q| q == p);
+                    vector(rest[particle.unwrap()])
+                });
+                let (k, (_, _, uv)) = sides
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (axis, at_side, _))| {
+                        at.iter().all(|p| p[*axis] == *at_side)
+                    })
+                    .expect("every outer face lies on a side");
+                seen[k] += 1;
+                for (i, p) in corners.iter().zip(at) {
+                    let got = mesh.vertices[*i].uv;
+                    let want = uv(p);
+                    assert!(
+                        (0..2).all(|c| (got[c] - want[c]).abs() < 1e-6),
+                        "side {k} at {p:?}: {got:?}, want {want:?}"
+                    );
+                }
+            }
+            assert_eq!(seen, [8; 6]);
+        };
+        check(&mesh, &body.positions);
+        // Squashed and moved, the image stays on the same particles.
+        for p in &mut body.positions {
+            *p = [p[0] + 3.0, p[1] * 0.5 + 0.25, p[2] - 1.0];
+        }
+        check(&skin_uv_mesh(&body, &rest), &body.positions);
+        // Without rest positions the skin has no UVs to give.
+        assert_eq!(skin_uv_mesh(&body, &[]), skin_mesh(&body));
+    }
+
+    #[test]
+    fn soft_blocks_draw_in_their_color_and_plain_ones_share_the_jelly() {
+        let mut app = App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        let red = [0.8, 0.1, 0.1, 1.0];
+        for (x, color) in [(0.0, red), (3.0, JELLY_COLOR), (6.0, JELLY_COLOR)] {
+            app.spawn((
+                crate::Transform::new([x, 1.0, 0.0]),
+                SoftBlock {
+                    color,
+                    ..SoftBlock::default()
+                },
+            ));
+        }
+        run_app(&mut app, 2);
+        let world = app.world_mut();
+        let mut skins = world.query::<&crate::runtime::MeshRenderer>();
+        let skins: Vec<_> = skins.iter(world).copied().collect();
+        let assets = world.resource::<crate::assets::AssetServer>();
+        let colors: Vec<_> = skins
+            .iter()
+            .map(|s| assets.materials.get(s.material).unwrap().base_color)
+            .collect();
+        assert_eq!(colors.len(), 3);
+        assert_eq!(colors.iter().filter(|c| **c == red).count(), 1);
+        let plain: Vec<_> = skins
+            .iter()
+            .filter(|s| {
+                assets.materials.get(s.material).unwrap().base_color
+                    == JELLY_COLOR
+            })
+            .map(|s| s.material)
+            .collect();
+        assert_eq!(plain.len(), 2);
+        assert_eq!(plain[0], plain[1], "plain blocks share one material");
+        // The skins carry the rest UVs.
+        let mesh = assets.meshes.get(skins[0].mesh).unwrap();
+        assert!(mesh.vertices.iter().any(|v| v.uv[0] > 0.9));
     }
 
     use crate::runtime::{

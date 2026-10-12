@@ -51,6 +51,214 @@ impl Default for TileKind {
     }
 }
 
+/// A flat image in the XY plane, centered on the object and facing +Z,
+/// drawn by the 2D sprite pass in canvas order: lower `layer` first, then
+/// lower world z, then entity order. Consecutive sprites that share an
+/// image draw as one batch.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sprite {
+    /// Image path relative to the project's `assets` folder; empty draws
+    /// plain `color`.
+    pub texture: PathBuf,
+    /// Linear RGBA multiplied with the image.
+    pub color: [f32; 4],
+    /// Width and height in world units, before the object's scale.
+    pub size: [f32; 2],
+    /// Part of the image to draw, `[u0, v0, u1, v1]` with v down: one frame
+    /// of a sprite sheet.
+    pub region: [f32; 4],
+    pub flip_x: bool,
+    pub flip_y: bool,
+    /// Canvas layer; higher layers draw over lower ones whatever their z.
+    pub layer: i32,
+    /// The loaded `texture`, set by the engine.
+    #[serde(skip)]
+    pub handle: Option<Handle<crate::assets::TextureAsset>>,
+    /// Tangent-space normal map (green up) for [`Light2d`]s, read as linear
+    /// data; empty lights the sprite as a flat card.
+    pub normal_map: PathBuf,
+    /// The loaded `normal_map`, set by the engine.
+    #[serde(skip)]
+    pub normal_handle: Option<Handle<crate::assets::TextureAsset>>,
+    /// Draws inside the 3D scene instead of over it: before tone mapping,
+    /// hidden behind nearer opaque geometry, under every canvas sprite.
+    pub in_scene: bool,
+}
+
+impl Default for Sprite {
+    fn default() -> Self {
+        Self {
+            texture: PathBuf::new(),
+            color: [1.0; 4],
+            size: [1.0, 1.0],
+            region: [0.0, 0.0, 1.0, 1.0],
+            flip_x: false,
+            flip_y: false,
+            layer: 0,
+            handle: None,
+            normal_map: PathBuf::new(),
+            normal_handle: None,
+            in_scene: false,
+        }
+    }
+}
+
+/// A round light for [`Sprite`]s, centered on the object. It brightens
+/// sprites within `radius` world units in the XY plane, fading to nothing at
+/// the edge, and adds over [`Ambient2d`].
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Light2d {
+    /// Linear RGB.
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub radius: f32,
+    /// How far the light sits above the sprites, in world units: only
+    /// normal-mapped sprites see it, lower lights graze their bumps.
+    pub height: f32,
+}
+
+impl Default for Light2d {
+    fn default() -> Self {
+        Self {
+            color: [1.0; 3],
+            intensity: 1.0,
+            radius: 5.0,
+            height: 0.5,
+        }
+    }
+}
+
+/// The light every [`Sprite`] gets before any [`Light2d`]: dark for a
+/// night scene that only lights reveal. Without one, sprites keep their full
+/// color and lights brighten them. The first one in entity order is used.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ambient2d {
+    /// Linear RGB multiplied with each sprite.
+    pub color: [f32; 3],
+}
+
+impl Default for Ambient2d {
+    fn default() -> Self {
+        Self { color: [0.2; 3] }
+    }
+}
+
+/// Draws the [`super::ParticleEmitter`] on the same object in the 2D pass
+/// with the [`Sprite`]s, in canvas order at `layer` and its world z, instead
+/// of in the 3D scene.
+#[derive(
+    Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct Particles2d {
+    /// Canvas layer; higher layers draw over lower ones whatever their z.
+    pub layer: i32,
+}
+
+/// A polygon that blocks every [`Light2d`]: sprite pixels whose straight
+/// line to a light crosses one of its edges get none of that light. The
+/// renderer uses the first 256 edges in entity order.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LightOccluder2d {
+    /// Closed outline in the object's XY plane.
+    pub points: Vec<[f32; 2]>,
+}
+
+impl Default for LightOccluder2d {
+    fn default() -> Self {
+        Self {
+            points: vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+        }
+    }
+}
+
+/// Plays frames of a sprite sheet on the [`Sprite`] of the same object by
+/// writing its `region`. The sheet is a grid of `columns` x `rows` equal
+/// frames numbered row by row from the top left; the animation shows
+/// `count` of them starting at `first`, `fps` per second of fixed time.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpriteAnimation {
+    pub columns: u32,
+    pub rows: u32,
+    pub first: u32,
+    pub count: u32,
+    pub fps: f32,
+    /// Start over after the last frame; otherwise hold it.
+    pub looping: bool,
+    /// Seconds of fixed time played so far.
+    #[serde(skip)]
+    pub elapsed: f64,
+}
+
+impl Default for SpriteAnimation {
+    fn default() -> Self {
+        Self {
+            columns: 1,
+            rows: 1,
+            first: 0,
+            count: 1,
+            fps: 10.0,
+            looping: true,
+            elapsed: 0.0,
+        }
+    }
+}
+
+impl SpriteAnimation {
+    /// The sheet frame showing now.
+    #[must_use]
+    pub fn frame(&self) -> u32 {
+        let count = self.count.max(1);
+        // Whole frames only, so a frame shows for exactly 1 / fps seconds.
+        // The tolerance keeps whole-nanosecond fixed steps (six 1/60 s steps
+        // at 10 fps sum to 0.99999996 frames) from showing a frame a tick
+        // late. ponytail: the shortfall grows about 1e-3 frames per 40
+        // minutes of play at 60 Hz; count ticks instead if longer runs drift.
+        let played =
+            (self.elapsed * f64::from(self.fps.max(0.0)) + 1e-3).floor() as u32;
+        let step = if self.looping {
+            played % count
+        } else {
+            played.min(count - 1)
+        };
+        self.first + step
+    }
+
+    /// `[u0, v0, u1, v1]` of `frame` in the sheet, v down.
+    #[must_use]
+    pub fn region(&self, frame: u32) -> [f32; 4] {
+        let (columns, rows) = (self.columns.max(1), self.rows.max(1));
+        let (column, row) = (frame % columns, (frame / columns).min(rows - 1));
+        let (width, height) = (1.0 / columns as f32, 1.0 / rows as f32);
+        [
+            column as f32 * width,
+            row as f32 * height,
+            (column + 1) as f32 * width,
+            (row + 1) as f32 * height,
+        ]
+    }
+}
+
+/// Per fixed step: advances every sprite animation and shows its frame.
+pub(super) fn animate_sprites(
+    time: Res<FrameTime>,
+    mut sprites: Query<(&mut SpriteAnimation, &mut Sprite)>,
+) {
+    let dt = time.fixed_delta.as_secs_f64();
+    for (mut animation, mut sprite) in &mut sprites {
+        animation.elapsed += dt;
+        let region = animation.region(animation.frame());
+        if sprite.region != region {
+            sprite.region = region;
+        }
+    }
+}
+
 /// Farthest column or row `set_tile` may grow a map to; a stray coordinate
 /// must not allocate gigabytes.
 pub const MAX_TILE_CELLS: usize = 4096;
@@ -567,5 +775,260 @@ pub(super) fn platformer_move(
             .floor
             .and_then(|floor| Some((floor, floor_at(floor)?)));
         transform.position = moved.position;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cameras_2d_follow_smoothly_stay_in_limits_and_fit_pixels() {
+        use super::super::{Camera, GlobalTransform, Name, Projection};
+        use std::time::Duration;
+        let mut app = super::super::App::new();
+        app.world_mut()
+            .resource_mut::<RuntimeInput>()
+            .record_viewport_size([800.0, 600.0]);
+        let player = app
+            .spawn((Name("Player".into()), Transform::new([10.0, 0.0, 0.0])));
+        let ortho = |vertical_size| Camera {
+            projection: Projection::Orthographic {
+                vertical_size,
+                near: 0.1,
+                far: 100.0,
+            },
+            ..Camera::default()
+        };
+        let camera = app.spawn((
+            ortho(6.0),
+            Transform::new([0.0, 0.0, 10.0]),
+            Camera2d {
+                target: "Player".into(),
+                smoothing: 0.1,
+                ..Camera2d::default()
+            },
+        ));
+        let at = |app: &super::super::App| {
+            let transform = app.world().get::<Transform>(camera).unwrap();
+            let global = app.world().get::<GlobalTransform>(camera).unwrap();
+            assert_eq!(global.matrix[3][..2], transform.position[..2]);
+            assert_eq!(transform.position[2], 10.0);
+            [transform.position[0], transform.position[1]]
+        };
+        // One smoothing time closes 1 - 1/e of the gap.
+        app.update(Duration::from_secs_f32(0.1)).unwrap();
+        let [x, y] = at(&app);
+        assert!((x - 10.0 * (1.0 - (-1.0_f32).exp())).abs() < 1e-3, "{x}");
+        assert_eq!(y, 0.0);
+        // Limits keep the 8 x 6 view inside; a narrow room centers it.
+        let set = |app: &mut super::super::App,
+                   edit: &dyn Fn(&mut Camera2d)| {
+            edit(&mut app.world_mut().get_mut::<Camera2d>(camera).unwrap());
+            app.update(Duration::from_secs_f32(0.1)).unwrap();
+        };
+        set(&mut app, &|follow| {
+            follow.smoothing = 0.0;
+            follow.offset = [0.0, 100.0];
+            follow.limits = Some([-5.0, -5.0, 5.0, 5.0]);
+        });
+        assert_eq!(at(&app), [1.0, 2.0]);
+        set(&mut app, &|follow| {
+            follow.limits = Some([0.0, -5.0, 4.0, 5.0])
+        });
+        assert_eq!(at(&app), [2.0, 2.0]);
+        // Pixel-perfect at 16 pixels per unit: 600 / 96 rounds to a zoom
+        // of 6, so the view is 6.25 tall and moves in 1/96 steps.
+        set(&mut app, &|follow| {
+            follow.limits = None;
+            follow.offset = [0.004 - 10.0, 0.3];
+            follow.pixels_per_unit = 16.0;
+        });
+        let camera_component = app.world().get::<Camera>(camera).unwrap();
+        assert_eq!(camera_component.projection, ortho(6.25).projection);
+        assert_eq!(at(&app), [0.0, (0.3_f32 * 96.0).round() / 96.0]);
+        // Steps under half a screen pixel still add up under snapping.
+        set(&mut app, &|follow| {
+            follow.offset = [1.0 - 10.0, 0.0];
+            follow.smoothing = 30.0;
+        });
+        for _ in 0..20 {
+            app.update(Duration::from_secs_f32(0.1)).unwrap();
+        }
+        assert!(at(&app)[0] > 0.05, "{:?}", at(&app));
+        let _ = player;
+    }
+
+    #[test]
+    fn sprite_animations_step_through_sheet_frames_on_the_fixed_tick() {
+        let mut app = super::super::App::new();
+        let step = app.world().resource::<FrameTime>().fixed_delta;
+        // A 4 x 2 sheet; the walk is frames 2..5, wrapping onto row two.
+        let walk = app.spawn((
+            Sprite::default(),
+            SpriteAnimation {
+                columns: 4,
+                rows: 2,
+                first: 2,
+                count: 4,
+                fps: 1.0 / step.as_secs_f32(),
+                ..SpriteAnimation::default()
+            },
+        ));
+        let once = app.spawn((
+            Sprite::default(),
+            SpriteAnimation {
+                columns: 4,
+                rows: 2,
+                count: 2,
+                fps: 1.0 / step.as_secs_f32(),
+                looping: false,
+                ..SpriteAnimation::default()
+            },
+        ));
+        // Ten frames a second on the 60 Hz step: a new frame every six
+        // steps, though six whole-nanosecond steps sum just under 0.1 s.
+        let slow = app.spawn((
+            Sprite::default(),
+            SpriteAnimation {
+                count: 8,
+                columns: 8,
+                fps: 10.0,
+                ..SpriteAnimation::default()
+            },
+        ));
+        let mut frames = Vec::new();
+        let mut slow_frames = Vec::new();
+        for _ in 0..6 {
+            app.update(step).unwrap();
+            let animation =
+                |entity| app.world().get::<SpriteAnimation>(entity).unwrap();
+            frames.push((animation(walk).frame(), animation(once).frame()));
+            slow_frames.push(animation(slow).frame());
+        }
+        let region = |entity| app.world().get::<Sprite>(entity).unwrap().region;
+        assert_eq!(region(walk), [0.0, 0.5, 0.25, 1.0], "frame 4 is row two");
+        assert_eq!(
+            frames,
+            [(3, 1), (4, 1), (5, 1), (2, 1), (3, 1), (4, 1)],
+            "one frame per fixed step; the walk loops, the other holds"
+        );
+        assert_eq!(slow_frames, [0, 0, 0, 0, 0, 1]);
+    }
+}
+
+/// A 2D camera on the object with the [`super::Camera`]: follows the object
+/// named `target` with smoothing, keeps its view inside `limits`, and in
+/// pixel-perfect mode draws each art pixel as a whole number of screen
+/// pixels. The camera object should have no parent, since it is placed in
+/// world space.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Camera2d {
+    /// Name of the object to follow; empty stays put.
+    pub target: String,
+    /// World offset from the target to the view center.
+    pub offset: [f32; 2],
+    /// Seconds to close about two thirds of the gap to the target; 0 snaps.
+    pub smoothing: f32,
+    /// `[min_x, min_y, max_x, max_y]` world rectangle the orthographic view
+    /// stays inside; a view wider than it centers on it.
+    pub limits: Option<[f32; 4]>,
+    /// Art pixels per world unit. Above 0, the orthographic view height
+    /// zooms to a whole number of screen pixels per art pixel and the view
+    /// center snaps to screen pixels.
+    pub pixels_per_unit: f32,
+    /// The smoothed center before limits and snapping, so slow moves are
+    /// not rounded away.
+    #[serde(skip)]
+    pub center: Option<[f32; 2]>,
+}
+
+impl Default for Camera2d {
+    fn default() -> Self {
+        Self {
+            target: String::new(),
+            offset: [0.0; 2],
+            smoothing: 0.15,
+            limits: None,
+            pixels_per_unit: 0.0,
+            center: None,
+        }
+    }
+}
+
+/// Each frame after transforms propagate: moves every [`Camera2d`] toward
+/// its target, then keeps its view inside its limits and fits it to whole
+/// screen pixels.
+pub(super) fn follow_cameras_2d(
+    time: Res<FrameTime>,
+    input: Res<RuntimeInput>,
+    targets: Query<(&super::Name, &super::GlobalTransform), Without<Camera2d>>,
+    mut cameras: Query<(
+        &mut Camera2d,
+        &mut super::Camera,
+        &mut Transform,
+        &mut super::GlobalTransform,
+    )>,
+) {
+    let dt = time.delta.as_secs_f32();
+    let [width, height] = input.viewport_size();
+    for (mut follow, mut camera, mut transform, mut global) in &mut cameras {
+        let mut center = follow
+            .center
+            .unwrap_or([transform.position[0], transform.position[1]]);
+        let goal = targets
+            .iter()
+            .find(|(name, _)| {
+                !follow.target.is_empty() && name.as_str() == follow.target
+            })
+            .map(|(_, target)| {
+                let at = target.matrix[3];
+                [at[0] + follow.offset[0], at[1] + follow.offset[1]]
+            });
+        if let Some(goal) = goal {
+            let share = if follow.smoothing > 0.0 {
+                1.0 - (-dt / follow.smoothing).exp()
+            } else {
+                1.0
+            };
+            for axis in 0..2 {
+                center[axis] += (goal[axis] - center[axis]) * share;
+            }
+        }
+        follow.center = Some(center);
+        let mut drawn = center;
+        if let super::Projection::Orthographic { vertical_size, .. } =
+            &mut camera.projection
+        {
+            let pixels = follow.pixels_per_unit;
+            if pixels > 0.0 && height > 0.0 && *vertical_size > 0.0 {
+                let zoom =
+                    (height / (*vertical_size * pixels)).round().max(1.0);
+                *vertical_size = height / (zoom * pixels);
+            }
+            if let Some([min_x, min_y, max_x, max_y]) = follow.limits {
+                let aspect = if height > 0.0 { width / height } else { 1.0 };
+                let half =
+                    [*vertical_size * aspect * 0.5, *vertical_size * 0.5];
+                for (axis, (min, max)) in
+                    [(min_x, max_x), (min_y, max_y)].into_iter().enumerate()
+                {
+                    drawn[axis] = if max - min <= half[axis] * 2.0 {
+                        (min + max) * 0.5
+                    } else {
+                        drawn[axis].clamp(min + half[axis], max - half[axis])
+                    };
+                }
+            }
+            if pixels > 0.0 && height > 0.0 {
+                let step = *vertical_size / height;
+                drawn = drawn.map(|value| (value / step).round() * step);
+            }
+        }
+        transform.position[0] = drawn[0];
+        transform.position[1] = drawn[1];
+        global.matrix[3][0] = drawn[0];
+        global.matrix[3][1] = drawn[1];
     }
 }
