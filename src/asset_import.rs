@@ -131,6 +131,8 @@ pub enum AssetImportError {
         hook: String,
         message: String,
     },
+    /// A generated scene was edited by hand since it was generated.
+    GeneratedSceneEdited(PathBuf),
 }
 
 impl AssetImportError {
@@ -145,6 +147,7 @@ impl AssetImportError {
             Self::Io { .. } => "ASSET_IO",
             Self::GeneratorUnknown(_) => "GENERATOR_UNKNOWN",
             Self::GeneratorFailed { .. } => "GENERATOR_FAILED",
+            Self::GeneratedSceneEdited(_) => "GENERATED_SCENE_EDITED",
         }
     }
 
@@ -154,6 +157,7 @@ impl AssetImportError {
             Self::SourceMissing(path)
             | Self::Unsupported(path)
             | Self::Exists(path)
+            | Self::GeneratedSceneEdited(path)
             | Self::Invalid { path, .. }
             | Self::Io { path, .. } => Some(path),
             Self::NotFound(_)
@@ -199,6 +203,11 @@ impl Display for AssetImportError {
             Self::GeneratorFailed { hook, message } => {
                 write!(formatter, "generator `{hook}`: {message}")
             }
+            Self::GeneratedSceneEdited(path) => write!(
+                formatter,
+                "`{}` was edited since it was generated; pass --force to replace it",
+                path.display()
+            ),
         }
     }
 }
@@ -819,6 +828,203 @@ pub fn generate_asset(
                 .then_some(&config.settings),
             dry_run,
         ),
+    }
+}
+
+/// A scene made by a project command, listed under `scene_generators` in
+/// `project.json`. The command runs from the project root without a shell,
+/// gets `RUSTING_SEED`, the `inputs` as JSON in `RUSTING_INPUTS`, and a
+/// path to write the scene to in `RUSTING_OUTPUT` (a game binary can read
+/// them with [`crate::procgen::GeneratorRequest::from_env`] and write the
+/// scene with [`crate::runtime::save_scene`]). The result is a normal scene
+/// at `output`, cached by the command, seed, inputs and the contents of the
+/// `watch` paths: [`generate_scenes`] runs the command again only when one
+/// of them changed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SceneGenerator {
+    /// Program and arguments.
+    pub command: Vec<String>,
+    /// The scene to write, relative to the project root.
+    pub output: PathBuf,
+    pub seed: u64,
+    /// Any JSON the command reads, such as a size or a room count.
+    pub inputs: serde_json::Value,
+    /// Files and folders, relative to the project root, whose contents
+    /// the output depends on, such as the generator's source folder.
+    pub watch: Vec<PathBuf>,
+}
+
+/// What [`generate_scenes`] did for one generator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GeneratedScene {
+    pub name: String,
+    pub output: PathBuf,
+    /// `generated`, or `cached` when nothing it depends on changed.
+    pub status: &'static str,
+    /// FNV-1a 64 over the command, seed, inputs and watched contents.
+    pub key: String,
+}
+
+/// The cache, `.rusting/generated.json`: the key each output was made
+/// with and the output's revision, to spot hand edits.
+#[derive(Default, Serialize, Deserialize)]
+struct GeneratedCache(BTreeMap<String, (String, String)>);
+
+fn generator_key(project_root: &Path, generator: &SceneGenerator) -> String {
+    let mut bytes = serde_json::to_vec(&(
+        &generator.command,
+        &generator.output,
+        generator.seed,
+        &generator.inputs,
+    ))
+    .unwrap_or_default();
+    for watched in &generator.watch {
+        let mut stack = vec![project_root.join(watched)];
+        while let Some(path) = stack.pop() {
+            bytes.extend(
+                path.strip_prefix(project_root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .bytes(),
+            );
+            bytes.push(0);
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                let mut children: Vec<_> =
+                    entries.flatten().map(|entry| entry.path()).collect();
+                // Reverse order so the stack visits them by name.
+                children.sort_by(|a, b| b.cmp(a));
+                stack.extend(children);
+            } else if let Ok(contents) = std::fs::read(&path) {
+                bytes.extend(contents);
+            }
+            bytes.push(0);
+        }
+    }
+    crate::runtime::scene_revision(&bytes)
+}
+
+/// Runs the `scene_generators` named in `names` (all of them when empty)
+/// whose key changed or whose output is missing, or every one with
+/// `force`. Each output is checked as a scene before it is written, so a
+/// broken command never replaces a good scene. An output edited by hand
+/// since it was generated is refused with `GENERATED_SCENE_EDITED` unless
+/// `force` is set. `dry_run` reports what would run without running it.
+pub fn generate_scenes(
+    project_root: &Path,
+    generators: &BTreeMap<String, SceneGenerator>,
+    names: &[&str],
+    force: bool,
+    dry_run: bool,
+) -> Result<Vec<GeneratedScene>, AssetImportError> {
+    for name in names {
+        if !generators.contains_key(*name) {
+            return Err(AssetImportError::GeneratorUnknown((*name).to_owned()));
+        }
+    }
+    let cache_path = project_root.join(".rusting/generated.json");
+    let mut cache: GeneratedCache = std::fs::read(&cache_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let mut results = Vec::new();
+    for (name, generator) in generators {
+        if !names.is_empty() && !names.contains(&name.as_str()) {
+            continue;
+        }
+        let failed = |message: String| AssetImportError::GeneratorFailed {
+            hook: name.clone(),
+            message,
+        };
+        let output = project_root.join(&generator.output);
+        let key = generator_key(project_root, generator);
+        let current = std::fs::read(&output)
+            .ok()
+            .map(|bytes| crate::runtime::scene_revision(&bytes));
+        let recorded = cache.0.get(name);
+        let cached = recorded.is_some_and(|(old, revision)| {
+            *old == key && current.as_ref() == Some(revision)
+        });
+        if !force {
+            if let (Some((_, revision)), Some(current)) = (recorded, &current) {
+                if revision != current {
+                    return Err(AssetImportError::GeneratedSceneEdited(output));
+                }
+            }
+        }
+        let mut result = GeneratedScene {
+            name: name.clone(),
+            output: generator.output.clone(),
+            status: if cached && !force {
+                "cached"
+            } else {
+                "generated"
+            },
+            key: key.clone(),
+        };
+        if result.status == "cached" || dry_run {
+            results.push(result);
+            continue;
+        }
+        let (program, arguments) = generator
+            .command
+            .split_first()
+            .ok_or_else(|| failed("`command` is empty".into()))?;
+        let parent = output.parent().unwrap_or(project_root);
+        std::fs::create_dir_all(parent).map_err(io(parent))?;
+        // Beside the output, so the scene's relative asset paths hold.
+        let staged = TemporaryFile(
+            parent.join(format!(".{name}-{}.generating", Uuid::new_v4())),
+        );
+        let run = std::process::Command::new(program)
+            .args(arguments)
+            .current_dir(project_root)
+            .env("RUSTING_SEED", generator.seed.to_string())
+            .env("RUSTING_INPUTS", generator.inputs.to_string())
+            .env("RUSTING_OUTPUT", &staged.0)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| {
+                failed(format!("could not run `{program}`: {error}"))
+            })?;
+        if !run.status.success() {
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            return Err(failed(format!(
+                "exited with {}: {}",
+                run.status,
+                stderr.trim()
+            )));
+        }
+        let bytes = std::fs::read(&staged.0).map_err(|error| {
+            failed(format!("wrote no scene to RUSTING_OUTPUT: {error}"))
+        })?;
+        crate::runtime::parse_scene_document(&bytes).map_err(|error| {
+            failed(format!("wrote an invalid scene: {error}"))
+        })?;
+        crate::runtime::write_atomic(&output, &bytes).map_err(io(&output))?;
+        cache.0.insert(
+            name.clone(),
+            (key, crate::runtime::scene_revision(&bytes)),
+        );
+        result.status = "generated";
+        results.push(result);
+    }
+    if !dry_run {
+        let bytes = serde_json::to_vec_pretty(&cache).unwrap_or_default();
+        if let Some(parent) = cache_path.parent() {
+            std::fs::create_dir_all(parent).map_err(io(parent))?;
+        }
+        std::fs::write(&cache_path, bytes).map_err(io(&cache_path))?;
+    }
+    Ok(results)
+}
+
+/// A file removed when dropped.
+struct TemporaryFile(PathBuf);
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -1470,6 +1676,100 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn scene_generators_cache_by_inputs_and_refuse_bad_output() {
+        let root = project();
+        std::fs::create_dir_all(root.join("gen")).unwrap();
+        std::fs::write(root.join("gen/rules.txt"), "v1").unwrap();
+        // Writes a scene named after the seed and inputs, and counts runs.
+        let script = r#"echo run >> runs.txt; echo "$RUSTING_INPUTS" > inputs.txt; printf '{"format_version": 1, "name": "level %s", "entities": []}' "$RUSTING_SEED" > "$RUSTING_OUTPUT""#;
+        let generator = |script: &str| SceneGenerator {
+            command: vec!["sh".into(), "-c".into(), script.into()],
+            output: "scenes/level.rscene".into(),
+            seed: 7,
+            inputs: serde_json::json!({"rooms": 3}),
+            watch: vec!["gen".into()],
+        };
+        let mut generators =
+            BTreeMap::from([("level".to_owned(), generator(script))]);
+        let runs = || {
+            std::fs::read_to_string(root.join("runs.txt"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        let generate = |generators: &BTreeMap<_, _>, force| {
+            generate_scenes(&root, generators, &[], force, false)
+        };
+        let scene = || {
+            crate::runtime::read_scene_document(
+                root.join("scenes/level.rscene"),
+            )
+            .unwrap()
+            .name
+        };
+
+        let preview =
+            generate_scenes(&root, &generators, &["level"], false, true)
+                .unwrap();
+        assert_eq!(preview[0].status, "generated");
+        assert_eq!(runs(), 0, "a dry run runs nothing");
+        let made = generate(&generators, false).unwrap();
+        assert_eq!(made[0].status, "generated");
+        assert_eq!(scene(), "level 7");
+        assert_eq!(
+            std::fs::read_to_string(root.join("inputs.txt")).unwrap(),
+            "{\"rooms\":3}\n"
+        );
+        assert_eq!(generate(&generators, false).unwrap()[0].status, "cached");
+        assert_eq!(runs(), 1);
+
+        // A watched file, the seed, or the inputs changing runs it again.
+        std::fs::write(root.join("gen/rules.txt"), "v2").unwrap();
+        assert_eq!(
+            generate(&generators, false).unwrap()[0].status,
+            "generated"
+        );
+        generators.get_mut("level").unwrap().seed = 8;
+        assert_eq!(
+            generate(&generators, false).unwrap()[0].status,
+            "generated"
+        );
+        assert_eq!(scene(), "level 8");
+        assert_eq!(runs(), 3);
+        assert_eq!(generate(&generators, true).unwrap()[0].status, "generated");
+        assert_eq!(runs(), 4, "force runs it");
+
+        // A hand edit is kept until forced over.
+        std::fs::write(
+            root.join("scenes/level.rscene"),
+            r#"{"format_version": 1, "name": "edited", "entities": []}"#,
+        )
+        .unwrap();
+        let edited = generate(&generators, false).unwrap_err();
+        assert_eq!(edited.code(), "GENERATED_SCENE_EDITED");
+        assert_eq!(scene(), "edited");
+        generate(&generators, true).unwrap();
+        assert_eq!(scene(), "level 8");
+
+        // Output that is not a scene, or none, leaves the scene alone.
+        for bad in ["echo nope > \"$RUSTING_OUTPUT\"", "true", "exit 3"] {
+            let broken = BTreeMap::from([("level".to_owned(), generator(bad))]);
+            let error = generate(&broken, true).unwrap_err();
+            assert_eq!(error.code(), "GENERATOR_FAILED", "{bad}: {error}");
+            assert_eq!(scene(), "level 8");
+        }
+        assert_eq!(
+            generate_scenes(&root, &generators, &["missing"], false, false)
+                .unwrap_err()
+                .code(),
+            "GENERATOR_UNKNOWN"
+        );
+        let leftovers = std::fs::read_dir(root.join("scenes")).unwrap().count();
+        assert_eq!(leftovers, 1, "no staged file is left behind");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn generator_hooks_import_and_replace_through_the_importer() {
         let root = project();

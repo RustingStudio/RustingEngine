@@ -603,6 +603,33 @@ pub fn wave_function_collapse(
     None
 }
 
+/// What `rusting scene generate` asks a `scene_generators` command for:
+/// the seed, the inputs from `project.json`, and the path to save the
+/// scene to (with [`crate::runtime::save_scene`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratorRequest {
+    pub seed: u64,
+    pub inputs: serde_json::Value,
+    pub output: std::path::PathBuf,
+}
+
+impl GeneratorRequest {
+    /// The request from `RUSTING_SEED`, `RUSTING_INPUTS` and
+    /// `RUSTING_OUTPUT`; `None` when the program was not started by
+    /// `rusting scene generate`.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        let output = std::env::var_os("RUSTING_OUTPUT")?.into();
+        let var = |name| std::env::var(name).unwrap_or_default();
+        Some(Self {
+            seed: var("RUSTING_SEED").parse().unwrap_or(0),
+            inputs: serde_json::from_str(&var("RUSTING_INPUTS"))
+                .unwrap_or_default(),
+            output,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

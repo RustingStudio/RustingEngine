@@ -1,7 +1,8 @@
 # Procedural content
 
 `rusting_engine::procgen` generates content from a seed: random streams,
-gradient noise, evenly spread points, and tile maps and 3D grids. The same seed gives the same
+gradient noise, evenly spread points, and tile maps and 3D grids, and
+`rusting scene generate` keeps scenes made by your own generators up to date. The same seed gives the same
 result on every machine, so a generated level can be saved as its seed,
 shared between players, or checked in a scenario.
 
@@ -100,6 +101,40 @@ let shore = |a: usize, b: usize, _axis: usize| a.abs_diff(b) < 2;
 let tiles = wave_function_collapse(seed, [32, 32, 1], &[1.0, 0.5, 1.0], shore)
     .expect("these rules always fit");
 ```
+
+## Generated scenes
+
+A generator can also be a scene file the project keeps up to date. List it
+under `scene_generators` in `project.json`:
+
+```json
+"scene_generators": {
+  "level": {
+    "command": ["cargo", "run", "-q", "--bin", "gen_level"],
+    "output": "scenes/level.rscene",
+    "seed": 7,
+    "inputs": {"size": 24, "rooms": 5},
+    "watch": ["src/bin"]
+  }
+}
+```
+
+`rusting scene generate .` runs the command from the project root, without
+a shell, with `RUSTING_SEED`, `RUSTING_INPUTS` (the inputs as JSON) and
+`RUSTING_OUTPUT`, the path to write the scene to. The program, usually a
+binary in the game crate, reads them with `GeneratorRequest::from_env()`,
+builds the level with the generators above, and writes a normal scene, for
+example with `save_scene`. The engine loads the scene before it replaces the
+old one, so a broken generator leaves the last good scene in place, and the
+write goes into the operation journal like any edit (`rusting revert`
+undoes it).
+
+The result is cached by the command, seed, inputs, and the contents of the
+`watch` files and folders: a second run reports `cached` and runs nothing
+until one of them changes. A scene edited by hand since it was generated is
+refused with `GENERATED_SCENE_EDITED`; `--force` regenerates it anyway, and
+also reruns unchanged generators. Instance the generated scene into another
+one to use it as a prefab.
 
 ## Same on every machine
 

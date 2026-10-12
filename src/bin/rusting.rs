@@ -337,6 +337,20 @@ fn run_command(args: &[String]) -> CliResult {
         | ["scene", "patch", scene, "--dry-run", patch] => {
             cli::patch_scene(Path::new(scene), Path::new(patch), true)
         }
+        ["scene", "generate", root, rest @ ..] => {
+            let (mut force, mut dry_run, mut names) = (false, false, Vec::new());
+            for word in rest {
+                match *word {
+                    "--force" => force = true,
+                    "--dry-run" => dry_run = true,
+                    flag if flag.starts_with("--") => {
+                        return usage(format!("unknown `scene generate` flag `{flag}`"))
+                    }
+                    name => names.push(name),
+                }
+            }
+            cli::generate_scenes(Path::new(root), &names, force, dry_run)
+        }
         ["scene", "retarget", scene, from, clip, to, flags @ ..] => {
             let dry_run = match flags {
                 [] => false,

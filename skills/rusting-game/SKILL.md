@@ -39,6 +39,9 @@ aim), `core_defense` (top-down, mouse), `lantern_grid` (click puzzle),
 3. Change the scene with a patch file, never by hand:
    `rusting scene patch scenes/main.rscene patch.json [--dry-run]`.
    For large layouts, write a short script that generates `patch.json`.
+   For a level made from a seed, list a generator binary under
+   `scene_generators` in `project.json` and run `rusting scene generate .`
+   (`rusting docs show guide/procedural`).
 4. Write game code in `src/main.rs`. `rusting check` builds it and
    validates the scene.
 5. Write scenarios in `tests/` and run `rusting test` until they pass.

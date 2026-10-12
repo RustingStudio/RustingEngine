@@ -235,6 +235,12 @@ pub const CODES: &[CodeInfo] = &[
         "rusting run --ticks 120 --json",
     ),
     code(
+        "GENERATED_SCENE_EDITED",
+        "A scene made by a `scene_generators` entry was edited by hand since it was generated, so `rusting scene generate` did not replace it.",
+        "Keep the edit by moving it into the generator or its inputs, or pass --force to regenerate over it; `rusting revert` brings back the replaced scene.",
+        "rusting scene generate . level --force --json",
+    ),
+    code(
         "GENERATOR_FAILED",
         "An asset generator hook failed or printed no valid JSON result on its last output line.",
         "Run the hook's command by hand with RUSTING_PROMPT and RUSTING_OUTPUT_DIR set and fix its output.",

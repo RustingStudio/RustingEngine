@@ -291,6 +291,14 @@ pub struct ProjectManifest {
     )]
     pub generators:
         std::collections::BTreeMap<String, crate::asset_import::GeneratorHook>,
+    /// Optional scene generators by name; see
+    /// [`crate::asset_import::SceneGenerator`] and `rusting scene generate`.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    pub scene_generators:
+        std::collections::BTreeMap<String, crate::asset_import::SceneGenerator>,
     /// How strictly the simulation must reproduce itself; see
     /// [`crate::runtime::DeterminismMode`]. `cook` copies it into the
     /// cooked scene.
@@ -909,6 +917,7 @@ fn write_project_template(
         cooked_scene: "build/main.rscene.bin".into(),
         binary_name: package_name.clone(),
         generators: std::collections::BTreeMap::new(),
+        scene_generators: std::collections::BTreeMap::new(),
         determinism: Default::default(),
         window: None,
         ui_base_size: None,

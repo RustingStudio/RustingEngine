@@ -3850,6 +3850,35 @@ pub fn generate_asset(
     )
 }
 
+/// Runs the stale `project.json` scene generators, or the ones in `names`.
+pub fn generate_scenes(
+    root: &Path,
+    names: &[&str],
+    force: bool,
+    dry_run: bool,
+) -> CliResult {
+    let project = match open_project(root) {
+        Ok(project) => project,
+        Err(error) => return project_error(error, root),
+    };
+    match asset_import::generate_scenes(
+        &project.root,
+        &project.manifest.scene_generators,
+        names,
+        force,
+        dry_run,
+    ) {
+        Ok(scenes) => {
+            CliResult::success(json!({ "scenes": scenes, "dry_run": dry_run }))
+        }
+        Err(error) => CliResult::failure(
+            error.code(),
+            error.to_string(),
+            error.path().map(Path::to_owned),
+        ),
+    }
+}
+
 /// Imported assets with references; asset errors make the result fail.
 pub fn list_assets(root: &Path) -> CliResult {
     let project = match open_project(root) {
