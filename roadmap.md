@@ -4189,7 +4189,8 @@ Depends on: Milestones 8, 11 (fracture, debris, GPU scale), and 13 (terrain rend
 
 ### Fracture and debris
 
-- [ ] Promote static terrain chunks to dynamic GPU rigid bodies when destroyed.
+- [x] Promote static terrain chunks to dynamic GPU rigid bodies when destroyed.
+  Evidence: `TerrainFracture` (`rusting.terrain_fracture`) on a `Heightfield` splits it into square chunks of `chunk_cells` cells. `break_terrain` (after `break_fractures`) sums each chunk's contact energy per fixed tick; at `break_energy` the chunk's samples drop `depth` m and the slab becomes one dynamic `SimulationClass::Gpu` box `Debris` resting in the hole, thrown up by the excess energy times a `RandomSeed` draw at the tick. Chunks break once (`broken`), in `SceneId`/`SpawnOrder` then chunk order, the `DebrisBudget` holds a chunk whole at the cap, and each dig sends `Fractured`. Tests in `runtime::fracture`: `a_hard_hit_digs_its_terrain_chunk_out_as_a_gpu_slab` (10 kg crate from 3 m digs chunk 3 of an 8 m field: 16 t slab at (2, -0.25, 2), 4 x 0.5 x 4 m, only that chunk's 25 samples at -0.5, a soft landing elsewhere breaks nothing); `terrain_breaks_do_not_depend_on_entity_ids_and_hold_at_the_budget`. Limit: the GPU solver sees a heightfield as its bounding box, so slabs do not settle back into their holes on the GPU. Full check: CPU lib 970 ok, gpu-tests run 1124 ok.
 - [ ] Use deterministic fracture patterns driven by the seeded tick RNG.
 - [ ] Enforce a debris budget with a deterministic, documented policy at the cap. Never drop bodies arbitrarily.
 - [ ] Settle and re-freeze resting debris back into static terrain, restoring collision and navigation.

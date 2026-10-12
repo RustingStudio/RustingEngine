@@ -91,7 +91,7 @@ pub use fluid::{
     FluidSettings, FluidSolver, FluidSurface, FluidVolume,
 };
 pub use fracture::{
-    Debris, DebrisBudget, Fracture, Fractured, FracturedMesh,
+    Debris, DebrisBudget, Fracture, Fractured, FracturedMesh, TerrainFracture,
     MAX_FRACTURE_PIECES,
 };
 pub use game_feel::*;
@@ -299,6 +299,7 @@ impl Default for App {
                     rope::build_ropes,
                     cpu_physics::step_cpu_physics,
                     fracture::break_fractures,
+                    fracture::break_terrain,
                     fracture::manage_debris,
                 )
                     .chain(),

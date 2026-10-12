@@ -1128,6 +1128,12 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"pieces": 8, "seed": 1, "slices": [[0.0, 1.0, 0.0, 0.0]], "break_energy": 50.0, "debris_lifetime": 10.0, "merge_debris": false}),
     },
     ComponentSection {
+        key: "rusting.terrain_fracture",
+        summary: "Makes the Heightfield on the same object break in square chunks of chunk_cells cells. During play, contacts on one chunk bringing break_energy joules or more within one fixed tick (0 never breaks) dig it out: every height sample of the chunk drops depth metres and the slab becomes one dynamic GPU Box body (Debris, density kg/m³) resting in the hole, thrown up by the energy beyond break_energy times a draw from the scene's RandomSeed at the tick. A chunk breaks once; broken lists the dug-out chunks (row * chunk columns + column). The DebrisBudget applies: at the cap with too little sleeping debris the chunk stays whole that tick. Each dig sends a Fractured event naming the terrain and the slab.",
+        gpu: NO_GPU,
+        example: || json!({"chunk_cells": 4, "break_energy": 500.0, "depth": 0.5, "density": 2000.0, "debris_lifetime": 0.0, "broken": []}),
+    },
+    ComponentSection {
         key: "rusting.heightfield",
         summary: "A grid of ground heights for a collider with shape \"Heightfield\" on the same object (static only, like TriangleMesh). heights[row][column] in metres; rows run along +Z and columns along +X, spacing metres apart, centred on the object and scaled by its transform. Add rusting.terrain to draw it, or draw it from game code with Heightfield::mesh(). cells[row][column] (one row and column fewer than heights) picks an entry of surfaces for that cell, a patch such as ice or mud with its own friction, restitution and material name (sound_cue with_material matches it); missing cells and indices past the end use the collider's own values and physics_material.",
         gpu: NO_GPU,

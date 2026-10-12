@@ -25,9 +25,9 @@ use crate::runtime::{
     QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
     ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
     SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Squash,
-    StateAction, StateTransition, SurfaceClip, Terrain, TerrainLayer, TileKind,
-    TileMap, ToneMapper, ToneMapping, Tween, TweenProperty, TweenRepeat,
-    Vehicle, WaterBody, Wheel,
+    StateAction, StateTransition, SurfaceClip, Terrain, TerrainFracture,
+    TerrainLayer, TileKind, TileMap, ToneMapper, ToneMapping, Tween,
+    TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -835,6 +835,17 @@ crate::reflect! {
         break_energy: f32 { unit: "J", min: 0.0, doc: "impact energy within one fixed tick that breaks the object during play; 0 never breaks it" },
         debris_lifetime: f32 { unit: "s", min: 0.0, doc: "seconds a piece stays once it sleeps; 0 keeps pieces" },
         merge_debris: bool { doc: "once every piece of a break sleeps, they merge into one static body" },
+    }
+}
+
+crate::reflect! {
+    struct TerrainFracture {
+        chunk_cells: u32 { min: 1.0, doc: "height cells along each side of a breakable chunk" },
+        break_energy: f32 { unit: "J", min: 0.0, doc: "impact energy on one chunk within one fixed tick that digs it out; 0 never breaks" },
+        depth: f32 { unit: "m", min: 0.0, doc: "how far the chunk's ground drops; the slab's thickness" },
+        density: f32 { unit: "kg/m³", min: 0.0, doc: "density of the dug-out slab" },
+        debris_lifetime: f32 { unit: "s", min: 0.0, doc: "seconds a slab stays once it sleeps; 0 keeps it" },
+        broken: Vec<u32> { doc: "chunks already dug out, row * chunk columns + column, sorted" },
     }
 }
 

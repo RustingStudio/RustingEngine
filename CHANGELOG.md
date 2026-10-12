@@ -7,6 +7,7 @@
 - Physics suite scenes `BuoyancySort`, `SheetCatch` and `JellyRaft` check two-way coupling between rigid bodies, cloth, soft bodies and fluid
 - `SuiteScene::run_2d` runs 2D forms of the stacking, joint chain and CCD bullet suite scenes on plane-locked polygon bodies
 - `SlideSound::by_material` picks a slide or roll loop by the physics material or surface the body slides on
+- `TerrainFracture` digs a struck heightfield chunk out as a dynamic GPU slab
 
 ### Fixed
 
