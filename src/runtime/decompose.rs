@@ -36,9 +36,9 @@ type V = Vector3<f32>;
 )]
 #[serde(default)]
 pub struct ConvexDecomposition {
-    /// Voxels along the mesh's longest side.
+    /// Voxels along the mesh's longest side, at most [`MAX_RESOLUTION`].
     pub resolution: u32,
-    /// Most hulls returned.
+    /// Most hulls returned, at most [`MAX_HULLS`].
     pub max_hulls: u32,
     /// A region stops splitting once its hull exceeds the solid inside it
     /// by less than this share of the whole mesh's volume.
@@ -58,6 +58,12 @@ impl Default for ConvexDecomposition {
         }
     }
 }
+
+/// Largest [`ConvexDecomposition::resolution`] used: scene files set it,
+/// and the voxel grid grows with its cube.
+pub const MAX_RESOLUTION: u32 = 128;
+/// Largest [`ConvexDecomposition::max_hulls`] used.
+pub const MAX_HULLS: u32 = 256;
 
 /// Convex hulls covering `mesh`, as meshes in its frame. A mesh that is not
 /// closed, or too flat to fill a voxel, comes back as its one hull; an
@@ -86,8 +92,10 @@ pub fn decompose(
     let low = points.iter().fold(first, |m, p| m.inf(p));
     let high = points.iter().fold(first, |m, p| m.sup(p));
     let whole = || hull_mesh(&points).into_iter().collect();
-    let size = (high - low).max() / settings.resolution.max(1) as f32;
-    if size <= 0.0 || settings.max_hulls <= 1 {
+    let resolution = settings.resolution.clamp(1, MAX_RESOLUTION);
+    let max_hulls = settings.max_hulls.min(MAX_HULLS);
+    let size = (high - low).max() / resolution as f32;
+    if size <= 0.0 || max_hulls <= 1 {
         return whole();
     }
     let grid = Grid::new(&triangles, low, high, size);
@@ -96,7 +104,7 @@ pub fn decompose(
     }
     let total = grid.solid_total as f32 * size.powi(3);
     let mut regions = vec![grid.region([0; 3], grid.cells, &triangles)];
-    while regions.len() < settings.max_hulls as usize {
+    while regions.len() < max_hulls as usize {
         // The most concave region still worth splitting, lowest index on ties.
         let Some((index, _)) = regions
             .iter()
@@ -648,5 +656,21 @@ mod tests {
         assert!((inside - 0.4).abs() < 0.05, "{inside}");
         let on_top = drop_into_cup(false);
         assert!((on_top - 1.2).abs() < 0.05, "{on_top}");
+    }
+
+    #[test]
+    fn huge_settings_from_a_scene_file_are_clamped() {
+        let mut mesh = MeshAsset::default();
+        cuboid(V::new(0.0, 0.0, 0.0), V::new(1.0, 1.0, 1.0), &mut mesh);
+        let hulls = decompose(
+            &mesh,
+            ConvexDecomposition {
+                resolution: u32::MAX,
+                max_hulls: u32::MAX,
+                candidates: 1,
+                ..ConvexDecomposition::default()
+            },
+        );
+        assert_eq!(hulls.len(), 1);
     }
 }

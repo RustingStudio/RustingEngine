@@ -854,8 +854,8 @@ crate::reflect! {
 
 crate::reflect! {
     struct ConvexDecomposition {
-        resolution: u32 { min: 1.0, doc: "voxels along the mesh's longest side" },
-        max_hulls: u32 { min: 1.0, doc: "most hulls the mesh splits into" },
+        resolution: u32 { min: 1.0, max: 128.0, doc: "voxels along the mesh's longest side" },
+        max_hulls: u32 { min: 1.0, max: 256.0, doc: "most hulls the mesh splits into" },
         concavity: f32 { min: 0.0, doc: "a part stops splitting once its hull exceeds the solid inside it by less than this share of the mesh's volume" },
         candidates: u32 { min: 1.0, doc: "split planes tried per axis; resolution or more tries every voxel plane" },
     }
