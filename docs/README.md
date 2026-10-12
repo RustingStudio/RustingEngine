@@ -65,8 +65,9 @@ were run against this version of the engine.
 - [Animation](animation.md): keyframe clips, skinned models, state
   machines, blend spaces, IK, and ragdolls.
 - [Effects](effects.md): particle emitters and ready-made presets.
-- [Procedural content](procedural.md): seeded random streams, noise and
-  point scattering that give the same level on every machine.
+- [Procedural content](procedural.md): seeded random streams, noise, point
+  scattering, caves, dungeons and wave function collapse that give the same
+  level on every machine.
 - [Look and feel](look-and-feel.md): art presets, color grading, and a
   polish checklist.
 - [Cameras](cameras.md), [Audio](audio.md), and

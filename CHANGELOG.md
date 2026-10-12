@@ -7,6 +7,7 @@
 - The API audit test covers every type in the prelude: a new public method returning a borrow, or a prelude type gaining a lifetime parameter, fails the build's tests
 - Packed asset archives: export preset `pack: true` packs `assets/` and `scenes/` into `.rpak` files the game streams files from, with loose files still winning
 - `procgen`: seeded random streams, gradient noise with fractal layers, and Poisson-disk point scattering that give the same bits on every machine
+- `procgen` grid generators for tile maps and 3D grids: `cellular_caves`, `rooms_and_corridors` and `wave_function_collapse`, with `tile_rows` to fill a `TileMap`
 
 ## [2.4.1] - 2026-10-10
 

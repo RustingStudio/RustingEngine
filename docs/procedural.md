@@ -1,7 +1,7 @@
 # Procedural content
 
 `rusting_engine::procgen` generates content from a seed: random streams,
-gradient noise and evenly spread points. The same seed gives the same
+gradient noise, evenly spread points, and tile maps and 3D grids. The same seed gives the same
 result on every machine, so a generated level can be saved as its seed,
 shared between players, or checked in a scenario.
 
@@ -58,6 +58,48 @@ let height = |x: f32, z: f32| 8.0 * fbm2(seed, [x * 0.02, z * 0.02], 5);
 rectangle, no two closer than `spacing` and with no gap where another
 would fit. Use it for trees, rocks and pickups that should look scattered
 but not clumped.
+
+## Tile and grid generators
+
+The grid generators return one value per cell, `x` fastest, then `y`,
+then `z`; `cell_index(size, [x, y, z])` finds a cell. A `size` with depth
+1, such as `[40, 30, 1]`, is a 2D map. `tile_rows` turns a 2D result into
+the `rows` of a `TileMap`:
+
+```rust
+use rusting_engine::procgen::{cellular_caves, tile_rows};
+
+let walls = cellular_caves(seed, [40, 30, 1], 0.45, 4);
+tile_map.rows = tile_rows(&walls, 40, |wall| if *wall { '#' } else { '.' });
+```
+
+- `cellular_caves(seed, size, fill, steps)` makes caves: cells start as
+  wall with chance `fill` (about 0.45), then each step turns a cell to wall
+  when most of its neighbours are walls. The edges count as walls, so caves
+  close at the border. A 3D size makes caverns using all 26 neighbours.
+  Caves can come out as separate pockets; flood-fill from the start and
+  keep the largest one when the whole map must connect.
+- `rooms_and_corridors(seed, [width, height], rooms, [min, max])` places up
+  to `rooms` rectangular rooms that never touch, inside a wall border, and
+  joins each one to the one placed before it with an L-shaped corridor, so
+  every floor cell connects. It returns the `floor` cells and the `rooms`
+  (corner, size and `center()`), for placing the player in the first room
+  and the exit in the last.
+- `wave_function_collapse(seed, size, &weights, fits)` fills a 2D or 3D
+  grid with tiles `0..weights.len()` (at most 64) so that every pair of
+  neighbours fits. `fits(a, b, axis)` says whether tile `b` may sit one
+  cell after tile `a` along `axis` (0 x, 1 y, 2 z), and `weights` makes
+  some tiles more common. It returns `None` when the rules cannot be met,
+  after 20 tries from different streams.
+
+```rust
+use rusting_engine::procgen::wave_function_collapse;
+
+// Land (0), coast (1) and sea (2): land never touches sea.
+let shore = |a: usize, b: usize, _axis: usize| a.abs_diff(b) < 2;
+let tiles = wave_function_collapse(seed, [32, 32, 1], &[1.0, 0.5, 1.0], shore)
+    .expect("these rules always fit");
+```
 
 ## Same on every machine
 

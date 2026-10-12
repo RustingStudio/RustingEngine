@@ -299,6 +299,310 @@ pub fn poisson_disk(seed: u64, size: [f32; 2], spacing: f32) -> Vec<[f32; 2]> {
     points
 }
 
+/// Index of the cell at `[x, y, z]` in a grid of `size`, as the grid
+/// generators lay cells out: `x` fastest, then `y`, then `z`.
+#[must_use]
+pub fn cell_index(size: [usize; 3], cell: [usize; 3]) -> usize {
+    cell[0] + size[0] * (cell[1] + size[1] * cell[2])
+}
+
+/// The rows of a [`crate::runtime::TileMap`] for a 2D grid `width` cells
+/// wide, with `tile` choosing each cell's character.
+#[must_use]
+pub fn tile_rows<T>(
+    cells: &[T],
+    width: usize,
+    tile: impl Fn(&T) -> char,
+) -> Vec<String> {
+    cells
+        .chunks(width.max(1))
+        .map(|row| row.iter().map(&tile).collect())
+        .collect()
+}
+
+/// Caves by cellular automaton: cells start as wall with chance `fill`
+/// (about 0.45 makes open caves), then each of `steps` passes turns a cell
+/// to wall when most of its neighbours are walls. Returns `true` for wall,
+/// laid out as [`cell_index`] says. A `size` with depth 1 is a 2D map
+/// with 8 neighbours per cell; deeper grids use all 26. Cells outside the
+/// grid count as walls, so the caves close at the edges.
+#[must_use]
+pub fn cellular_caves(
+    seed: u64,
+    size: [usize; 3],
+    fill: f32,
+    steps: u32,
+) -> Vec<bool> {
+    let mut random = RandomStream::new(seed);
+    let count = size[0] * size[1] * size[2];
+    let mut walls: Vec<bool> =
+        (0..count).map(|_| random.chance(fill)).collect();
+    let depth = if size[2] > 1 { 1 } else { 0 };
+    let neighbours = if depth == 1 { 26 } else { 8 };
+    // 2D: wall with 5 or more wall neighbours, or 4 if already a wall (the
+    // classic 4-5 rule); 3D scales it to 14 and 13 of 26.
+    let (born, stays) = (neighbours / 2 + 1, neighbours / 2);
+    for _ in 0..steps {
+        let mut next = walls.clone();
+        for z in 0..size[2] {
+            for y in 0..size[1] {
+                for x in 0..size[0] {
+                    let mut around = 0;
+                    for dz in -depth..=depth {
+                        for dy in -1..=1_i64 {
+                            for dx in -1..=1_i64 {
+                                if (dx, dy, dz) == (0, 0, 0) {
+                                    continue;
+                                }
+                                let at = [
+                                    x as i64 + dx,
+                                    y as i64 + dy,
+                                    z as i64 + dz,
+                                ];
+                                let inside = (0..3).all(|axis| {
+                                    (0..size[axis] as i64).contains(&at[axis])
+                                });
+                                around += usize::from(
+                                    !inside
+                                        || walls[cell_index(
+                                            size,
+                                            at.map(|value| value as usize),
+                                        )],
+                                );
+                            }
+                        }
+                    }
+                    let index = cell_index(size, [x, y, z]);
+                    next[index] =
+                        around >= born || (walls[index] && around >= stays);
+                }
+            }
+        }
+        walls = next;
+    }
+    walls
+}
+
+/// A room of a [`RoomLayout`]: its corner cell and its size in cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Room {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Room {
+    /// The room's middle cell.
+    #[must_use]
+    pub fn center(&self) -> [usize; 2] {
+        [self.x + self.width / 2, self.y + self.height / 2]
+    }
+}
+
+/// A dungeon from [`rooms_and_corridors`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomLayout {
+    /// `true` for floor, `width` cells to a row.
+    pub floor: Vec<bool>,
+    /// The rooms, in the order corridors join them: each one to the one
+    /// before.
+    pub rooms: Vec<Room>,
+}
+
+/// A dungeon of up to `rooms` rectangular rooms, each `room_size[0]` to
+/// `room_size[1]` cells on a side, placed without touching inside a
+/// `size[0]` by `size[1]` map with a wall border, and joined by L-shaped
+/// corridors so every floor cell can reach every other. Fewer rooms are
+/// placed when the map runs out of space.
+#[must_use]
+pub fn rooms_and_corridors(
+    seed: u64,
+    size: [usize; 2],
+    rooms: usize,
+    room_size: [usize; 2],
+) -> RoomLayout {
+    const TRIES: usize = 50;
+    let mut random = RandomStream::new(seed);
+    let [width, height] = size;
+    let mut floor = vec![false; width * height];
+    let mut placed: Vec<Room> = Vec::new();
+    let side = |random: &mut RandomStream| {
+        let span = room_size[1].saturating_sub(room_size[0]) as u64 + 1;
+        room_size[0].max(1) + random.below(span) as usize
+    };
+    for _ in 0..rooms * TRIES {
+        if placed.len() == rooms {
+            break;
+        }
+        let (room_width, room_height) = (side(&mut random), side(&mut random));
+        // Keep a one-cell wall border around the map.
+        if room_width + 2 > width || room_height + 2 > height {
+            continue;
+        }
+        let room = Room {
+            x: 1 + random.below((width - room_width - 1) as u64) as usize,
+            y: 1 + random.below((height - room_height - 1) as u64) as usize,
+            width: room_width,
+            height: room_height,
+        };
+        // Rooms keep at least one wall cell between them.
+        let touches = placed.iter().any(|other| {
+            room.x <= other.x + other.width
+                && other.x <= room.x + room.width
+                && room.y <= other.y + other.height
+                && other.y <= room.y + room.height
+        });
+        if touches {
+            continue;
+        }
+        for y in room.y..room.y + room.height {
+            floor[y * width + room.x..y * width + room.x + room.width]
+                .fill(true);
+        }
+        if let Some(last) = placed.last() {
+            let ([x0, y0], [x1, y1]) = (last.center(), room.center());
+            let corner = if random.chance(0.5) {
+                [x1, y0]
+            } else {
+                [x0, y1]
+            };
+            for (from, to) in [([x0, y0], corner), (corner, [x1, y1])] {
+                for y in from[1].min(to[1])..=from[1].max(to[1]) {
+                    for x in from[0].min(to[0])..=from[0].max(to[0]) {
+                        floor[y * width + x] = true;
+                    }
+                }
+            }
+        }
+        placed.push(room);
+    }
+    RoomLayout {
+        floor,
+        rooms: placed,
+    }
+}
+
+/// Fills a grid of `size` with tiles by wave function collapse: each cell
+/// takes one of the tiles `0..weights.len()`, picked with a chance of its
+/// weight, so that every pair of neighbours fits. `fits(a, b, axis)` says
+/// whether tile `b` may sit one cell after tile `a` along `axis` (0 is x,
+/// 1 is y, 2 is z). The result is laid out as [`cell_index`] says.
+///
+/// `None` when the rules cannot be met: after a contradiction the search
+/// starts over from the next random stream, up to 20 times. At most 64
+/// tiles; more give `None`.
+#[must_use]
+pub fn wave_function_collapse(
+    seed: u64,
+    size: [usize; 3],
+    weights: &[f32],
+    fits: impl Fn(usize, usize, usize) -> bool,
+) -> Option<Vec<usize>> {
+    const ATTEMPTS: u64 = 20;
+    let tiles = weights.len();
+    if tiles == 0 || tiles > 64 {
+        return None;
+    }
+    let all = if tiles == 64 {
+        u64::MAX
+    } else {
+        (1 << tiles) - 1
+    };
+    // after[axis][a]: tiles that may follow `a` along +axis; before: -axis.
+    let mask = |fits_pair: &dyn Fn(usize) -> bool| {
+        (0..tiles)
+            .filter(|&tile| fits_pair(tile))
+            .fold(0_u64, |mask, tile| mask | 1 << tile)
+    };
+    let after: [[u64; 64]; 3] = std::array::from_fn(|axis| {
+        std::array::from_fn(|a| mask(&|b| a < tiles && fits(a, b, axis)))
+    });
+    let before: [[u64; 64]; 3] = std::array::from_fn(|axis| {
+        std::array::from_fn(|b| mask(&|a| b < tiles && fits(a, b, axis)))
+    });
+    let count = size[0] * size[1] * size[2];
+    let neighbour = |index: usize, axis: usize, forward: bool| {
+        let cell = [
+            index % size[0],
+            index / size[0] % size[1],
+            index / (size[0] * size[1]),
+        ];
+        if forward {
+            (cell[axis] + 1 < size[axis])
+                .then(|| index + [1, size[0], size[0] * size[1]][axis])
+        } else {
+            (cell[axis] > 0)
+                .then(|| index - [1, size[0], size[0] * size[1]][axis])
+        }
+    };
+    'attempt: for attempt in 0..ATTEMPTS {
+        let mut random = RandomStream::new(RandomSeed(seed).value(attempt, 0));
+        let mut options = vec![all; count];
+        // The open cell with the fewest options, lowest index first.
+        while let Some(cell) = (0..count)
+            .filter(|&cell| options[cell].count_ones() > 1)
+            .min_by_key(|&cell| options[cell].count_ones())
+        {
+            let mut weights_here = [0.0; 64];
+            for tile in 0..tiles {
+                if options[cell] & 1 << tile != 0 {
+                    weights_here[tile] = weights[tile];
+                }
+            }
+            let tile = random
+                .weighted(&weights_here[..tiles])
+                .unwrap_or(options[cell].trailing_zeros() as usize);
+            options[cell] = 1 << tile;
+            // Narrow the neighbours until nothing changes.
+            let mut changed = vec![cell];
+            while let Some(index) = changed.pop() {
+                for axis in 0..3 {
+                    for forward in [true, false] {
+                        let Some(other) = neighbour(index, axis, forward)
+                        else {
+                            continue;
+                        };
+                        let table = if forward { &after } else { &before };
+                        let allowed = (0..tiles)
+                            .filter(|tile| options[index] & 1 << tile != 0)
+                            .fold(0, |mask, tile| mask | table[axis][tile]);
+                        let narrowed = options[other] & allowed;
+                        if narrowed == 0 {
+                            continue 'attempt;
+                        }
+                        if narrowed != options[other] {
+                            options[other] = narrowed;
+                            changed.push(other);
+                        }
+                    }
+                }
+            }
+        }
+        // A cell can start with one option; check it against its
+        // neighbours once, since nothing propagated from it.
+        let valid = (0..count).all(|index| {
+            options[index] != 0
+                && (0..3).all(|axis| {
+                    neighbour(index, axis, true).is_none_or(|other| {
+                        let a = options[index].trailing_zeros() as usize;
+                        let b = options[other].trailing_zeros() as usize;
+                        fits(a, b, axis)
+                    })
+                })
+        });
+        if valid {
+            return Some(
+                options
+                    .iter()
+                    .map(|option| option.trailing_zeros() as usize)
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +734,149 @@ mod tests {
         assert_eq!(
             digest(points.iter().flatten().copied()),
             16_011_008_218_353_132_648
+        );
+    }
+
+    #[test]
+    fn caves_smooth_into_open_areas_in_2d_and_3d() {
+        let size = [50, 30, 1];
+        let walls = cellular_caves(4, size, 0.45, 4);
+        assert_eq!(walls, cellular_caves(4, size, 0.45, 4));
+        assert_ne!(walls, cellular_caves(5, size, 0.45, 4));
+        let share = walls.iter().filter(|wall| **wall).count() as f32 / 1500.0;
+        assert!((0.3..0.75).contains(&share), "{share}");
+        // Smoothing leaves no lone wall cell in open floor.
+        for y in 1..29 {
+            for x in 1..49 {
+                if walls[cell_index(size, [x, y, 0])] {
+                    let around = (y - 1..=y + 1)
+                        .flat_map(|ny| (x - 1..=x + 1).map(move |nx| (nx, ny)))
+                        .filter(|&(nx, ny)| {
+                            walls[cell_index(size, [nx, ny, 0])]
+                        })
+                        .count();
+                    assert!(around > 1, "lone wall at {x},{y}");
+                }
+            }
+        }
+        assert!(cellular_caves(1, size, 1.0, 3).iter().all(|wall| *wall));
+        let rows = tile_rows(&walls, 50, |wall| if *wall { '#' } else { '.' });
+        assert_eq!(rows.len(), 30);
+        assert!(rows.iter().all(|row| row.len() == 50));
+
+        let solid = cellular_caves(4, [12, 12, 12], 0.45, 3);
+        assert_eq!(solid.len(), 1728);
+        let share = solid.iter().filter(|wall| **wall).count() as f32 / 1728.0;
+        assert!((0.2..0.9).contains(&share), "{share}");
+        assert_eq!(
+            digest(walls.iter().map(|wall| f32::from(u8::from(*wall)))),
+            16_149_778_793_422_775_509
+        );
+    }
+
+    #[test]
+    fn rooms_do_not_touch_and_corridors_join_every_floor_cell() {
+        let layout = rooms_and_corridors(8, [60, 40], 8, [4, 9]);
+        assert_eq!(layout, rooms_and_corridors(8, [60, 40], 8, [4, 9]));
+        assert_eq!(layout.rooms.len(), 8);
+        for (index, room) in layout.rooms.iter().enumerate() {
+            assert!(
+                (4..=9).contains(&room.width) && (4..=9).contains(&room.height)
+            );
+            for y in room.y..room.y + room.height {
+                for x in room.x..room.x + room.width {
+                    assert!(layout.floor[y * 60 + x]);
+                }
+            }
+            for other in &layout.rooms[index + 1..] {
+                assert!(
+                    room.x > other.x + other.width
+                        || other.x > room.x + room.width
+                        || room.y > other.y + other.height
+                        || other.y > room.y + room.height,
+                    "{room:?} touches {other:?}"
+                );
+            }
+        }
+        for x in 0..60 {
+            assert!(!layout.floor[x] && !layout.floor[39 * 60 + x]);
+        }
+        // Flood fill from the first room reaches every floor cell.
+        let start = layout.rooms[0].center();
+        let mut seen = vec![false; 60 * 40];
+        let mut stack = vec![start[1] * 60 + start[0]];
+        seen[stack[0]] = true;
+        while let Some(cell) = stack.pop() {
+            for next in [cell - 1, cell + 1, cell - 60, cell + 60] {
+                if layout.floor[next] && !seen[next] {
+                    seen[next] = true;
+                    stack.push(next);
+                }
+            }
+        }
+        assert_eq!(seen, layout.floor);
+        // A map too small for any room places none.
+        assert!(rooms_and_corridors(1, [5, 5], 3, [4, 4]).rooms.is_empty());
+    }
+
+    #[test]
+    fn collapse_meets_the_rules_in_2d_and_3d() {
+        // Along x tiles alternate, along y they repeat: vertical stripes.
+        let stripes = |a: usize, b: usize, axis: usize| match axis {
+            0 => a != b,
+            1 => a == b,
+            _ => true,
+        };
+        let size = [12, 8, 1];
+        let cells =
+            wave_function_collapse(3, size, &[1.0, 1.0], stripes).unwrap();
+        assert_eq!(
+            cells,
+            wave_function_collapse(3, size, &[1.0, 1.0], stripes).unwrap()
+        );
+        for y in 0..8 {
+            for x in 0..12 {
+                let tile = cells[cell_index(size, [x, y, 0])];
+                assert_eq!(tile, (cells[0] + x) % 2, "{x},{y}");
+            }
+        }
+
+        // Land (0), coast (1) and sea (2): land never touches sea.
+        let shore = |a: usize, b: usize, _: usize| a.abs_diff(b) < 2;
+        let size = [10, 10, 4];
+        let map =
+            wave_function_collapse(9, size, &[1.0, 0.5, 1.0], shore).unwrap();
+        for z in 0..4 {
+            for y in 0..10 {
+                for x in 0..10 {
+                    let tile = map[cell_index(size, [x, y, z])];
+                    for (axis, next) in
+                        [[x + 1, y, z], [x, y + 1, z], [x, y, z + 1]]
+                            .into_iter()
+                            .enumerate()
+                    {
+                        if next[axis] < size[axis] {
+                            assert!(shore(
+                                tile,
+                                map[cell_index(size, next)],
+                                axis
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!((0..3).all(|tile| map.contains(&tile)), "{map:?}");
+
+        let never = |_: usize, _: usize, _: usize| false;
+        assert_eq!(wave_function_collapse(1, [2, 1, 1], &[1.0], never), None);
+        assert_eq!(
+            wave_function_collapse(1, [1, 1, 1], &[1.0; 65], |_, _, _| true),
+            None
+        );
+        assert_eq!(
+            digest(map.iter().map(|tile| *tile as f32)),
+            3_834_443_859_693_355_621
         );
     }
 }
