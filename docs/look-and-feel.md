@@ -270,6 +270,10 @@ the four walls. The image is fixed to the particles, so it stretches,
 squashes and tears with the body. Blocks or sheets that leave both unset
 share one plain material.
 
+A `rusting.fluid_block` surface draws as translucent water for the
+liquid solvers and as opaque sand for `Granular`, so a heap of grains
+reads as a heap and not as a puddle.
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,

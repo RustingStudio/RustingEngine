@@ -3030,7 +3030,7 @@ Depends on: Milestones 3 and 4.
   mutation that skipped the grid search failed both. Full check: fmt,
   clippy x3, `cargo test --workspace` (lib 885) and the gpu-tests run
   (lib 1017) pass.
-- [ ] Rendering of deformables, fluid surfaces, and debris produced by Milestone 11.
+- [x] Rendering of deformables, fluid surfaces, and debris produced by Milestone 11.
   Partial (lane/render): cloth sheets take a material. `rusting.cloth`
   gains `color` (linear RGBA) and `texture` (asset path); `spawn_cloths`
   gives a sheet with either set its own material (a texture that fails to
@@ -3077,8 +3077,17 @@ Depends on: Milestones 3 and 4.
   flipped on the walls and with the skin built without UVs. Full check:
   fmt, clippy x3, `cargo test --workspace` (lib 970) and the gpu-tests
   run (lib 1134) pass.
-  Not done: fluid surface shading beyond its material, UVs for cloth
-  curved at rest.
+  Fluid surfaces: `Granular` blocks draw an opaque sand material ("Fluid
+  Block Sand", rough, sand colored) in place of the translucent water
+  that liquids keep; see `docs/look-and-feel.md` "Cloth and soft blocks".
+  Evidence: unit test `sand_blocks_draw_opaque_sand_and_liquids_draw_water`
+  (a Granular block's surface gets the opaque sand material, a Particles
+  block keeps the blended water). It failed with every block drawn as
+  water. Full check: fmt, clippy x3, `cargo test --workspace` (lib 971)
+  and the gpu-tests run (lib 1135) pass.
+  Limits: cloth UVs assume the flat grid that `rusting.cloth` always
+  builds; a cloth curved at rest would need UVs from its rest shape. The
+  fluid surface is shaded by its material only (no refraction or foam).
 - [x] Effect budget and quality-profile scaling for particles and decals.
   `particle_budget` and `decal_budget` (`src/rendering/scene_renderer.rs`,
   next to `light_budget`) cap each frame by the resolved quality profile:

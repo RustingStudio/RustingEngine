@@ -525,7 +525,17 @@ fn volume_for_block(
             });
         }
         if block.visible {
-            volume.surface = Some(FluidSurface::new(water_material(assets)));
+            let material = if block.solver == FluidSolver::Granular {
+                super::soft_body::named_material(
+                    assets,
+                    "Fluid Block Sand",
+                    SAND_COLOR,
+                    0.9,
+                )
+            } else {
+                water_material(assets)
+            };
+            volume.surface = Some(FluidSurface::new(material));
         }
     }
     volume
@@ -590,7 +600,10 @@ fn capped_counts(mut counts: [u32; 3]) -> [u32; 3] {
     counts
 }
 
-/// The shared translucent blue material of fluid blocks.
+/// Base color of the opaque surface of Granular fluid blocks.
+const SAND_COLOR: [f32; 4] = [0.76, 0.62, 0.42, 1.0];
+
+/// The shared translucent blue material of liquid fluid blocks.
 fn water_material(
     assets: &mut crate::assets::AssetServer,
 ) -> crate::assets::Handle<crate::assets::MaterialAsset> {
@@ -1355,6 +1368,41 @@ mod tests {
             app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn sand_blocks_draw_opaque_sand_and_liquids_draw_water() {
+        let mut app = crate::runtime::App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        let mut spawn = |x: f32, solver: FluidSolver| {
+            app.spawn((
+                crate::Transform::new([x, 1.0, 0.0]),
+                FluidBlock {
+                    count_x: 3,
+                    count_y: 3,
+                    count_z: 3,
+                    solver,
+                    ..FluidBlock::default()
+                },
+            ))
+        };
+        let blocks = [
+            spawn(0.0, FluidSolver::Granular),
+            spawn(3.0, FluidSolver::Particles),
+            spawn(6.0, FluidSolver::Grid),
+        ];
+        run_app(&mut app, 2);
+        let world = app.world();
+        let assets = world.resource::<crate::assets::AssetServer>();
+        let [sand, water, grid] = blocks.map(|block| {
+            let surface = world.get::<FluidVolume>(block).unwrap();
+            let handle = surface.surface.as_ref().unwrap().material;
+            (handle, assets.materials.get(handle).unwrap().clone())
+        });
+        assert_eq!(sand.1.alpha_mode, crate::assets::AlphaMode::Opaque);
+        assert_eq!(sand.1.base_color, SAND_COLOR);
+        assert_eq!(water.1.alpha_mode, crate::assets::AlphaMode::Blend);
+        assert_eq!(grid.0, water.0, "liquids share the water");
     }
 
     /// Impulses one tick of a water block sends a 1 kg GPU ball whose
