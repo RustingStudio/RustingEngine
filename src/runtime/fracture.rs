@@ -23,9 +23,11 @@
 //! flight: a piece asleep for its fracture's `debris_lifetime` despawns,
 //! and with `merge_debris` the pieces of one break, once all asleep, become
 //! one static triangle-mesh body. At the [`DebrisBudget`] a new break first
-//! removes the longest-sleeping debris to make room; if too little debris
-//! sleeps, the object stays whole this tick rather than dropping moving
-//! pieces.
+//! removes the longest-sleeping debris to make room, oldest sleep tick
+//! first, then lowest [`SpawnOrder`]; if too little debris sleeps, the
+//! object stays whole this tick rather than dropping moving pieces. GPU
+//! debris counts as asleep once its read-back [`GpuStateMirror`] shows the
+//! GPU solver stopped it, from the tick of that state.
 //!
 //! Determinism: Voronoi seeds come from [`RandomSeed`] streams of the
 //! fracture's own seed, cells are cut in index order, objects break in
@@ -44,8 +46,9 @@ use super::cpu_physics::next_spawn_order;
 use crate::assets::{AssetServer, MeshAsset, MeshVertex};
 use crate::runtime::{
     sim_math, Collider, ColliderShape, CollisionLayers, EventQueue, FrameTime,
-    Heightfield, MeshRenderer, Name, PhysicsBody, PhysicsWorld, RandomSeed,
-    RigidBody, RigidBodyKind, SceneId, SimulationClass, Sleeping, SpawnOrder,
+    GpuStateMirror, Heightfield, MeshRenderer, Name, PhysicsBody,
+    PhysicsSyncMode, PhysicsWorld, RandomSeed, RigidBody, RigidBodyKind,
+    SceneId, SimulationClass, Sleeping, SpawnOrder,
 };
 use crate::Transform;
 
@@ -76,7 +79,9 @@ pub struct Fracture {
     pub merge_debris: bool,
 }
 
-/// Most [`Debris`] bodies alive at once; 0 is no cap.
+/// Most [`Debris`] bodies alive at once; 0 is no cap. At the cap a break
+/// removes the longest-sleeping debris (by sleep tick, then [`SpawnOrder`])
+/// or, when too little sleeps, waits; moving debris is never dropped.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DebrisBudget(pub u32);
 
@@ -466,18 +471,34 @@ pub(super) fn manage_debris(world: &mut World) {
             Has<Sleeping>,
             Option<&RigidBody>,
             Option<&SpawnOrder>,
+            Option<&PhysicsBody>,
+            Option<&GpuStateMirror>,
         )>()
         .iter_mut(world)
-        .map(|(entity, mut debris, sleeping, body, order)| {
-            let still = sleeping
-                || body.is_some_and(|b| b.kind != RigidBodyKind::Dynamic);
-            if !still {
-                debris.asleep_since = None;
-            } else if debris.asleep_since.is_none() {
-                debris.asleep_since = Some(tick);
-            }
-            (order.map(|o| o.0), entity.to_bits(), entity, *debris)
-        })
+        .map(
+            |(entity, mut debris, sleeping, body, order, physics, mirror)| {
+                // The GPU solver zeroes a body's velocities when it puts it to
+                // sleep, and a falling body never reads back exactly zero.
+                let gpu_asleep = physics
+                    .is_some_and(|p| p.simulation == SimulationClass::Gpu)
+                    .then_some(mirror)
+                    .flatten()
+                    .filter(|m| {
+                        m.linear_velocity == [0.0; 3]
+                            && m.angular_velocity == [0.0; 3]
+                    })
+                    .map(|m| m.tick);
+                let still = sleeping
+                    || gpu_asleep.is_some()
+                    || body.is_some_and(|b| b.kind != RigidBodyKind::Dynamic);
+                if !still {
+                    debris.asleep_since = None;
+                } else if debris.asleep_since.is_none() {
+                    debris.asleep_since = Some(gpu_asleep.unwrap_or(tick));
+                }
+                (order.map(|o| o.0), entity.to_bits(), entity, *debris)
+            },
+        )
         .collect();
     pieces.sort_unstable_by_key(|&(order, bits, ..)| (order, bits));
     let step = step.as_secs_f32();
@@ -1200,6 +1221,8 @@ fn promote(
                 simulation: SimulationClass::Gpu,
                 ..PhysicsBody::default()
             },
+            // Reads state back so the budget can tell when the slab sleeps.
+            PhysicsSyncMode::SelectedState,
             RigidBody {
                 kind: RigidBodyKind::Dynamic,
                 mass: fracture.density * volume,
@@ -1762,6 +1785,44 @@ mod tests {
             .iter()
             .flatten()
             .all(|&h| h == 0.0));
+    }
+
+    #[test]
+    fn gpu_debris_stopped_by_the_gpu_solver_makes_room_at_the_budget() {
+        // One GPU slab fills the budget; a dig waits until it has slept.
+        let dig = |velocity: [f32; 3]| {
+            let (mut app, terrain) = terrain_and_crate(0, -2.0, 2.0, 3.0);
+            app.world_mut().insert_resource(DebrisBudget(1));
+            let old = app
+                .world_mut()
+                .spawn((
+                    PhysicsBody {
+                        simulation: SimulationClass::Gpu,
+                        ..PhysicsBody::default()
+                    },
+                    RigidBody::default(),
+                    GpuStateMirror {
+                        tick: 3,
+                        transform: Transform::new([9.0, 0.0, 9.0]),
+                        linear_velocity: velocity,
+                        angular_velocity: [0.0; 3],
+                        custom_values: None,
+                    },
+                    Debris {
+                        group: 0,
+                        lifetime: 0.0,
+                        merge: false,
+                        asleep_since: None,
+                    },
+                ))
+                .id();
+            run(&mut app, 60);
+            let world = app.world();
+            let broken = world.get::<TerrainFracture>(terrain).unwrap();
+            (world.get_entity(old).is_ok(), broken.broken.clone())
+        };
+        assert_eq!(dig([0.0; 3]), (false, vec![2]));
+        assert_eq!(dig([0.0, -0.01, 0.0]), (true, vec![]));
     }
 
     /// Pieces of each dig, as (offset from the dug chunk's centre, mass
