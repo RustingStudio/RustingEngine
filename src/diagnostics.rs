@@ -235,6 +235,12 @@ pub const CODES: &[CodeInfo] = &[
         "rusting run --ticks 120 --json",
     ),
     code(
+        "GENERATED_SCENE_CHECK_FAILED",
+        "A scene made by a `scene_generators` entry failed one of the generator's `checks` scenarios, so `rusting scene generate` kept the old scene.",
+        "Read the scenario failure in the message; fix the generator so the level passes (for example so every explore goal is reachable), or change its seed or inputs.",
+        "rusting scene generate . level --json",
+    ),
+    code(
         "GENERATED_SCENE_EDITED",
         "A scene made by a `scene_generators` entry was edited by hand since it was generated, so `rusting scene generate` did not replace it.",
         "Keep the edit by moving it into the generator or its inputs, or pass --force to regenerate over it; `rusting revert` brings back the replaced scene.",

@@ -133,6 +133,12 @@ pub enum AssetImportError {
     },
     /// A generated scene was edited by hand since it was generated.
     GeneratedSceneEdited(PathBuf),
+    /// A new generated scene failed one of its generator's `checks`.
+    GeneratedSceneCheckFailed {
+        name: String,
+        scenario: PathBuf,
+        message: String,
+    },
 }
 
 impl AssetImportError {
@@ -148,6 +154,9 @@ impl AssetImportError {
             Self::GeneratorUnknown(_) => "GENERATOR_UNKNOWN",
             Self::GeneratorFailed { .. } => "GENERATOR_FAILED",
             Self::GeneratedSceneEdited(_) => "GENERATED_SCENE_EDITED",
+            Self::GeneratedSceneCheckFailed { .. } => {
+                "GENERATED_SCENE_CHECK_FAILED"
+            }
         }
     }
 
@@ -158,6 +167,7 @@ impl AssetImportError {
             | Self::Unsupported(path)
             | Self::Exists(path)
             | Self::GeneratedSceneEdited(path)
+            | Self::GeneratedSceneCheckFailed { scenario: path, .. }
             | Self::Invalid { path, .. }
             | Self::Io { path, .. } => Some(path),
             Self::NotFound(_)
@@ -207,6 +217,15 @@ impl Display for AssetImportError {
                 formatter,
                 "`{}` was edited since it was generated; pass --force to replace it",
                 path.display()
+            ),
+            Self::GeneratedSceneCheckFailed {
+                name,
+                scenario,
+                message,
+            } => write!(
+                formatter,
+                "the scene from generator `{name}` failed check `{}`, so the old scene stays: {message}",
+                scenario.display()
             ),
         }
     }
@@ -853,6 +872,11 @@ pub struct SceneGenerator {
     /// Files and folders, relative to the project root, whose contents
     /// the output depends on, such as the generator's source folder.
     pub watch: Vec<PathBuf>,
+    /// Scenario files, relative to the project root, that must pass on the
+    /// new scene before it replaces the old one, such as an `explore` run
+    /// that reaches every goal or `invariants` the level must keep.
+    /// `rusting scene generate` plays them on the staged scene.
+    pub checks: Vec<PathBuf>,
 }
 
 /// What [`generate_scenes`] did for one generator.
@@ -864,6 +888,8 @@ pub struct GeneratedScene {
     pub status: &'static str,
     /// FNV-1a 64 over the command, seed, inputs and watched contents.
     pub key: String,
+    /// The `checks` the new scene passed; empty when cached.
+    pub checked: Vec<PathBuf>,
 }
 
 /// The cache, `.rusting/generated.json`: the key each output was made
@@ -910,12 +936,17 @@ fn generator_key(project_root: &Path, generator: &SceneGenerator) -> String {
 /// broken command never replaces a good scene. An output edited by hand
 /// since it was generated is refused with `GENERATED_SCENE_EDITED` unless
 /// `force` is set. `dry_run` reports what would run without running it.
+///
+/// `check` runs one of a generator's `checks` on the staged scene (its
+/// path is the second argument) and returns why it failed; any failure
+/// keeps the old scene and gives `GENERATED_SCENE_CHECK_FAILED`.
 pub fn generate_scenes(
     project_root: &Path,
     generators: &BTreeMap<String, SceneGenerator>,
     names: &[&str],
     force: bool,
     dry_run: bool,
+    check: &mut dyn FnMut(&Path, &Path) -> Result<(), String>,
 ) -> Result<Vec<GeneratedScene>, AssetImportError> {
     for name in names {
         if !generators.contains_key(*name) {
@@ -961,6 +992,7 @@ pub fn generate_scenes(
                 "generated"
             },
             key: key.clone(),
+            checked: Vec::new(),
         };
         if result.status == "cached" || dry_run {
             results.push(result);
@@ -974,7 +1006,8 @@ pub fn generate_scenes(
         std::fs::create_dir_all(parent).map_err(io(parent))?;
         // Beside the output, so the scene's relative asset paths hold.
         let staged = TemporaryFile(
-            parent.join(format!(".{name}-{}.generating", Uuid::new_v4())),
+            parent
+                .join(format!(".{name}-{}.generating.rscene", Uuid::new_v4())),
         );
         let run = std::process::Command::new(program)
             .args(arguments)
@@ -1001,20 +1034,29 @@ pub fn generate_scenes(
         crate::runtime::parse_scene_document(&bytes).map_err(|error| {
             failed(format!("wrote an invalid scene: {error}"))
         })?;
+        for scenario in &generator.checks {
+            check(&project_root.join(scenario), &staged.0).map_err(
+                |message| AssetImportError::GeneratedSceneCheckFailed {
+                    name: name.clone(),
+                    scenario: scenario.clone(),
+                    message,
+                },
+            )?;
+            result.checked.push(scenario.clone());
+        }
         crate::runtime::write_atomic(&output, &bytes).map_err(io(&output))?;
         cache.0.insert(
             name.clone(),
             (key, crate::runtime::scene_revision(&bytes)),
         );
-        result.status = "generated";
-        results.push(result);
-    }
-    if !dry_run {
-        let bytes = serde_json::to_vec_pretty(&cache).unwrap_or_default();
+        // Saved after each scene, so a later failure does not leave a
+        // written scene looking edited by hand.
+        let cache_bytes = serde_json::to_vec_pretty(&cache).unwrap_or_default();
         if let Some(parent) = cache_path.parent() {
             std::fs::create_dir_all(parent).map_err(io(parent))?;
         }
-        std::fs::write(&cache_path, bytes).map_err(io(&cache_path))?;
+        std::fs::write(&cache_path, cache_bytes).map_err(io(&cache_path))?;
+        results.push(result);
     }
     Ok(results)
 }
@@ -1689,6 +1731,7 @@ mod tests {
             seed: 7,
             inputs: serde_json::json!({"rooms": 3}),
             watch: vec!["gen".into()],
+            checks: Vec::new(),
         };
         let mut generators =
             BTreeMap::from([("level".to_owned(), generator(script))]);
@@ -1699,7 +1742,14 @@ mod tests {
                 .count()
         };
         let generate = |generators: &BTreeMap<_, _>, force| {
-            generate_scenes(&root, generators, &[], force, false)
+            generate_scenes(
+                &root,
+                generators,
+                &[],
+                force,
+                false,
+                &mut |_, _| Ok(()),
+            )
         };
         let scene = || {
             crate::runtime::read_scene_document(
@@ -1709,9 +1759,15 @@ mod tests {
             .name
         };
 
-        let preview =
-            generate_scenes(&root, &generators, &["level"], false, true)
-                .unwrap();
+        let preview = generate_scenes(
+            &root,
+            &generators,
+            &["level"],
+            false,
+            true,
+            &mut |_, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(preview[0].status, "generated");
         assert_eq!(runs(), 0, "a dry run runs nothing");
         let made = generate(&generators, false).unwrap();
@@ -1760,11 +1816,54 @@ mod tests {
             assert_eq!(scene(), "level 8");
         }
         assert_eq!(
-            generate_scenes(&root, &generators, &["missing"], false, false)
-                .unwrap_err()
-                .code(),
+            generate_scenes(
+                &root,
+                &generators,
+                &["missing"],
+                false,
+                false,
+                &mut |_, _| Ok(())
+            )
+            .unwrap_err()
+            .code(),
             "GENERATOR_UNKNOWN"
         );
+
+        // A failed check keeps the old scene; a passing one is reported.
+        generators.get_mut("level").unwrap().seed = 9;
+        generators.get_mut("level").unwrap().checks =
+            vec!["reach.scenario.json".into()];
+        let mut seen = Vec::new();
+        let error = generate_scenes(
+            &root,
+            &generators,
+            &[],
+            false,
+            false,
+            &mut |scenario, scene| {
+                seen.push(
+                    crate::runtime::read_scene_document(scene).unwrap().name,
+                );
+                assert_eq!(scenario, root.join("reach.scenario.json"));
+                Err("goal 2 not reached".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GENERATED_SCENE_CHECK_FAILED");
+        assert!(error.to_string().contains("goal 2 not reached"), "{error}");
+        assert_eq!(seen, ["level 9"], "the check sees the new scene");
+        assert_eq!(scene(), "level 8");
+        let made = generate_scenes(
+            &root,
+            &generators,
+            &[],
+            false,
+            false,
+            &mut |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(made[0].checked, [PathBuf::from("reach.scenario.json")]);
+        assert_eq!(scene(), "level 9");
         let leftovers = std::fs::read_dir(root.join("scenes")).unwrap().count();
         assert_eq!(leftovers, 1, "no staged file is left behind");
         std::fs::remove_dir_all(root).unwrap();

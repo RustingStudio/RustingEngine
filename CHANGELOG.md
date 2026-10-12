@@ -4,6 +4,7 @@
 
 ### Added
 
+- Generated level checks: a `scene_generators` entry's `checks` scenarios (such as an `explore` run that must reach every goal, or `invariants`) play on each new scene before it replaces the old one; a failure keeps the old scene and gives `GENERATED_SCENE_CHECK_FAILED`. `RunOptions.scene` runs a game on any scene
 - Scene generators: `scene_generators` in `project.json` name a project command that writes a scene from a seed and inputs; `rusting scene generate` reruns it only when the command, seed, inputs or watched files changed, checks the scene loads, journals the write, and refuses to overwrite hand edits without `--force`
 - The API audit test covers every type in the prelude: a new public method returning a borrow, or a prelude type gaining a lifetime parameter, fails the build's tests
 - Packed asset archives: export preset `pack: true` packs `assets/` and `scenes/` into `.rpak` files the game streams files from, with loose files still winning

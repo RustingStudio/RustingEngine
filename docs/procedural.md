@@ -136,6 +136,29 @@ refused with `GENERATED_SCENE_EDITED`; `--force` regenerates it anyway, and
 also reruns unchanged generators. Instance the generated scene into another
 one to use it as a prefab.
 
+### Checking a generated level
+
+List scenario files under `checks` to test each new scene before it
+replaces the old one:
+
+```json
+"checks": ["tests/reach.json"]
+```
+
+`rusting scene generate` plays each scenario on the staged scene, as a
+scenario run would (the game loads it through
+`RUSTING_SCENE_PATH`). A scenario with `explore` sends the explorer bot to
+every goal, so it fails when the generator walled one off; `invariants`
+and `expect` steps check anything else the level must keep. Any failure
+keeps the old scene and gives `GENERATED_SCENE_CHECK_FAILED` with the
+scenario's message; the result lists the `checked` scenarios of each new
+scene. To try another layout, change `seed` and run it again.
+
+```json
+{"name": "the goal is reachable", "ticks": 400,
+ "explore": {"goals": ["Goal"], "ticks_per_goal": 350}}
+```
+
 ## Same on every machine
 
 The generators use integer hashing and the floating-point operations that

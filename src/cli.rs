@@ -3867,6 +3867,26 @@ pub fn generate_scenes(
         names,
         force,
         dry_run,
+        // Each check plays its scenario on the staged scene.
+        &mut |scenario, scene| {
+            let run = run_game_project(
+                &project.root,
+                RunOptions {
+                    scenario: Some(scenario.to_owned()),
+                    scene: Some(scene.to_owned()),
+                    ..RunOptions::default()
+                },
+            );
+            if run.ok {
+                return Ok(());
+            }
+            Err(run
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; "))
+        },
     ) {
         Ok(scenes) => {
             CliResult::success(json!({ "scenes": scenes, "dry_run": dry_run }))
@@ -5214,6 +5234,9 @@ pub struct RunOptions {
     /// Run as a dedicated server (`--server`): no window, real-time ticks
     /// until the game quits or `timeout` stops it.
     pub server: bool,
+    /// Load this scene instead of the cooked main scene, through
+    /// `RUSTING_SCENE_PATH`, such as a generated scene being checked.
+    pub scene: Option<PathBuf>,
 }
 
 /// Cooks the main scene, builds the game, and runs it as a debug session:
@@ -5486,6 +5509,9 @@ fn run_game_project_once(root: &Path, options: RunOptions) -> CliResult {
         None => {
             game.current_dir(&root);
         }
+    }
+    if let Some(scene) = &options.scene {
+        game.env("RUSTING_SCENE_PATH", scene);
     }
     let final_scene = root.join("build/final.rscene");
     if let Some(ticks) = options.headless_ticks {
