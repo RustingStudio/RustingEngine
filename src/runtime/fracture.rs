@@ -110,6 +110,16 @@ pub struct Fractured {
     pub bounds: [[f32; 3]; 2],
 }
 
+/// Sent in the fixed step sleeping [`Debris`] froze back into a terrain
+/// ([`TerrainFracture::refreeze`]), one per terrain and tick.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refrozen {
+    pub terrain: Entity,
+    /// World box `[min, max]` of the frozen pieces, for navigation and other
+    /// spatial caches to rebuild.
+    pub bounds: [[f32; 3]; 2],
+}
+
 /// A body made by a break.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct Debris {
@@ -916,6 +926,9 @@ pub struct TerrainFracture {
     pub density: f32,
     /// Seconds a slab stays once it sleeps; 0 keeps it.
     pub debris_lifetime: f32,
+    /// Seconds any [`Debris`] resting on this terrain sleeps before it
+    /// freezes back into the heights; 0 never refreezes.
+    pub refreeze: f32,
     /// Chunks already promoted, as `row * chunk_columns + column`, sorted.
     /// A chunk is promoted once.
     pub broken: Vec<u32>,
@@ -930,6 +943,7 @@ impl Default for TerrainFracture {
             depth: 0.5,
             density: 2000.0,
             debris_lifetime: 0.0,
+            refreeze: 0.0,
             broken: Vec::new(),
         }
     }
@@ -1266,6 +1280,169 @@ fn promote(
             bounds,
         });
     }
+}
+
+/// Per fixed step, after [`manage_debris`]: [`Debris`] asleep for a
+/// terrain's [`TerrainFracture::refreeze`] seconds, with its bottom within
+/// one sample spacing of the ground under it, is despawned and its top
+/// stamped into the heightfield. Every sample nearest the piece's footprint
+/// rises to the piece's top, so the ground restores the piece's collision
+/// (a little more volume than the piece had, never less). Pieces go in
+/// [`SpawnOrder`], terrains in `SceneId` then `SpawnOrder` order, and a
+/// piece freezes into the first terrain that takes it.
+pub(super) fn refreeze_debris(world: &mut World) {
+    let (tick, step) =
+        world.get_resource::<FrameTime>().map_or((0, 0.0), |time| {
+            (time.fixed_tick, time.fixed_delta.as_secs_f32())
+        });
+    let mut terrains: Vec<_> = world
+        .query::<(
+            Entity,
+            &TerrainFracture,
+            &Heightfield,
+            &Transform,
+            Option<&SceneId>,
+            Option<&SpawnOrder>,
+        )>()
+        .iter(world)
+        .filter(|(_, fracture, ..)| fracture.refreeze > 0.0)
+        .map(|(entity, fracture, field, transform, scene, order)| {
+            let key = (scene.map(|s| s.0), order.map(|o| o.0));
+            (key, entity, fracture.refreeze, field.clone(), *transform)
+        })
+        .collect();
+    if terrains.is_empty() {
+        return;
+    }
+    terrains.sort_by(|a, b| (&a.0, a.1.to_bits()).cmp(&(&b.0, b.1.to_bits())));
+    let mut pieces: Vec<_> = world
+        .query::<(
+            Entity,
+            &Debris,
+            &Transform,
+            &MeshRenderer,
+            Option<&GpuStateMirror>,
+            Option<&SpawnOrder>,
+        )>()
+        .iter(world)
+        .filter_map(|(entity, debris, transform, renderer, mirror, order)| {
+            let asleep =
+                tick.saturating_sub(debris.asleep_since?) as f32 * step;
+            // A GPU body's own `Transform` is its spawn pose.
+            let pose = mirror.map_or(*transform, |m| m.transform);
+            Some((order.map(|o| o.0), entity, asleep, pose, renderer.mesh))
+        })
+        .collect();
+    pieces
+        .sort_unstable_by_key(|&(order, entity, ..)| (order, entity.to_bits()));
+    let mut changed = vec![None::<[[f32; 3]; 2]>; terrains.len()];
+    for (_, entity, asleep, pose, mesh) in pieces {
+        let Some(points) = world
+            .get_resource::<AssetServer>()
+            .and_then(|assets| assets.meshes.get(mesh))
+            .map(|mesh| {
+                let [roll, pitch, yaw] = pose.rotation;
+                let turn = sim_math::rotation_from_euler(roll, pitch, yaw);
+                mesh.vertices
+                    .iter()
+                    .map(|v| {
+                        V::from(pose.position)
+                            + turn
+                                * V::from(v.position)
+                                    .component_mul(&V::from(pose.scale))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        else {
+            continue;
+        };
+        if points.is_empty() {
+            continue;
+        }
+        for (index, (_, _, refreeze, field, transform)) in
+            terrains.iter_mut().enumerate()
+        {
+            if asleep < *refreeze || !stamp(field, transform, &points) {
+                continue;
+            }
+            let bounds = changed[index]
+                .get_or_insert([[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]]);
+            for p in &points {
+                for axis in 0..3 {
+                    bounds[0][axis] = bounds[0][axis].min(p[axis]);
+                    bounds[1][axis] = bounds[1][axis].max(p[axis]);
+                }
+            }
+            remove_debris(world, entity);
+            break;
+        }
+    }
+    for ((_, terrain, _, field, _), bounds) in terrains.into_iter().zip(changed)
+    {
+        let Some(bounds) = bounds else {
+            continue;
+        };
+        if let Some(mut heights) = world.get_mut::<Heightfield>(terrain) {
+            *heights = field;
+        }
+        if let Some(mut events) =
+            world.get_resource_mut::<EventQueue<Refrozen>>()
+        {
+            events.send(Refrozen { terrain, bounds });
+        }
+    }
+}
+
+/// Raises the samples nearest the footprint of `points` (world space) to
+/// their top, if their bottom rests within one spacing of that ground.
+fn stamp(field: &mut Heightfield, transform: &Transform, points: &[V]) -> bool {
+    let spacing = field.spacing;
+    let (columns, rows) = (cells_x(field), cells_z(field));
+    if spacing <= 0.0 || columns == 0 || rows == 0 {
+        return false;
+    }
+    let [roll, pitch, yaw] = transform.rotation;
+    let back = sim_math::rotation_from_euler(roll, pitch, yaw).inverse();
+    let mut low = V::repeat(f32::INFINITY);
+    let mut high = V::repeat(f32::NEG_INFINITY);
+    for p in points {
+        let local = (back * (p - V::from(transform.position)))
+            .component_div(&V::from(transform.scale));
+        low = low.inf(&local);
+        high = high.sup(&local);
+    }
+    // Nearest sample index along an axis of `cells` cells.
+    let index =
+        |x: f32, cells: usize| (x / spacing + 0.5 * cells as f32).round();
+    let range = |low: f32, high: f32, cells: usize| {
+        let first = index(low, cells).max(0.0);
+        let last = index(high, cells).min(cells as f32);
+        (first <= last).then_some(first as usize..=last as usize)
+    };
+    let (Some(xs), Some(zs)) =
+        (range(low.x, high.x, columns), range(low.z, high.z, rows))
+    else {
+        return false;
+    };
+    let height = |row: &Vec<f32>, x: usize| row.get(x).copied().unwrap_or(0.0);
+    let ground = zs
+        .clone()
+        .flat_map(|z| xs.clone().map(move |x| (z, x)))
+        .map(|(z, x)| height(&field.heights[z], x))
+        .fold(f32::NEG_INFINITY, f32::max);
+    if low.y > ground + spacing {
+        return false;
+    }
+    for z in zs {
+        let row = &mut field.heights[z];
+        if row.len() <= *xs.end() {
+            row.resize(xs.end() + 1, 0.0);
+        }
+        for h in &mut row[xs.clone()] {
+            *h = h.max(high.y);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1823,6 +2000,91 @@ mod tests {
         };
         assert_eq!(dig([0.0; 3]), (false, vec![2]));
         assert_eq!(dig([0.0, -0.01, 0.0]), (true, vec![]));
+    }
+
+    #[test]
+    fn resting_debris_refreezes_into_the_terrain_it_sleeps_on() {
+        let (mut app, terrain) = terrain_and_crate(0, -2.0, 2.0, 100.0);
+        app.world_mut()
+            .get_mut::<TerrainFracture>(terrain)
+            .unwrap()
+            .refreeze = 1.0;
+        let piece = |app: &mut crate::runtime::App, at: [f32; 3], gpu: bool| {
+            let world = app.world_mut();
+            let order = next_spawn_order(world);
+            let (mesh, material) = {
+                let mut assets = world.resource_mut::<AssetServer>();
+                let material = assets.fallback_material;
+                (assets.meshes.insert(box_mesh([0.5; 3])), material)
+            };
+            let mut entity = world.spawn((
+                Transform::new(at),
+                PhysicsBody::default(),
+                RigidBody::default(),
+                Collider {
+                    shape: ColliderShape::ConvexMesh,
+                    ..Collider::default()
+                },
+                MeshRenderer {
+                    mesh,
+                    material,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                },
+                order,
+                Debris {
+                    group: order.0,
+                    lifetime: 0.0,
+                    merge: false,
+                    asleep_since: None,
+                },
+            ));
+            if gpu {
+                // Asleep on the GPU at x -1, z -1, its spawn pose far above.
+                entity.insert((
+                    PhysicsBody {
+                        simulation: SimulationClass::Gpu,
+                        ..PhysicsBody::default()
+                    },
+                    GpuStateMirror {
+                        tick: 1,
+                        transform: Transform::new([-1.0, 0.5, -1.0]),
+                        linear_velocity: [0.0; 3],
+                        angular_velocity: [0.0; 3],
+                        custom_values: None,
+                    },
+                ));
+            }
+            entity.id()
+        };
+        // Falls onto the terrain, sleeps, then freezes into it.
+        let falling = piece(&mut app, [1.0, 1.0, 1.0], false);
+        let gpu = piece(&mut app, [0.0, 50.0, 0.0], true);
+        // Sleeps on nothing far above the ground, so never freezes.
+        let floating = piece(&mut app, [3.0, 5.0, 3.0], false);
+        app.world_mut().get_mut::<RigidBody>(floating).unwrap().kind =
+            RigidBodyKind::Fixed;
+        let mut frozen = Vec::new();
+        for _ in 0..300 {
+            run(&mut app, 1);
+            let events = app.world().resource::<EventQueue<Refrozen>>();
+            frozen.extend(events.iter().cloned());
+        }
+        let world = app.world();
+        assert!(world.get_entity(falling).is_err());
+        assert!(world.get_entity(gpu).is_err());
+        assert!(world.get_entity(floating).is_ok());
+        let heights = &world.get::<Heightfield>(terrain).unwrap().heights;
+        // Sample 5 is at 1 m, sample 3 at -1 m; the pieces are 1 m tall.
+        for [z, x] in [[5, 5], [3, 3]] {
+            assert!((heights[z][x] - 1.0).abs() < 0.05, "{:?}", heights[z]);
+        }
+        // Far from both, and under the floating piece at 3 m.
+        for [z, x] in [[0, 0], [8, 8], [7, 7], [0, 8]] {
+            assert_eq!(heights[z][x], 0.0);
+        }
+        assert!(!frozen.is_empty());
+        assert!(frozen.iter().all(|e| e.terrain == terrain));
     }
 
     /// Pieces of each dig, as (offset from the dug chunk's centre, mass

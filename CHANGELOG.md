@@ -10,6 +10,7 @@
 - `TerrainFracture` digs a struck heightfield chunk out as a dynamic GPU slab
 - `TerrainFracture::pieces` cracks dug-out slabs into Voronoi pieces seeded by the scene's `RandomSeed` at the tick
 - GPU debris put to sleep by the GPU solver now counts as asleep, so the `DebrisBudget` can free dug terrain slabs at the cap
+- `TerrainFracture::refreeze` freezes debris that rests asleep on the terrain back into its heights and sends a `Refrozen` event
 
 ### Fixed
 

@@ -846,6 +846,7 @@ crate::reflect! {
         depth: f32 { unit: "m", min: 0.0, doc: "how far the chunk's ground drops; the slab's thickness" },
         density: f32 { unit: "kg/m³", min: 0.0, doc: "density of the dug-out slab" },
         debris_lifetime: f32 { unit: "s", min: 0.0, doc: "seconds a slab stays once it sleeps; 0 keeps it" },
+        refreeze: f32 { unit: "s", min: 0.0, doc: "seconds any debris resting on this terrain sleeps before it freezes back into the heights; 0 never refreezes" },
         broken: Vec<u32> { doc: "chunks already dug out, row * chunk columns + column, sorted" },
     }
 }
