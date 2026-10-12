@@ -647,6 +647,30 @@ struct LightUpload {
     cookie: [f32; 4],
 }
 
+/// The 2D pass's push constants.
+#[repr(C)]
+#[derive(BufferContents, Clone, Copy)]
+struct SpritePush {
+    view_projection: [[f32; 4]; 4],
+    /// rgb light every sprite gets before 2D lights.
+    ambient: [f32; 4],
+    /// How many entries of the light buffer to use.
+    light_count: u32,
+}
+
+/// One 2D light as the sprite shader reads it.
+#[repr(C)]
+#[derive(BufferContents, Clone, Copy)]
+struct SpriteLight {
+    /// XY center in world units, radius in w.
+    position_radius: [f32; 4],
+    /// Color times intensity in rgb.
+    color: [f32; 4],
+}
+
+/// Sprites take only the first lights; each costs a test per sprite pixel.
+const MAX_LIGHTS_2D: usize = 16;
+
 /// One sprite of the 2D pass, read per instance.
 #[repr(C)]
 #[derive(BufferContents, Vertex, Clone, Copy)]
@@ -5370,6 +5394,46 @@ impl SceneRenderer {
                 .map_err(|error| SceneRenderError(error.to_string()))?
                 .copy_from_slice(&instances);
             self.counters.upload_bytes += upload.size();
+            let lights_2d = &render_world.lights_2d
+                [..render_world.lights_2d.len().min(MAX_LIGHTS_2D)];
+            // The buffer cannot be empty, so one dark light stands in.
+            let lights = lights_2d
+                .iter()
+                .map(|light| SpriteLight {
+                    position_radius: [
+                        light.position[0],
+                        light.position[1],
+                        0.0,
+                        light.radius,
+                    ],
+                    color: [
+                        light.color[0],
+                        light.color[1],
+                        light.color[2],
+                        0.0,
+                    ],
+                })
+                .chain(std::iter::once(SpriteLight {
+                    position_radius: [0.0; 4],
+                    color: [0.0; 4],
+                }))
+                .take(lights_2d.len().max(1))
+                .collect::<Vec<_>>();
+            let light_upload = self.frame_contexts[self.frame_index]
+                .transient
+                .allocate_slice::<SpriteLight>(lights.len() as u64)
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            light_upload
+                .write()
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .copy_from_slice(&lights);
+            self.counters.upload_bytes += light_upload.size();
+            let ambient = render_world.ambient_2d.unwrap_or([1.0; 3]);
+            let push = SpritePush {
+                view_projection: camera.view_projection,
+                ambient: [ambient[0], ambient[1], ambient[2], 0.0],
+                light_count: lights_2d.len() as u32,
+            };
             let pipeline = active.sprite_pipeline.clone();
             commands
                 .set_viewport(0, [scene_viewport.clone()].into_iter().collect())
@@ -5378,11 +5442,7 @@ impl SceneRenderer {
                 .map_err(|error| SceneRenderError(error.to_string()))?
                 .bind_pipeline_graphics(pipeline.clone())
                 .map_err(|error| SceneRenderError(error.to_string()))?
-                .push_constants(
-                    pipeline.layout().clone(),
-                    0,
-                    camera.view_projection,
-                )
+                .push_constants(pipeline.layout().clone(), 0, push)
                 .map_err(|error| SceneRenderError(error.to_string()))?
                 .bind_vertex_buffers(0, upload)
                 .map_err(|error| SceneRenderError(error.to_string()))?;
@@ -5398,7 +5458,12 @@ impl SceneRenderer {
                 let set = DescriptorSet::new(
                     self.descriptor_allocator.clone(),
                     pipeline.layout().set_layouts()[0].clone(),
-                    [WriteDescriptorSet::image_view_sampler(0, view, sampler)],
+                    [
+                        WriteDescriptorSet::image_view_sampler(
+                            0, view, sampler,
+                        ),
+                        WriteDescriptorSet::buffer(1, light_upload.clone()),
+                    ],
                     [],
                 )
                 .map_err(|error| SceneRenderError(error.to_string()))?;
@@ -11704,9 +11769,12 @@ layout(location = 4) in vec4 color;
 layout(location = 5) in vec4 uv;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
-layout(push_constant) uniform Camera {
+layout(location = 2) out vec2 v_world;
+layout(push_constant) uniform Push {
     mat4 view_projection;
-} camera;
+    vec4 ambient;
+    uint light_count;
+} push;
 const vec2 CORNERS[6] = vec2[](
     vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(0.5, 0.5),
     vec2(-0.5, -0.5), vec2(0.5, 0.5), vec2(-0.5, 0.5)
@@ -11714,7 +11782,9 @@ const vec2 CORNERS[6] = vec2[](
 void main() {
     vec2 corner = CORNERS[gl_VertexIndex];
     mat4 model = mat4(column0, column1, column2, column3);
-    gl_Position = camera.view_projection * model * vec4(corner, 0.0, 1.0);
+    vec4 world = model * vec4(corner, 0.0, 1.0);
+    gl_Position = push.view_projection * world;
+    v_world = world.xy;
     // uv is [left, top, right, bottom]; +Y is the top of the image.
     v_uv = vec2(mix(uv.x, uv.z, corner.x + 0.5), mix(uv.w, uv.y, corner.y + 0.5));
     v_color = color;
@@ -11731,10 +11801,32 @@ mod sprite_fragment_shader {
 #version 450
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
+layout(location = 2) in vec2 v_world;
 layout(location = 0) out vec4 f_color;
 layout(set = 0, binding = 0) uniform sampler2D image;
+struct Light {
+    vec4 position_radius;
+    vec4 color;
+};
+layout(set = 0, binding = 1) readonly buffer Lights {
+    Light lights[];
+};
+layout(push_constant) uniform Push {
+    mat4 view_projection;
+    vec4 ambient;
+    uint light_count;
+} push;
 void main() {
-    f_color = texture(image, v_uv) * v_color;
+    vec3 light = push.ambient.rgb;
+    for (uint i = 0; i < push.light_count; i++) {
+        vec4 position_radius = lights[i].position_radius;
+        float reach = clamp(
+            1.0 - distance(v_world, position_radius.xy) / max(position_radius.w, 1e-4),
+            0.0, 1.0
+        );
+        light += lights[i].color.rgb * reach * reach;
+    }
+    f_color = texture(image, v_uv) * v_color * vec4(light, 1.0);
 }
 "
     }
@@ -23864,6 +23956,67 @@ mod tests {
             .renderer
             .last_frame_passes()
             .contains(&FramePass::Sprites));
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn lights_2d_light_sprites_near_them_over_the_ambient() {
+        use crate::runtime::{ExtractedLight2d, ExtractedSprite};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A plain white 1 m sprite; pixels are 1/16 m from the center.
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mut matrix = [[0.0; 4]; 4];
+        matrix[0][0] = 1.0;
+        matrix[1][1] = 1.0;
+        matrix[2][2] = 1.0;
+        matrix[3] = [0.0, 0.0, 0.0, 1.0];
+        scene.render_world.sprites = vec![ExtractedSprite {
+            matrix,
+            color: [1.0; 4],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            texture: None,
+            layer: 0,
+        }];
+        let brightness = |scene: &mut SlabScene, pixel| {
+            let got = render_pixel(scene, pixel);
+            [got[0], got[1], got[2]]
+        };
+        // No ambient and no lights keep the sprite's own color.
+        assert!(brightness(&mut scene, [9, 16]).iter().all(|&c| c > 240));
+        // A dark ambient and one green light at the right edge.
+        scene.render_world.ambient_2d = Some([0.0; 3]);
+        scene.render_world.lights_2d = vec![ExtractedLight2d {
+            position: [0.5, 0.0, 5.0],
+            color: [0.0, 2.0, 0.0],
+            radius: 0.6,
+        }];
+        let near = brightness(&mut scene, [23, 16]);
+        assert!(near[0] < 30 && near[1] > 200 && near[2] < 30, "{near:?}");
+        let middle = brightness(&mut scene, [16, 16]);
+        assert!(middle[1] > 30 && middle[1] < near[1], "{middle:?} {near:?}");
+        let far = brightness(&mut scene, [9, 16]);
+        assert!(far.iter().all(|&c| c < 30), "{far:?}");
+        // Lights past the sixteenth one are left out.
+        let unlit = ExtractedLight2d {
+            position: [5.0, 5.0, 0.0],
+            color: [0.0; 3],
+            radius: 0.1,
+        };
+        let mut many = vec![unlit; MAX_LIGHTS_2D];
+        many.push(ExtractedLight2d {
+            position: [-0.5, 0.0, 0.0],
+            color: [2.0; 3],
+            radius: 0.6,
+        });
+        scene.render_world.lights_2d = many;
+        let far = brightness(&mut scene, [9, 16]);
+        assert!(far.iter().all(|&c| c < 30), "{far:?}");
     }
 
     #[test]

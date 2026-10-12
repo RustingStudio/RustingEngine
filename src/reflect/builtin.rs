@@ -10,6 +10,7 @@ use crate::assets::{AlphaMode, MaterialAsset, MaterialModel};
 use crate::runtime::ClothSheet;
 use crate::runtime::Rope;
 use crate::runtime::WorldText;
+use crate::runtime::{Ambient2d, Light2d};
 use crate::runtime::{
     AmbientLight, AmbientOcclusion, Antialiasing, Articulation, AutoExposure,
     AutoSimulation, AxisLock, AxisMotion, Bloom, BurstEmitter, CameraScreen,
@@ -1429,6 +1430,23 @@ crate::reflect! {
         fps: f32 { unit: "frames/s", min: 0.0 },
         looping: bool { doc: "start over after the last frame; otherwise hold it" },
         #[skip] elapsed: f64,
+    }
+}
+
+crate::reflect! {
+    struct Light2d {
+        color: [f32; 3] { unit: "linear rgb", min: 0.0 },
+        intensity: f32 { min: 0.0 },
+        radius: f32 { unit: "m", min: 0.0, doc: "sprites farther than this in XY get none of the light" },
+    }
+}
+
+crate::reflect! {
+    struct Ambient2d {
+        color: [f32; 3] {
+            unit: "linear rgb", min: 0.0,
+            doc: "light every sprite gets before 2D lights; without one sprites keep full color",
+        },
     }
 }
 

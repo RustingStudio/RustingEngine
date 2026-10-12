@@ -3492,6 +3492,20 @@ Depends on: Milestones 3, 4, and 10 (2D physics).
   late each fails it.
 - [ ] Tilemaps with multiple layers, autotiling rules, tile collision shapes, and tile navigation data.
 - [ ] 2D lights, shadows from occluder polygons, and normal-mapped sprites.
+  - [x] Round 2D lights over a 2D ambient in the sprite pass.
+    `rusting.light_2d` (color, intensity, radius) and `rusting.ambient_2d`
+    (color) are registered for scenes, snapshots, reflection, the schema and
+    the inspector help. Extraction keeps lights in entity order and the first
+    ambient; the sprite shader multiplies each sprite by the ambient (1 with
+    none) plus each of the first sixteen lights, fading as (1 - d/r)^2 with
+    XY distance, read from a storage buffer. Evidence 2026-10-12:
+    `lights_2d_extract_in_entity_order_with_the_first_ambient` and
+    `lights_2d_light_sprites_near_them_over_the_ambient` (gpu-tests) pass;
+    dropping the entity sort, taking the last ambient, dropping intensity,
+    the sixteen-light cap, the white default ambient, the distance fade, the
+    light color, or the ambient in the shader each fails one of them.
+  - [ ] Shadows from `LightOccluder2d` polygons.
+  - [ ] Normal-mapped sprites.
 - [ ] 2D GPU particles with physics-event emission.
 - [ ] 2D camera with smoothing, limits, and pixel-perfect mode.
 - [ ] 2D hybrid GPU physics showcases (thousands of physics sprites with events to Rust gameplay).

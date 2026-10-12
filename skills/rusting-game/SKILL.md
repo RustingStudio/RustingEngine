@@ -246,6 +246,8 @@ each one's fields, defaults and an example:
 - `rusting.decal`: Paints an image under assets/ onto the surfaces inside a box of half size extents around the object, projected along its forward axis (-Z) with the image's top along +Y: a poster on a wall, a crack, a stain.
 - `rusting.sprite`: A flat image of size (world units, before the object's scale) in the object's XY plane, centered on it and facing +Z: a 2D character, a pickup, a background card.
 - `rusting.sprite_animation`: Plays a sprite sheet on the rusting.sprite of the same object by setting its region.
+- `rusting.light_2d`: A round light for rusting.sprite objects, centered on this object: it adds color (linear rgb) times intensity to sprites within radius world units in the XY plane, fading smoothly to nothing at the edge.
+- `rusting.ambient_2d`: The light every rusting.sprite gets before any rusting.light_2d: color (linear rgb) multiplies each sprite, so a dark value makes a night scene that only lights reveal.
 - `rusting.post_volume`: Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside.
 - `rusting.bloom`: Glow around pixels brighter than threshold (linear, before exposure), spread over the screen before tone mapping.
 - `rusting.auto_exposure`: Eye adaptation: every frame the renderer measures the average brightness of the lit image and moves exposure toward key / average, clamped to min_exposure..max_exposure, at speed per second (the first frame adapts at once).

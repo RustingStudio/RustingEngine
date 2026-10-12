@@ -166,6 +166,10 @@ pub struct RenderWorld {
     /// Each [`Sprite`](super::Sprite) whose image is loaded or that has
     /// none, in canvas order.
     pub sprites: Vec<ExtractedSprite>,
+    /// Each [`Light2d`](super::Light2d) in entity order.
+    pub lights_2d: Vec<ExtractedLight2d>,
+    /// The first [`Ambient2d`](super::Ambient2d) color in entity order.
+    pub ambient_2d: Option<[f32; 3]>,
     pub bloom: Option<super::Bloom>,
     pub auto_exposure: Option<super::AutoExposure>,
     pub depth_of_field: Option<super::DepthOfField>,
@@ -281,6 +285,16 @@ pub struct ExtractedSprite {
     /// `None` draws plain color.
     pub texture: Option<Handle<crate::assets::TextureAsset>>,
     pub layer: i32,
+}
+
+/// One [`Light2d`](super::Light2d) ready to light sprites.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExtractedLight2d {
+    /// World position; only X and Y light.
+    pub position: [f32; 3],
+    /// Color times intensity.
+    pub color: [f32; 3],
+    pub radius: f32,
 }
 
 /// Splits canvas-ordered sprites into runs that share an image, one draw
@@ -488,6 +502,29 @@ pub fn extract_render_world(world: &mut World) {
         });
         sprites.into_iter().map(|(_, sprite)| sprite).collect()
     };
+    let lights_2d = {
+        let mut query =
+            world.query::<(Entity, &GlobalTransform, &super::Light2d)>();
+        let mut lights = query
+            .iter(world)
+            .map(|(entity, transform, light)| {
+                let position = transform.matrix[3];
+                let extracted = ExtractedLight2d {
+                    position: [position[0], position[1], position[2]],
+                    color: light.color.map(|channel| channel * light.intensity),
+                    radius: light.radius,
+                };
+                (entity.index(), extracted)
+            })
+            .collect::<Vec<_>>();
+        lights.sort_by_key(|(entity, _)| *entity);
+        lights.into_iter().map(|(_, light)| light).collect()
+    };
+    let ambient_2d = world
+        .query::<(Entity, &super::Ambient2d)>()
+        .iter(world)
+        .min_by_key(|(entity, _)| entity.index())
+        .map(|(_, ambient)| ambient.color);
     let tone_mapping = collect_first::<ToneMapping>(world);
     let procedural_sky = collect_first::<super::ProceduralSky>(world);
     let eye = active_camera.as_ref().map(|camera| {
@@ -732,6 +769,8 @@ pub fn extract_render_world(world: &mut World) {
     render_world.fog_volumes = fog_volumes;
     render_world.decals = decals;
     render_world.sprites = sprites;
+    render_world.lights_2d = lights_2d;
+    render_world.ambient_2d = ambient_2d;
     render_world.bloom = bloom;
     render_world.auto_exposure = auto_exposure;
     render_world.depth_of_field = depth_of_field;
@@ -1891,6 +1930,44 @@ mod tests {
             * nalgebra::Vector4::new(0.5, 0.5, 0.0, 1.0);
         assert_eq!(corner, nalgebra::Vector4::new(4.0, 2.0, 0.0, 1.0));
         assert_eq!(sprites[0].uv, [0.5, 0.0, 0.25, 1.0], "flip_x swaps u");
+    }
+
+    #[test]
+    fn lights_2d_extract_in_entity_order_with_the_first_ambient() {
+        use crate::runtime::{Ambient2d, Light2d};
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        app.spawn((
+            Transform::new([1.0, 2.0, 3.0]),
+            Light2d {
+                color: [1.0, 0.5, 0.0],
+                intensity: 2.0,
+                radius: 4.0,
+            },
+        ));
+        app.spawn((Transform::default(), Light2d::default()));
+        app.spawn(Ambient2d {
+            color: [0.1, 0.2, 0.3],
+        });
+        app.spawn(Ambient2d::default());
+        app.update(Duration::ZERO).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        assert_eq!(
+            render_world.lights_2d,
+            [
+                ExtractedLight2d {
+                    position: [1.0, 2.0, 3.0],
+                    color: [2.0, 1.0, 0.0],
+                    radius: 4.0,
+                },
+                ExtractedLight2d {
+                    position: [0.0; 3],
+                    color: [1.0; 3],
+                    radius: 5.0,
+                },
+            ]
+        );
+        assert_eq!(render_world.ambient_2d, Some([0.1, 0.2, 0.3]));
     }
 
     #[test]

@@ -1214,6 +1214,8 @@ pub const FOG_VOLUME_COMPONENT: &str = "rusting.fog_volume";
 pub const DECAL_COMPONENT: &str = "rusting.decal";
 pub const SPRITE_COMPONENT: &str = "rusting.sprite";
 pub const SPRITE_ANIMATION_COMPONENT: &str = "rusting.sprite_animation";
+pub const AMBIENT_2D_COMPONENT: &str = "rusting.ambient_2d";
+pub const LIGHT_2D_COMPONENT: &str = "rusting.light_2d";
 /// Registry name of the built-in fog and grading area.
 pub const POST_VOLUME_COMPONENT: &str = "rusting.post_volume";
 pub const CAMERA_SCREEN_COMPONENT: &str = "rusting.camera_screen";
@@ -1440,6 +1442,12 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::SpriteAnimation>(SPRITE_ANIMATION_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Ambient2d>(AMBIENT_2D_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::Light2d>(LIGHT_2D_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::ProceduralSky>(PROCEDURAL_SKY_COMPONENT)

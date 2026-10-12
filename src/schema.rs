@@ -922,6 +922,18 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"columns": 4, "rows": 2, "first": 0, "count": 4, "fps": 10.0, "looping": true}),
     },
     ComponentSection {
+        key: "rusting.light_2d",
+        summary: "A round light for rusting.sprite objects, centered on this object: it adds color (linear rgb) times intensity to sprites within radius world units in the XY plane, fading smoothly to nothing at the edge. Lights add over rusting.ambient_2d. The renderer uses the first sixteen in entity order.",
+        gpu: "a distance test per light per sprite pixel",
+        example: || json!({"color": [1.0, 0.8, 0.5], "intensity": 1.5, "radius": 4.0}),
+    },
+    ComponentSection {
+        key: "rusting.ambient_2d",
+        summary: "The light every rusting.sprite gets before any rusting.light_2d: color (linear rgb) multiplies each sprite, so a dark value makes a night scene that only lights reveal. Without one, sprites keep their full color and lights brighten them. The first one in entity order is used.",
+        gpu: NO_GPU,
+        example: || json!({"color": [0.15, 0.15, 0.25]}),
+    },
+    ComponentSection {
         key: "rusting.post_volume",
         summary: "Makes the rusting.fog and rusting.color_grading on the same object apply only near it: fully while the active camera is inside the box of half size extents (world axes, metres), fading out over blend metres outside. Higher priority wins where volumes overlap. Fog and grading without a volume apply everywhere else; a hall with fog and a sickly grade and an office with a warm grade each get one.",
         gpu: NO_GPU,

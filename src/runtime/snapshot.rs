@@ -506,6 +506,8 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::Decal>();
     types.register::<super::Sprite>();
     types.register::<super::SpriteAnimation>();
+    types.register::<super::Ambient2d>();
+    types.register::<super::Light2d>();
     types.register::<super::ProceduralSky>();
     types.register::<super::CameraScreen>();
     types.register::<super::Bloom>();

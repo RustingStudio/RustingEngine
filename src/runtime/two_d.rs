@@ -92,6 +92,44 @@ impl Default for Sprite {
     }
 }
 
+/// A round light for [`Sprite`]s, centered on the object. It brightens
+/// sprites within `radius` world units in the XY plane, fading to nothing at
+/// the edge, and adds over [`Ambient2d`].
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Light2d {
+    /// Linear RGB.
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub radius: f32,
+}
+
+impl Default for Light2d {
+    fn default() -> Self {
+        Self {
+            color: [1.0; 3],
+            intensity: 1.0,
+            radius: 5.0,
+        }
+    }
+}
+
+/// The light every [`Sprite`] gets before any [`Light2d`]: dark for a
+/// night scene that only lights reveal. Without one, sprites keep their full
+/// color and lights brighten them. The first one in entity order is used.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ambient2d {
+    /// Linear RGB multiplied with each sprite.
+    pub color: [f32; 3],
+}
+
+impl Default for Ambient2d {
+    fn default() -> Self {
+        Self { color: [0.2; 3] }
+    }
+}
+
 /// Plays frames of a sprite sheet on the [`Sprite`] of the same object by
 /// writing its `region`. The sheet is a grid of `columns` x `rows` equal
 /// frames numbered row by row from the top left; the animation shows
