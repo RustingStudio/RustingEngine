@@ -4576,7 +4576,17 @@ Depends on: Milestones 3, 4, and 21.
   discard fails it (difference 255), and so does skipping the back to
   front sort of blended instances (difference 65). Full check: workspace
   lib 964 passed, gpu-tests run 1121 passed.
-- [ ] Directional shadow depth.
+- [x] Directional shadow depth.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::directional_shadow_depth_matches_its_golden_image`
+  looks straight down at a floor under a leaning sun with shadows on: a
+  cube resting on it, a ball floating 1 m up and an upright post, so each
+  shadow must start at its caster's base or sit detached by its height;
+  compared with `src/rendering/golden/directional_shadow_depth.png`
+  (tolerance 8). Sampling the shadow map from ten times the normal offset
+  fails it (difference 90), and so does comparing against depth 0.02
+  nearer the light (difference 90). Full check: workspace lib 964
+  passed, gpu-tests run 1122 passed.
 - [ ] PBR reference spheres.
 - [ ] Tone mapping.
 - [ ] Editor compositing.

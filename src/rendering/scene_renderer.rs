@@ -19215,6 +19215,123 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn directional_shadow_depth_matches_its_golden_image() {
+        use crate::assets::{procedural_primitive_mesh, PrimitiveShape};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Looking straight down at a floor under a leaning sun: a cube
+        // resting on it, a ball floating 1 m up and an upright post. Each
+        // shadow lands as far from its caster as the caster is high, so
+        // wrong shadow depth (bias, cascade fit, light space) moves, cuts or
+        // detaches the shadows.
+        let mut scene = SlabScene::with_extent(
+            &[(
+                0.0,
+                MaterialAsset {
+                    base_color: [0.6, 0.6, 0.6, 1.0],
+                    ..MaterialAsset::default()
+                },
+            )],
+            [128, 128],
+        );
+        if let Some(camera) = &mut scene.render_world.active_camera {
+            camera.projection = Projection::Orthographic {
+                vertical_size: 4.0,
+                near: 0.1,
+                far: 100.0,
+            };
+        }
+        scene.render_world.renderables[0].receive_shadows = true;
+        scene.render_world.renderables[0].transform.matrix =
+            Matrix4::new_nonuniform_scaling(&Vector3::new(6.0, 6.0, 0.1))
+                .into();
+        scene.render_world.ambient_light = Some(crate::runtime::AmbientLight {
+            color: [1.0; 3],
+            intensity: 0.3,
+        });
+        let upright = nalgebra::Rotation3::from_axis_angle(
+            &Vector3::x_axis(),
+            std::f32::consts::FRAC_PI_2,
+        )
+        .to_homogeneous();
+        let casters = [
+            (
+                PrimitiveShape::Cube,
+                Matrix4::new_translation(&Vector3::new(0.9, 0.9, 0.35))
+                    * Matrix4::new_scaling(0.6),
+            ),
+            (
+                PrimitiveShape::Sphere,
+                Matrix4::new_translation(&Vector3::new(-0.6, 1.2, 1.0))
+                    * Matrix4::new_scaling(0.6),
+            ),
+            (
+                PrimitiveShape::Cylinder,
+                Matrix4::new_translation(&Vector3::new(0.6, -0.6, 0.55))
+                    * upright
+                    * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                        0.2, 1.0, 0.2,
+                    )),
+            ),
+        ];
+        let material = scene.assets.materials.insert(MaterialAsset::default());
+        for (index, (shape, matrix)) in casters.into_iter().enumerate() {
+            let mesh =
+                scene.assets.meshes.insert(procedural_primitive_mesh(shape));
+            scene.render_world.renderables.push(
+                crate::runtime::ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(
+                        index as u32 + 2,
+                    )
+                    .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: matrix.into(),
+                    },
+                    mesh,
+                    material,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                    bounds: None,
+                },
+            );
+        }
+        let direction = Vector3::new(-0.7, -0.5, -1.0).normalize();
+        scene.render_world.directional_lights.push(
+            crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &direction,
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: crate::runtime::DirectionalLight::LUX_PER_UNIT,
+                    shadows: true,
+                },
+            },
+        );
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        assert_golden(&scene, "directional_shadow_depth", 8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn a_screen_material_shows_what_its_camera_sees() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
