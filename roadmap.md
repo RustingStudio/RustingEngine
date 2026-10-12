@@ -4560,7 +4560,17 @@ Depends on: Milestones 3, 4, and 21.
   vertex. Full check: workspace lib 965 passed, gpu-tests run 1126
   passed.
 - [ ] GPU-owned objects are culled from the current GPU transform without full-state CPU readback.
-- [ ] Objects outside the camera stop producing render work but continue physics simulation.
+- [x] Objects outside the camera stop producing render work but continue physics simulation.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::culled_cpu_bodies_keep_simulating` drops a CPU
+  rigid body through a real `App` from 6 m above a ±1 m view; every frame
+  that extracts it off view, the CPU frustum path culls it (one culled
+  instance, nothing drawn) while its height keeps falling, and once it
+  reaches the view center it is drawn after more than 30 culled frames.
+  GPU-owned bodies: `culled_gpu_bodies_keep_simulating` checks zero
+  indirect instances and a GPU rule event every tick. Disabling the CPU
+  frustum test fails the new test. Full check: workspace lib 965
+  passed, gpu-tests run 1127 passed.
 - [ ] `CullingMode::Auto` skips culling overhead below its tested scene-size threshold.
 - [ ] Capability fallback behavior on the low-end baseline.
 

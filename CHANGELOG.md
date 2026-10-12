@@ -13,6 +13,7 @@
 - Tests: golden-image tests of the Linear, Reinhard and ACES tone mappers
 - Tests: every culling mode and path draws the same image as no culling
 - Tests: automatic culling bounds contain every vertex of the primitives and imported sample meshes
+- Tests: a culled CPU rigid body keeps falling off view and is drawn once it enters the view
 
 ## [2.4.1] - 2026-10-10
 

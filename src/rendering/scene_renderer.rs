@@ -18026,6 +18026,75 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn culled_cpu_bodies_keep_simulating() {
+        use crate::runtime::{
+            Collider, MeshRenderer, PhysicsBody, RenderExtractPlugin, RigidBody,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // A CPU rigid body drops from far above the ±1 view. Culling skips
+        // its draw while it is off view, physics keeps moving it, and it is
+        // drawn once it falls into the view.
+        let mut app = crate::App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let server = AssetServer::default();
+        let renderer = MeshRenderer {
+            mesh: server.fallback_mesh,
+            material: server.fallback_material,
+            cast_shadows: false,
+            receive_shadows: false,
+        };
+        app.insert_resource(server);
+        let body = app.spawn((
+            crate::Transform {
+                position: [0.0, 6.0, 0.0],
+                scale: [0.5; 3],
+                ..crate::Transform::default()
+            },
+            renderer,
+            Collider::default(),
+            PhysicsBody::default(),
+            RigidBody::default(),
+        ));
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let mut height = 6.0;
+        let mut culled_frames = 0;
+        for _ in 0..120 {
+            app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                .unwrap();
+            let y =
+                app.world().get::<crate::Transform>(body).unwrap().position[1];
+            assert!(y <= height, "the body only falls");
+            height = y;
+            scene.render_world.renderables =
+                app.world().resource::<RenderWorld>().renderables.clone();
+            scene.render_world.renderables_revision += 1;
+            let lit =
+                render_pixel(&mut scene, [16, 16]).iter().any(|&c| c > 40);
+            let culled = scene.renderer.last_frame_culled();
+            assert_eq!(scene.renderer.last_culling_path(), CullingPath::Cpu);
+            if y > 1.5 {
+                // Off view: no draw, nothing in the frame.
+                assert_eq!(culled, Some(1), "y {y}: culled");
+                assert!(!lit);
+                culled_frames += 1;
+            } else if y.abs() < 0.2 {
+                assert_eq!(culled, Some(0), "y {y}: drawn in view");
+                assert!(lit, "y {y}: the body covers the view center");
+                assert!(culled_frames > 30, "{culled_frames} culled frames");
+                return;
+            }
+        }
+        panic!("the body never reached the view center: y {height}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn gpu_bodies_are_not_culled_by_their_stale_cpu_transform() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
