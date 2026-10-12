@@ -35,4 +35,19 @@ fn main() {
             score.error
         );
     }
+    for (scene, size, steps) in [
+        (SuiteScene::StackingStability, 20, 600),
+        (SuiteScene::JointChain, 20, 600),
+        (SuiteScene::CcdBullets, 400, 60),
+    ] {
+        let score = scene.run_2d(size, steps).expect("scene has a 2D form");
+        println!(
+            "{:<20} size {:>4}  step {:>9.3?}  {} {:.4}",
+            format!("{} 2d", scene.name()),
+            size,
+            score.mean_step,
+            scene.error_unit(),
+            score.error
+        );
+    }
 }

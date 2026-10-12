@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 use bevy_ecs::entity::Entity;
 
 use super::{
-    Cloth, ClothSettings, ClothVolume, Collider, ColliderShape, Debris, Fluid,
-    FluidSettings, Fracture, Joint, JointKind, MeshRenderer, Name, PhysicsBody,
-    Ragdoll, RagdollBone, RagdollState, RigidBody, RigidBodyKind, SoftBody,
-    SoftBodySettings, SoftBodyVolume, Vehicle,
+    AxisLock, Cloth, ClothSettings, ClothVolume, Collider, ColliderShape,
+    Debris, Fluid, FluidSettings, Fracture, Joint, JointKind, MeshRenderer,
+    Name, PhysicsBody, Polygon2d, Ragdoll, RagdollBone, RagdollState,
+    RigidBody, RigidBodyKind, SoftBody, SoftBodySettings, SoftBodyVolume,
+    Vehicle,
 };
 use crate::{App, Transform};
 
@@ -666,6 +667,168 @@ impl SuiteScene {
             error,
         }
     }
+
+    /// The scenes [`Self::run_2d`] has a 2D form of.
+    pub const ALL_2D: [Self; 3] =
+        [Self::StackingStability, Self::JointChain, Self::CcdBullets];
+
+    /// Runs the 2D mirror of this scene, or `None` for a scene not in
+    /// [`Self::ALL_2D`]. Bodies are `Polygon` outlines (circles for the
+    /// bullets) kept in the XY plane by `AxisLock::PLANE_XY`, on a `Chain`
+    /// floor or wall; the error means the same as in 3D. A body that leaves
+    /// its plane makes the error infinite.
+    #[must_use]
+    pub fn run_2d(self, size: usize, steps: u32) -> Option<SuiteScore> {
+        let mut app = App::new();
+        let mut elapsed = Duration::ZERO;
+        let mut bodies = Vec::new();
+        let error = match self {
+            Self::StackingStability => {
+                chain(&mut app, [[-5.0, 0.0], [5.0, 0.0]]);
+                let boxes: Vec<_> = (0..size)
+                    .map(|level| {
+                        let start = [0.0, 0.5 + level as f32, 0.0];
+                        (body_2d(&mut app, start, 0.5, 0.5), start)
+                    })
+                    .collect();
+                bodies.extend(boxes.iter().map(|&(entity, _)| entity));
+                run_steps(&mut app, steps, &mut elapsed);
+                boxes
+                    .iter()
+                    .map(|&(entity, start)| {
+                        distance(position(&app, entity), start)
+                    })
+                    .fold(0.0, f32::max)
+            }
+            Self::JointChain => {
+                const HALF: f32 = 0.25;
+                let mut links: Vec<(Entity, Option<Entity>)> = Vec::new();
+                for index in 0..size {
+                    let x = HALF * (2 * index + 1) as f32;
+                    let link = body_2d(&mut app, [x, 10.0, 0.0], HALF, 0.05);
+                    let previous = links.last().map(|&(link, _)| link);
+                    // A ball socket on a plane-locked body is a 2D pin.
+                    let joint = Joint::new(
+                        JointKind::BallSocket,
+                        previous.unwrap_or(Entity::PLACEHOLDER),
+                        [-HALF, 0.0, 0.0],
+                        if previous.is_some() {
+                            [HALF, 0.0, 0.0]
+                        } else {
+                            [0.0, 10.0, 0.0]
+                        },
+                    );
+                    app.world_mut().entity_mut(link).insert(joint);
+                    links.push((link, previous));
+                }
+                bodies.extend(links.iter().map(|&(link, _)| link));
+                let mut widest = 0.0_f32;
+                for _ in 0..steps {
+                    run_steps(&mut app, 1, &mut elapsed);
+                    for &(link, previous) in &links {
+                        let anchor = point(&app, link, [-HALF, 0.0, 0.0]);
+                        let target = previous.map_or([0.0, 10.0, 0.0], |p| {
+                            point(&app, p, [HALF, 0.0, 0.0])
+                        });
+                        widest = widest.max(distance(anchor, target));
+                    }
+                }
+                widest
+            }
+            Self::CcdBullets => {
+                // A vertical wall at x 0, shot from x 5 at 300 m/s. Each
+                // bullet has its own lane up the wall, as each has its own
+                // spot on the 3D wall.
+                let top = 1.0 + 0.15 * size as f32;
+                chain(&mut app, [[0.0, 0.0], [0.0, top]]);
+                let bullets: Vec<_> = (0..size)
+                    .map(|index| {
+                        let y = 0.5 + 0.15 * index as f32;
+                        let bullet = body(
+                            &mut app,
+                            [5.0, y, 0.0],
+                            ColliderShape::Sphere { radius: 0.05 },
+                            RigidBodyKind::Dynamic,
+                        );
+                        let world = app.world_mut();
+                        world.entity_mut(bullet).insert(AxisLock::PLANE_XY);
+                        world
+                            .get_mut::<RigidBody>(bullet)
+                            .unwrap()
+                            .linear_velocity = [-300.0, 0.0, 0.0];
+                        bullet
+                    })
+                    .collect();
+                bodies.extend(&bullets);
+                run_steps(&mut app, steps, &mut elapsed);
+                let through = bullets
+                    .iter()
+                    .filter(|&&bullet| position(&app, bullet)[0] < -0.05)
+                    .count();
+                through as f32 / size.max(1) as f32
+            }
+            _ => return None,
+        };
+        let in_plane = bodies.iter().all(|&entity| {
+            let transform = app.world().get::<Transform>(entity).unwrap();
+            let [x, y, _] = transform.rotation;
+            transform.position[2] == 0.0 && x == 0.0 && y == 0.0
+        });
+        Some(SuiteScore {
+            scene: self,
+            size,
+            steps,
+            mean_step: elapsed / steps.max(1),
+            error: if in_plane { error } else { f32::INFINITY },
+        })
+    }
+}
+
+fn run_steps(app: &mut App, steps: u32, elapsed: &mut Duration) {
+    for _ in 0..steps {
+        let start = Instant::now();
+        app.update(Duration::from_secs_f64(DT)).unwrap();
+        *elapsed += start.elapsed();
+    }
+}
+
+/// A dynamic `half_x` by `half_y` polygon box locked to the XY plane.
+fn body_2d(
+    app: &mut App,
+    position: [f32; 3],
+    half_x: f32,
+    half_y: f32,
+) -> Entity {
+    let entity = body(
+        app,
+        position,
+        ColliderShape::Polygon,
+        RigidBodyKind::Dynamic,
+    );
+    app.world_mut().entity_mut(entity).insert((
+        Polygon2d {
+            points: vec![
+                [-half_x, -half_y],
+                [half_x, -half_y],
+                [half_x, half_y],
+                [-half_x, half_y],
+            ],
+            ..Polygon2d::default()
+        },
+        AxisLock::PLANE_XY,
+    ));
+    entity
+}
+
+/// A fixed open `Chain` segment.
+fn chain(app: &mut App, points: [[f32; 2]; 2]) {
+    let entity =
+        body(app, [0.0; 3], ColliderShape::Chain, RigidBodyKind::Fixed);
+    app.world_mut().entity_mut(entity).insert(Polygon2d {
+        points: points.to_vec(),
+        closed: false,
+        ..Polygon2d::default()
+    });
 }
 
 fn body(
@@ -839,5 +1002,18 @@ mod tests {
                 scene.name()
             );
         }
+    }
+
+    #[test]
+    fn the_2d_scenes_stay_in_their_plane_and_within_the_3d_bounds() {
+        let stack = SuiteScene::StackingStability.run_2d(10, 300).unwrap();
+        assert!(stack.error < 0.05, "{stack:?}");
+        let chain = SuiteScene::JointChain.run_2d(20, 300).unwrap();
+        assert!(chain.error < 0.5, "{chain:?}");
+        let bullets = SuiteScene::CcdBullets.run_2d(25, 30).unwrap();
+        assert_eq!(bullets.error, 0.0, "{bullets:?}");
+        assert!(SuiteScene::ClothHang.run_2d(4, 10).is_none());
+        let again = SuiteScene::StackingStability.run_2d(10, 300).unwrap();
+        assert_eq!(stack.error.to_bits(), again.error.to_bits());
     }
 }
