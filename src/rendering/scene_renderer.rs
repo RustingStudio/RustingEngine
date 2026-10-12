@@ -18877,6 +18877,200 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gltf")]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn gltf_texture_channels_and_color_spaces_match_their_golden_image() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Six quads from one glTF file, one texture slot each: base color
+        // and emissive are sRGB, metallic-roughness (G and B), occlusion
+        // (R) and normal maps are linear. Every image carries a ramp in the
+        // channel the slot reads and junk in the ones it must ignore, so
+        // a wrong color space or channel changes the image.
+        let folder = std::env::temp_dir()
+            .join(format!("rusting-gltf-golden-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let save = |name: &str, texel: &dyn Fn(u32, u32) -> [u8; 4]| {
+            image::RgbaImage::from_fn(8, 8, |x, y| image::Rgba(texel(x, y)))
+                .save(folder.join(name))
+                .unwrap();
+        };
+        let ramp = |x: u32| (x * 255 / 7) as u8;
+        // Grey, red, green and blue ramps, two rows each.
+        save("color.png", &|x, y| {
+            let value = ramp(x);
+            match y / 2 {
+                0 => [value, value, value, 255],
+                1 => [value, 0, 0, 255],
+                2 => [0, value, 0, 255],
+                _ => [0, 0, value, 255],
+            }
+        });
+        // Roughness across, metallic down; red is unused.
+        save("metal_rough.png", &|x, y| [255, ramp(x), ramp(y), 255]);
+        // Occlusion across in red; green and blue are unused.
+        save("occlusion.png", &|x, _| [ramp(x), 0, 255, 255]);
+        // Normals leaning left and right in alternate columns.
+        save("normal.png", &|x, _| {
+            if x % 2 == 0 {
+                [38, 128, 218, 255]
+            } else {
+                [218, 128, 218, 255]
+            }
+        });
+        let floats: Vec<u8> = [
+            // Positions of a quad facing +Z.
+            -0.8f32, -0.8, 0.0, 0.8, -0.8, 0.0, 0.8, 0.8, 0.0, -0.8, 0.8, 0.0,
+            // Normals.
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+            // Texture coordinates, rows running down.
+            0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0,
+        ]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .chain([0u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()))
+        .collect();
+        std::fs::write(folder.join("quad.bin"), &floats).unwrap();
+        let primitive = |material: usize| {
+            format!(
+                r#"{{"attributes": {{"POSITION": 0, "NORMAL": 1,
+                    "TEXCOORD_0": 2}}, "indices": 3, "material": {material}}}"#
+            )
+        };
+        let path = folder.join("channels.gltf");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+              "asset": {{"version": "2.0"}},
+              "buffers": [{{"uri": "quad.bin", "byteLength": 140}}],
+              "bufferViews": [
+                {{"buffer": 0, "byteOffset": 0, "byteLength": 48}},
+                {{"buffer": 0, "byteOffset": 48, "byteLength": 48}},
+                {{"buffer": 0, "byteOffset": 96, "byteLength": 32}},
+                {{"buffer": 0, "byteOffset": 128, "byteLength": 12}}],
+              "accessors": [
+                {{"bufferView": 0, "componentType": 5126, "count": 4,
+                  "type": "VEC3", "min": [-0.8, -0.8, 0], "max": [0.8, 0.8, 0]}},
+                {{"bufferView": 1, "componentType": 5126, "count": 4,
+                  "type": "VEC3"}},
+                {{"bufferView": 2, "componentType": 5126, "count": 4,
+                  "type": "VEC2"}},
+                {{"bufferView": 3, "componentType": 5123, "count": 6,
+                  "type": "SCALAR"}}],
+              "images": [{{"uri": "color.png"}}, {{"uri": "metal_rough.png"}},
+                {{"uri": "occlusion.png"}}, {{"uri": "normal.png"}}],
+              "samplers": [{{"magFilter": 9728, "minFilter": 9728,
+                "wrapS": 33071, "wrapT": 33071}}],
+              "textures": [{{"source": 0, "sampler": 0}},
+                {{"source": 1, "sampler": 0}}, {{"source": 2, "sampler": 0}},
+                {{"source": 3, "sampler": 0}}],
+              "materials": [
+                {{"pbrMetallicRoughness": {{"baseColorTexture": {{"index": 0}},
+                  "metallicFactor": 0, "roughnessFactor": 1}}}},
+                {{"pbrMetallicRoughness": {{"baseColorFactor": [0, 0, 0, 1],
+                  "metallicFactor": 0, "roughnessFactor": 1}},
+                  "emissiveTexture": {{"index": 0}},
+                  "emissiveFactor": [1, 1, 1]}},
+                {{"pbrMetallicRoughness": {{
+                  "baseColorFactor": [0.8, 0.8, 0.8, 1],
+                  "metallicRoughnessTexture": {{"index": 1}}}}}},
+                {{"pbrMetallicRoughness": {{"metallicFactor": 0,
+                  "roughnessFactor": 1,
+                  "baseColorFactor": [0.4, 0.4, 0.4, 1]}},
+                  "occlusionTexture": {{"index": 2}}}},
+                {{"pbrMetallicRoughness": {{"metallicFactor": 0,
+                  "roughnessFactor": 0.4}},
+                  "normalTexture": {{"index": 3}}}},
+                {{"pbrMetallicRoughness": {{"baseColorTexture": {{"index": 0}},
+                  "baseColorFactor": [1, 0.5, 0.25, 1],
+                  "metallicFactor": 0, "roughnessFactor": 1}}}}],
+              "meshes": [{{"primitives": [{}, {}, {}, {}, {}, {}]}}]
+            }}"#,
+                primitive(0),
+                primitive(1),
+                primitive(2),
+                primitive(3),
+                primitive(4),
+                primitive(5),
+            ),
+        )
+        .unwrap();
+        let mut scene = SlabScene::with_extent(&[], [144, 96]);
+        if let Some(camera) = &mut scene.render_world.active_camera {
+            camera.projection = Projection::Orthographic {
+                vertical_size: 4.0,
+                near: 0.1,
+                far: 100.0,
+            };
+        }
+        scene.render_world.ambient_light = Some(crate::runtime::AmbientLight {
+            color: [1.0; 3],
+            intensity: 0.6,
+        });
+        let direction = Vector3::new(0.5, -0.4, -1.0).normalize();
+        scene.render_world.directional_lights.push(
+            crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &direction,
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: 0.8
+                        * crate::runtime::DirectionalLight::LUX_PER_UNIT,
+                    shadows: false,
+                },
+            },
+        );
+        let imported = scene.assets.import_gltf(&path).unwrap();
+        assert_eq!(imported.len(), 6);
+        for (index, primitive) in imported.iter().enumerate() {
+            let center = Vector3::new(
+                (index % 3) as f32 * 2.0 - 2.0,
+                1.0 - (index / 3) as f32 * 2.0,
+                0.0,
+            );
+            scene.render_world.renderables.push(
+                crate::runtime::ExtractedRenderable {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(
+                        index as u32 + 1,
+                    )
+                    .unwrap(),
+                    transform: crate::runtime::GlobalTransform {
+                        matrix: Matrix4::new_translation(&center).into(),
+                    },
+                    mesh: primitive.mesh,
+                    material: primitive.material,
+                    cast_shadows: false,
+                    receive_shadows: false,
+                    bounds: None,
+                },
+            );
+        }
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        assert_golden(&scene, "gltf_texture_channels", 8);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     #[cfg_attr(
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"

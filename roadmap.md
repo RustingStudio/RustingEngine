@@ -4553,7 +4553,18 @@ Depends on: Milestones 3, 4, and 21.
   `RUSTING_UPDATE_GOLDEN=1` rewrites it). Mirroring the cube's normal x
   fails it (difference 162). Full check: workspace lib 964 passed,
   gpu-tests run 1119 passed.
-- [ ] glTF texture channels and color spaces.
+- [x] glTF texture channels and color spaces.
+  Evidence (2026-10-12, lane render): GPU test
+  `scene_renderer::tests::gltf_texture_channels_and_color_spaces_match_their_golden_image`
+  writes a glTF with six quads, one texture slot each (sRGB base color and
+  emissive, linear metallic-roughness in G and B, occlusion in R, normal
+  map, base color times a factor), each image carrying a ramp in the
+  channel its slot reads and junk in the others, imports it with
+  `import_gltf`, renders it lit and compares with
+  `src/rendering/golden/gltf_texture_channels.png` (tolerance 8).
+  Importing base color as linear fails it (difference 72), and so does
+  reading occlusion from G (difference 50). Full check: workspace lib
+  964 passed, gpu-tests run 1120 passed.
 - [ ] Alpha mask and blend modes.
 - [ ] Directional shadow depth.
 - [ ] PBR reference spheres.
