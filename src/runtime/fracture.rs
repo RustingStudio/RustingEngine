@@ -41,11 +41,12 @@ use bevy_ecs::prelude::{Component, Has, Resource, World};
 use nalgebra::Vector3;
 
 use super::cpu_physics::next_spawn_order;
+use super::hierarchy;
 use crate::assets::{AssetServer, MeshAsset, MeshVertex};
 use crate::runtime::{
-    sim_math, Collider, ColliderShape, CollisionLayers, EventQueue, FrameTime,
-    MeshRenderer, Name, PhysicsBody, PhysicsWorld, RandomSeed, RigidBody,
-    RigidBodyKind, SceneId, Sleeping, SpawnOrder,
+    sim_math, Children, Collider, ColliderShape, CollisionLayers, Decal,
+    EventQueue, FrameTime, MeshRenderer, Name, PhysicsBody, PhysicsWorld,
+    RandomSeed, RigidBody, RigidBodyKind, SceneId, Sleeping, SpawnOrder,
 };
 use crate::Transform;
 
@@ -344,6 +345,14 @@ fn shatter(
         }
     }
     let name = world.get::<Name>(entity).map(|name| name.0.clone());
+    let decals: Vec<Entity> = world
+        .get::<Children>(entity)
+        .map(|children| children.0.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|child| world.get::<Decal>(*child).is_some())
+        .collect();
+    let centers: Vec<V> = pieces.iter().map(|(_, center, _)| *center).collect();
     world.despawn(entity);
     let mut group = None;
     let mut spawned = Vec::with_capacity(pieces.len());
@@ -391,6 +400,32 @@ fn shatter(
             piece.insert(layers);
         }
         spawned.push(piece.id());
+    }
+    // Pieces keep the object's rotation and scale, so a decal keeps its
+    // place by moving its local position by the piece's center.
+    // ponytail: the nearest piece center, not the piece under the decal;
+    // pick by projected area if decals land on the wrong piece.
+    for decal in decals {
+        let keep = world
+            .get::<Decal>(decal)
+            .is_some_and(|d| d.survive_fracture);
+        let local = world.get::<Transform>(decal).copied();
+        let (true, Some(local)) = (keep, local) else {
+            world.despawn(decal);
+            continue;
+        };
+        let at = V::from(local.position);
+        let Some((k, center)) = centers.iter().enumerate().min_by(|a, b| {
+            (a.1 - at)
+                .norm_squared()
+                .total_cmp(&(b.1 - at).norm_squared())
+        }) else {
+            continue;
+        };
+        if hierarchy::set_parent(world, decal, spawned[k]).is_ok() {
+            world.get_mut::<Transform>(decal).unwrap().position =
+                (at - center).into();
+        }
     }
     if let Some(mut events) = world.get_resource_mut::<EventQueue<Fractured>>()
     {
@@ -1062,6 +1097,73 @@ mod tests {
         world.query::<&Debris>().iter(world).count()
     }
 
+    #[test]
+    fn decals_move_onto_the_nearest_piece_or_leave_with_the_object() {
+        use crate::runtime::{Decal, Parent, RenderExtractPlugin, RenderWorld};
+        use bevy_ecs::query::With;
+        let mut app = ground();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let hard = add_crate(&mut app, 2.0, 3.0, Fracture::default());
+        // A crack on the crate's +X face, and a label that belongs to the
+        // whole crate.
+        let crack =
+            app.spawn((Transform::new([0.5, 0.2, 0.1]), Decal::default()));
+        let label = app.spawn((
+            Transform::new([0.0, 0.0, 0.5]),
+            Decal {
+                survive_fracture: false,
+                ..Decal::default()
+            },
+        ));
+        app.set_parent(crack, hard).unwrap();
+        app.set_parent(label, hard).unwrap();
+        app.update(std::time::Duration::ZERO).unwrap();
+        let world_position = |app: &crate::runtime::App, entity| {
+            let matrix = nalgebra::Matrix4::from(
+                app.world()
+                    .get::<crate::runtime::GlobalTransform>(entity)
+                    .unwrap()
+                    .matrix,
+            );
+            V::new(matrix[(0, 3)], matrix[(1, 3)], matrix[(2, 3)])
+        };
+        let mut before = V::zeros();
+        for _ in 0..60 {
+            if app.world().get_entity(hard).is_err() {
+                break;
+            }
+            before = world_position(&app, crack);
+            run(&mut app, 1);
+        }
+        let world = app.world_mut();
+        let pieces: Vec<Entity> = world
+            .query_filtered::<Entity, With<Debris>>()
+            .iter(world)
+            .collect();
+        assert_eq!(pieces.len(), 6, "the crate breaks");
+        let world = app.world();
+        assert!(world.get_entity(label).is_err(), "the label goes");
+        let piece = world.get::<Parent>(crack).unwrap().0;
+        assert!(pieces.contains(&piece));
+        let after = world_position(&app, crack);
+        // Where it was a tick ago, give or take the fall.
+        assert!((after - before).norm() < 0.2, "{before} to {after}");
+        let distance = |entity| {
+            (V::from(world.get::<Transform>(entity).unwrap().position) - after)
+                .norm()
+        };
+        let nearest = distance(piece);
+        assert!(pieces.iter().all(|&other| distance(other) >= nearest));
+        let decals = &world.resource::<RenderWorld>().decals;
+        assert_eq!(decals.len(), 1);
+        assert!(decals[0].1.survive_fracture);
+        // It rides the piece as the debris tumbles.
+        run(&mut app, 30);
+        let world = app.world();
+        let piece_at = V::from(world.get::<Transform>(piece).unwrap().position);
+        let moved = (piece_at - world_position(&app, crack)).norm();
+        assert!((moved - nearest).abs() < 1e-4, "{nearest} then {moved}");
+    }
     #[test]
     fn a_break_sends_one_fractured_event_and_a_soft_landing_none() {
         let mut app = ground();

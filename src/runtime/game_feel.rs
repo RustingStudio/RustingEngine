@@ -1874,6 +1874,10 @@ pub struct Decal {
     /// Roughness painted with the image, by its coverage: low for a wet
     /// stain or a puddle. `None` keeps the surface's.
     pub roughness: Option<f32>,
+    /// When its parent object breaks ([`super::Fracture`]): true moves the
+    /// decal onto the piece nearest it, so it stays on that piece's surface;
+    /// false removes it with the object.
+    pub survive_fracture: bool,
     /// The loaded `texture`, set by the engine.
     #[serde(skip)]
     pub handle: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
@@ -1886,6 +1890,7 @@ impl Default for Decal {
             color: [1.0; 4],
             extents: [0.5, 0.5, 0.25],
             roughness: None,
+            survive_fracture: true,
             handle: None,
         }
     }

@@ -2932,8 +2932,8 @@ Depends on: Milestones 3 and 4.
   (lib 1018) pass.
   Not done: fracture events (the engine has no fracture yet); GPU emitters
   spawn impact particles at the emitter, not the contact point.
-- [ ] Decals, including decals that survive or are invalidated by fracture.
-  Partial (lane/render): `rusting.decal` projects an image (or plain color)
+- [x] Decals, including decals that survive or are invalidated by fracture.
+  Evidence (lane/render): `rusting.decal` projects an image (or plain color)
   along its object's -Z into a box of half size `extents`, painting base
   color on surfaces facing the projection; up to 16 decals and 4 distinct
   images per frame (set 2 binding 9), later ones over earlier.
@@ -2951,8 +2951,21 @@ Depends on: Milestones 3 and 4.
   decal, 118 under a roughness 1 decal); removing the shader's roughness
   mix fails it (wet 118). Full check: workspace lib 891 passed, gpu-tests
   run 1034 passed.
-  Not done: fracture survival or invalidation (the engine has no fracture
-  yet), decal normals, decals on skinned or moving objects following them.
+  Fracture (2026-10-12): a decal that is a child of a `rusting.fracture`
+  object moves onto the piece whose center is nearest it when the object
+  breaks, keeping its world place (pieces keep the object's rotation and
+  scale, so its local position shifts by that center), and rides the piece
+  from then on; `survive_fracture: false` removes it with the object.
+  Evidence: unit test
+  `fracture::tests::decals_move_onto_the_nearest_piece_or_leave_with_the_object`
+  (a 3 m crate drop: the crack's parent is a debris piece, it moves under
+  0.2 m across the break tick, no piece is nearer than its own, it is the
+  one extracted decal, and its distance to the piece is unchanged after 30
+  tumbling ticks; the label is despawned). Mutations (no reparent, no
+  center shift, farthest piece, keep the label, drop the crack) each fail
+  it. Full check: workspace lib 966 passed, gpu-tests run 1128 passed.
+  Not done: decal normals, decals on skinned meshes following their bones,
+  non-decal children of a broken object (they keep a missing parent).
 - [x] Instanced multi-mesh rendering and foliage scattering with wind driven by physics force fields.
   Evidence: `rusting.foliage` (`Foliage`) on an object with a mesh_renderer
   draws `count` copies of its mesh (at most 65536) in place of the object,

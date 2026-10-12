@@ -245,6 +245,12 @@ dark decal with roughness 0.1 is a wet stain or a puddle that catches
 highlights. Leave it `null` to keep the surface's. Decals do not change
 normals.
 
+Make a decal a child of the object it marks, so it moves with it. When that
+object breaks (`rusting.fracture`), the decal moves onto the piece nearest
+it and stays on that piece's surface. Set `survive_fracture` to false for a
+mark that belongs to the whole object, such as a label, and it is removed
+with the object.
+
 ## Mesh kit
 
 Built-in primitives (`{"BuiltinPrimitive": "<name>"}`): `Cube`, `Sphere`,

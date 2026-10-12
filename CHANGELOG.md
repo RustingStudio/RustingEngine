@@ -14,6 +14,7 @@
 - Tests: every culling mode and path draws the same image as no culling
 - Tests: automatic culling bounds contain every vertex of the primitives and imported sample meshes
 - Tests: a culled CPU rigid body keeps falling off view and is drawn once it enters the view
+- Decals: `survive_fracture` moves a decal onto the nearest debris piece when its parent breaks, or removes it with the object
 
 ## [2.4.1] - 2026-10-10
 
