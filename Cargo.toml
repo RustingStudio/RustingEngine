@@ -1,6 +1,6 @@
 [package]
 name = "rusting_engine"
-version = "2.5.0"
+version = "2.5.5"
 authors = ["Vasyl Trefilov <drenfor228@gmail.com>"]
 edition = "2021"
 description = "Vulkan 3D game engine with GPU-accelerated physics for massive physics-heavy scenes"
