@@ -1242,7 +1242,7 @@ crate::reflect! {
             doc: "splat[row][column]: weight of each layer at that height sample; missing samples use height bands",
         },
         tiling: f32 { unit: "m", min: 0.001, doc: "distance the layer textures span before they repeat" },
-        chunk_cells: u32 { unit: "cells", min: 1.0, doc: "height cells along each side of a chunk" },
+        chunk_cells: u32 { unit: "cells", min: 0.0, doc: "height cells along each side of a chunk; 0 picks it from the heightfield size (at most about 150 chunks)" },
         lod_distance: f32 {
             unit: "m", min: 0.0,
             doc: "chunks past it draw at half detail, past twice it at quarter detail; 0 keeps full detail",
@@ -1256,6 +1256,9 @@ crate::reflect! {
         texture: PathBuf { unit: "asset path", doc: "image painted by this layer; empty paints the plain color" },
         color: [f32; 3] { unit: "linear RGB", min: 0.0, color: true, doc: "tint multiplied into the texture" },
         min_height: f32 { unit: "m", doc: "height band start used where there are no splat weights" },
+        normal: PathBuf { unit: "asset path", doc: "tangent-space normal map (OpenGL style, green up); empty keeps the ground's normal" },
+        roughness: PathBuf { unit: "asset path", doc: "roughness map, read from its red channel; empty is 0.9" },
+        tiling: f32 { unit: "m", min: 0.0, doc: "metres this layer repeats over; 0 uses the terrain's tiling" },
     }
 }
 
@@ -1767,7 +1770,10 @@ crate::reflect! {
             doc: "Light each triangle with its own face normal for a faceted, low-poly look.",
         },
         splat: bool {
-            doc: "Terrain paint: blend the base-color atlas's four quadrants by the vertex color.",
+            doc: "Terrain paint: blend the base-color array's four layers by the vertex color.",
+        },
+        splat_scale: [f32; 4] {
+            doc: "Terrain paint: repeats of each layer per unit of the mesh's texture coordinates.",
         },
         shader: String {
             doc: "Surface shader GLSL starting with `#rusting surface 1`; empty for the built-in surface.",

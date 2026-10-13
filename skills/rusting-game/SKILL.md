@@ -245,7 +245,7 @@ each one's fields, defaults and an example:
 - `rusting.light_probe_grid`: Grid of resolution light probes spread through a world-aligned box of half size extents around the object.
 - `rusting.lightmap`: On an object with a mesh_renderer: bakes the light bouncing onto it into six square faces of resolution texels wrapped around its mesh's box.
 - `rusting.foliage`: On an object with a mesh_renderer: draws count copies of its mesh in place of the object, scattered over a disc of radius metres on its local XZ plane, each turned and scaled between scale_min and scale_max at random by seed.
-- `rusting.terrain`: On an object with a rusting.heightfield: draws the heights as terrain in square chunks of chunk_cells cells.
+- `rusting.terrain`: On an object with a rusting.heightfield: draws the heights as terrain in square chunks of chunk_cells cells (0, the default, picks the size from the heightfield so the terrain makes at most about 150 chunks; each chunk is one draw per view and shadow cascade).
 - `rusting.fog`: Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre.
 - `rusting.procedural_sky`: Daylight sky computed from the sun (the shadow-casting directional light, else the first one): blue overhead, pale at the horizon, orange at sunset, dark at night, with a sun disc of sun_size degrees.
 - `rusting.fog_volume`: A box of uniform fog of half size extents around the object, turned and scaled with it: mist in a valley, smoke in a room.
@@ -506,8 +506,8 @@ say:
 <!-- pitfalls:start -->
 - Game code does not compile: Two `scene` borrows at once; A guessed method name; `f64` or tuples where the scene wants `f32` arrays; Importing from engine modules.
 - Objects do not collide, or are hit where they are not drawn: A collider with no body; A collider sized by hand that does not match the mesh; A scaled player; Hiding an object with a zero scale; A pickup or goal placed inside a wall or the floor.
-- The view or the HUD is wrong: A camera inside a wall, pillar or other solid; A full-screen egui menu hides the game; HUD text too small to read, anchored off screen, or faint on a button; More lights than the renderer uploads; A light that can never light anything.
-- Assets and scene files: An asset path in code that is not a file; A scene that names a missing asset; A misspelled scene key.
+- The view or the HUD is wrong: A camera inside a wall, pillar or other solid; A full-screen egui menu hides the game; HUD text too small to read, anchored off screen, or faint on a button; More lights than the renderer uploads; A light that can never light anything; A terrain cut into hundreds of small chunks.
+- Assets and scene files: An asset path in code that is not a file; A scene that names a missing asset; A terrain layer image relative to the project root; A misspelled scene key.
 - Runs do not repeat: Timing by frames or wall-clock time; `rand` or the system clock; Round state in Rust statics; Using objects after `restart` or `load_scene`; A score lost on `load_scene`; Gameplay reading GPU bodies.
 - Tests prove less than they seem: A scenario that passes without the feature it tests; A stale CLI or project guide; A recipe applied to a scene with no `Player`.
 <!-- pitfalls:end -->

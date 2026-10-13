@@ -2,7 +2,8 @@
 //! chunks, each with coarser LOD meshes for distant views, painted with up
 //! to four texture layers blended by splat weights.
 //!
-//! Chunk meshes, LOD groups, the layer atlas and the splat material are
+//! Chunk meshes, LOD groups, the layer texture arrays and the splat
+//! material are
 //! built into the [`AssetServer`] at extraction time and tracked by
 //! [`TerrainChunks`], which is not saved: a loaded scene rebuilds it.
 
@@ -23,10 +24,18 @@ use crate::assets::{
 pub const MAX_TERRAIN_LAYERS: usize = 4;
 /// LOD meshes per chunk: every sample, every second, every fourth.
 const TERRAIN_LOD_LEVELS: u32 = 3;
-/// Texels along each side of an atlas quadrant with no layer texture.
+/// Texels along each side of a layer array with no layer image.
 const PLAIN_TILE: u32 = 4;
-/// Largest atlas quadrant side; bigger layer textures are downsampled.
-const MAX_TILE: u32 = 512;
+/// Largest layer side; bigger layer images are downsampled.
+const MAX_TILE: u32 = 2048;
+/// Roughness of a layer without a `roughness` map.
+const PLAIN_ROUGHNESS: f32 = 0.9;
+/// Most chunks an automatic `chunk_cells` makes: each chunk is one draw
+/// per view and shadow cascade, so many small chunks make the frame
+/// CPU-bound (WILDROOT F11).
+const AUTO_MAX_CHUNKS: usize = 150;
+/// Smallest automatic chunk side, the old fixed default.
+const AUTO_MIN_CELLS: usize = 32;
 
 /// Draws the [`Heightfield`] on the same entity as terrain. Each layer
 /// paints the ground with its texture tinted by its color. Without
@@ -41,7 +50,8 @@ pub struct Terrain {
     pub splat: Vec<Vec<[f32; 4]>>,
     /// Metres the layer textures span before they repeat.
     pub tiling: f32,
-    /// Height cells along each side of a chunk.
+    /// Height cells along each side of a chunk; 0 picks it from the
+    /// heightfield size so the terrain makes at most about 150 chunks.
     pub chunk_cells: u32,
     /// Distance where a chunk switches to its half-detail mesh; the
     /// quarter-detail mesh starts at twice it. 0 keeps full detail.
@@ -55,11 +65,44 @@ impl Default for Terrain {
             layers: Vec::new(),
             splat: Vec::new(),
             tiling: 4.0,
-            chunk_cells: 32,
+            chunk_cells: 0,
             lod_distance: 50.0,
             cast_shadows: true,
         }
     }
+}
+
+impl Terrain {
+    /// Height cells along each side of a chunk: `chunk_cells`, or when it
+    /// is 0 the smallest side from 32 up that keeps the terrain at most
+    /// [`AUTO_MAX_CHUNKS`] chunks.
+    pub fn chunk_size(&self, field: &Heightfield) -> usize {
+        if self.chunk_cells > 0 {
+            return self.chunk_cells as usize;
+        }
+        let [rows, columns] = field_cells(field);
+        (AUTO_MIN_CELLS..)
+            .find(|&size| {
+                rows.div_ceil(size) * columns.div_ceil(size) <= AUTO_MAX_CHUNKS
+            })
+            .unwrap_or(AUTO_MIN_CELLS)
+    }
+
+    /// Chunks this terrain draws over `field`.
+    pub fn chunk_count(&self, field: &Heightfield) -> usize {
+        let [rows, columns] = field_cells(field);
+        let size = self.chunk_size(field);
+        rows.div_ceil(size) * columns.div_ceil(size)
+    }
+}
+
+/// Cells along each axis of `field`: one fewer than its samples.
+fn field_cells(field: &Heightfield) -> [usize; 2] {
+    let columns = field.heights.iter().map(Vec::len).max().unwrap_or(0);
+    [
+        field.heights.len().saturating_sub(1),
+        columns.saturating_sub(1),
+    ]
 }
 
 /// One [`Terrain`] paint layer.
@@ -72,6 +115,14 @@ pub struct TerrainLayer {
     pub color: [f32; 3],
     /// Height band start used when there are no splat weights.
     pub min_height: f32,
+    /// Tangent-space normal map (OpenGL style, green up); empty keeps the
+    /// ground's own normal.
+    pub normal: PathBuf,
+    /// Roughness map, read from its red channel; empty is 0.9.
+    pub roughness: PathBuf,
+    /// Metres this layer's images span before they repeat; 0 uses the
+    /// terrain's `tiling`.
+    pub tiling: f32,
 }
 
 impl Default for TerrainLayer {
@@ -80,6 +131,9 @@ impl Default for TerrainLayer {
             texture: PathBuf::new(),
             color: [1.0; 3],
             min_height: 0.0,
+            normal: PathBuf::new(),
+            roughness: PathBuf::new(),
+            tiling: 0.0,
         }
     }
 }
@@ -92,7 +146,11 @@ pub struct TerrainChunks {
     pub meshes: Vec<Handle<MeshAsset>>,
     pub groups: Vec<Handle<LodGroupAsset>>,
     pub material: Handle<MaterialAsset>,
-    pub atlas: Handle<TextureAsset>,
+    /// Base color of each layer, one array layer each.
+    pub colors: Handle<TextureAsset>,
+    /// Normal (rgb) and roughness (alpha) of each layer; `None` when no
+    /// layer has a normal or roughness map.
+    pub normals: Option<Handle<TextureAsset>>,
     pub cast_shadows: bool,
     built: Tick,
 }
@@ -166,7 +224,10 @@ fn free(chunks: &TerrainChunks, assets: &mut AssetServer) {
         }
     }
     let _ = assets.materials.remove(chunks.material);
-    let _ = assets.textures.remove(chunks.atlas);
+    let _ = assets.textures.remove(chunks.colors);
+    if let Some(normals) = chunks.normals {
+        let _ = assets.textures.remove(normals);
+    }
 }
 
 fn build(
@@ -175,13 +236,29 @@ fn build(
     assets: &mut AssetServer,
     built: Tick,
 ) -> TerrainChunks {
-    let atlas = layer_atlas(terrain, assets);
-    let atlas = assets.textures.insert(atlas);
+    let colors = layer_colors(terrain, assets);
+    let colors = assets.textures.insert(colors);
+    let normals = layer_normals(terrain, assets);
+    let normals = normals.map(|normals| assets.textures.insert(normals));
+    let tiling = terrain.tiling.max(1e-3);
+    let mut splat_scale = [1.0; MAX_TERRAIN_LAYERS];
+    for (scale, layer) in splat_scale.iter_mut().zip(&terrain.layers) {
+        if layer.tiling > 0.0 {
+            *scale = tiling / layer.tiling;
+        }
+    }
     let material = assets.materials.insert(MaterialAsset {
         name: "terrain".into(),
-        roughness: 0.9,
+        // Layer roughness lives in the normal array's alpha.
+        roughness: if normals.is_some() {
+            1.0
+        } else {
+            PLAIN_ROUGHNESS
+        },
         splat: true,
-        base_color_texture: Some(atlas),
+        splat_scale,
+        base_color_texture: Some(colors),
+        normal_texture: normals,
         ..MaterialAsset::default()
     });
     let mut meshes = Vec::new();
@@ -210,7 +287,8 @@ fn build(
         meshes,
         groups,
         material,
-        atlas,
+        colors,
+        normals,
         cast_shadows: terrain.cast_shadows,
         built,
     }
@@ -228,7 +306,7 @@ pub(super) fn chunk_meshes(
     if rows < 2 || columns < 2 {
         return Vec::new();
     }
-    let size = terrain.chunk_cells.max(1) as usize;
+    let size = terrain.chunk_size(field);
     let levels = if terrain.lod_distance > 0.0 {
         TERRAIN_LOD_LEVELS
     } else {
@@ -368,76 +446,173 @@ pub(super) fn weights(
     })
 }
 
-/// A 2x2 atlas: layer `i` fills quadrant (`i % 2`, `i / 2`) with its
-/// texture tinted by its color, or with the plain color.
-fn layer_atlas(terrain: &Terrain, assets: &mut AssetServer) -> TextureAsset {
-    let textures = terrain
-        .layers
-        .iter()
-        .take(MAX_TERRAIN_LAYERS)
-        .map(|layer| {
-            if layer.texture.as_os_str().is_empty() {
-                return None;
+/// Loads one layer image, or `None` for an empty path, a file that fails
+/// to load, or an HDR image.
+fn layer_image(
+    path: &std::path::Path,
+    assets: &mut AssetServer,
+) -> Option<TextureAsset> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let texture = match assets.textures.handle_for_path(path) {
+        Some(handle) => Ok(handle),
+        None => assets.load_texture(path).map_err(|error| error.to_string()),
+    }
+    .and_then(|handle| {
+        assets
+            .textures
+            .get(handle)
+            .ok_or_else(|| "not loaded".to_owned())
+    })
+    .and_then(|texture| match texture.color_space {
+        TextureColorSpace::Hdr => Err("HDR images cannot paint terrain".into()),
+        _ => Ok(texture.clone()),
+    });
+    texture
+        .map_err(|error| {
+            // Terrains rebuild on every edit; say it once per path.
+            static WARNED: std::sync::Mutex<Vec<std::path::PathBuf>> =
+                std::sync::Mutex::new(Vec::new());
+            let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+            if !warned.iter().any(|warned| warned == path) {
+                warned.push(path.to_path_buf());
+                eprintln!(
+                    "terrain layer `{}`: {error}; the layer paints its plain color",
+                    path.display()
+                );
             }
-            let handle = match assets.textures.handle_for_path(&layer.texture) {
-                Some(handle) => handle,
-                None => assets.load_texture(&layer.texture).ok()?,
-            };
-            assets
-                .textures
-                .get(handle)
-                .filter(|texture| texture.color_space != TextureColorSpace::Hdr)
-                .cloned()
         })
-        .collect::<Vec<_>>();
-    let tile = textures
-        .iter()
-        .flatten()
+        .ok()
+}
+
+/// Side of a layer array: the largest image's, at most [`MAX_TILE`].
+fn layer_side<'a>(images: impl Iterator<Item = &'a TextureAsset>) -> usize {
+    images
         .map(|texture| texture.size[0].max(texture.size[1]))
         .max()
         .unwrap_or(PLAIN_TILE)
-        .min(MAX_TILE) as usize;
-    let side = 2 * tile;
-    let mut rgba8 = vec![255; side * side * 4];
+        .min(MAX_TILE) as usize
+}
+
+/// Texel (`x`, `y`) of `texture` stretched to `side` x `side`; texels past
+/// a short image's data read as white.
+// ponytail: nearest resampling; a box filter if downsampled 4K layers alias.
+fn resample(
+    texture: &TextureAsset,
+    side: usize,
+    x: usize,
+    y: usize,
+) -> [u8; 4] {
+    let [w, h] = texture.size.map(|side| side.max(1) as usize);
+    let at = 4 * ((y * h / side) * w + x * w / side);
+    let mut texel = [255; 4];
+    for (out, &byte) in
+        texel.iter_mut().zip(texture.rgba8.get(at..).unwrap_or(&[]))
+    {
+        *out = byte;
+    }
+    texel
+}
+
+/// A texture array of [`MAX_TERRAIN_LAYERS`] layers of `side` x `side`,
+/// back to back; `texel(layer, x, y)` fills each texel.
+fn layer_array(
+    side: usize,
+    color_space: TextureColorSpace,
+    texel: impl Fn(usize, usize, usize) -> [u8; 4],
+) -> TextureAsset {
+    let mut rgba8 = Vec::with_capacity(MAX_TERRAIN_LAYERS * side * side * 4);
     for layer in 0..MAX_TERRAIN_LAYERS {
-        let color = terrain
-            .layers
-            .get(layer)
-            .map_or([1.0; 3], |layer| layer.color);
-        let texture = textures.get(layer).and_then(Option::as_ref);
-        let [left, top] = [(layer % 2) * tile, (layer / 2) * tile];
-        for y in 0..tile {
-            for x in 0..tile {
-                let texel = texture.map_or([255; 4], |texture| {
-                    let [w, h] = texture.size.map(|side| side.max(1) as usize);
-                    let at = 4 * ((y * h / tile) * w + x * w / tile);
-                    let mut texel = [255; 4];
-                    for (out, &byte) in texel
-                        .iter_mut()
-                        .zip(texture.rgba8.get(at..).unwrap_or(&[]))
-                    {
-                        *out = byte;
-                    }
-                    texel
-                });
-                let out = 4 * ((top + y) * side + left + x);
-                for channel in 0..3 {
-                    // The tint scales linear light, so it applies to the
-                    // decoded value, then re-encodes as sRGB.
-                    let linear = (f32::from(texel[channel]) / 255.0).powf(2.2)
-                        * color[channel].max(0.0);
-                    rgba8[out + channel] =
-                        (linear.min(1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
-                }
+        for y in 0..side {
+            for x in 0..side {
+                rgba8.extend(texel(layer, x, y));
             }
         }
     }
     TextureAsset {
         size: [side as u32; 2],
         rgba8,
-        color_space: TextureColorSpace::Srgb,
+        color_space,
         sampler: TextureSampler::default(),
     }
+}
+
+/// Base color array: each layer's image tinted by its color, or the plain
+/// color.
+fn layer_colors(terrain: &Terrain, assets: &mut AssetServer) -> TextureAsset {
+    let images = terrain
+        .layers
+        .iter()
+        .take(MAX_TERRAIN_LAYERS)
+        .map(|layer| layer_image(&layer.texture, assets))
+        .collect::<Vec<_>>();
+    let side = layer_side(images.iter().flatten());
+    layer_array(side, TextureColorSpace::Srgb, |layer, x, y| {
+        let color = terrain
+            .layers
+            .get(layer)
+            .map_or([1.0; 3], |layer| layer.color);
+        let texel = images
+            .get(layer)
+            .and_then(Option::as_ref)
+            .map_or([255; 4], |image| resample(image, side, x, y));
+        let mut out = [255; 4];
+        for channel in 0..3 {
+            // The tint scales linear light, so it applies to the decoded
+            // value, then re-encodes as sRGB.
+            let linear = (f32::from(texel[channel]) / 255.0).powf(2.2)
+                * color[channel].max(0.0);
+            out[channel] =
+                (linear.min(1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
+        }
+        out
+    })
+}
+
+/// Normal and roughness array: rgb from each layer's normal map (flat
+/// without one), alpha from its roughness map's red channel (0.9 without
+/// one). `None` when no layer has either map, so plain terrain keeps its
+/// vertex normals.
+fn layer_normals(
+    terrain: &Terrain,
+    assets: &mut AssetServer,
+) -> Option<TextureAsset> {
+    let layers =
+        &terrain.layers[..terrain.layers.len().min(MAX_TERRAIN_LAYERS)];
+    if layers.iter().all(|layer| {
+        layer.normal.as_os_str().is_empty()
+            && layer.roughness.as_os_str().is_empty()
+    }) {
+        return None;
+    }
+    let normals = layers
+        .iter()
+        .map(|layer| layer_image(&layer.normal, assets))
+        .collect::<Vec<_>>();
+    let roughness = layers
+        .iter()
+        .map(|layer| layer_image(&layer.roughness, assets))
+        .collect::<Vec<_>>();
+    let side = layer_side(normals.iter().chain(&roughness).flatten());
+    let plain = (PLAIN_ROUGHNESS * 255.0).round() as u8;
+    Some(layer_array(
+        side,
+        TextureColorSpace::Linear,
+        |layer, x, y| {
+            let [r, g, b, _] = normals
+                .get(layer)
+                .and_then(Option::as_ref)
+                .map_or([128, 128, 255, 0], |image| {
+                    resample(image, side, x, y)
+                });
+            let a = roughness
+                .get(layer)
+                .and_then(Option::as_ref)
+                .map_or(plain, |image| resample(image, side, x, y)[0]);
+            [r, g, b, a]
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -498,6 +673,24 @@ mod tests {
     }
 
     #[test]
+    fn automatic_chunk_size_keeps_large_terrains_near_150_chunks() {
+        let auto = Terrain::default();
+        // Small terrains keep the old 32-cell chunks.
+        assert_eq!(auto.chunk_size(&field(65, 129)), 32);
+        assert_eq!(auto.chunk_count(&field(65, 129)), 8);
+        // WILDROOT's 1501 x 1501 island: 12 x 12 chunks, not 24 x 24.
+        let island = field(1501, 1501);
+        assert_eq!(auto.chunk_size(&island), 125);
+        assert_eq!(auto.chunk_count(&island), 144);
+        // An explicit size still wins.
+        let small = Terrain {
+            chunk_cells: 64,
+            ..Terrain::default()
+        };
+        assert_eq!(small.chunk_count(&island), 576);
+    }
+
+    #[test]
     fn terrain_layers_blend_by_height_bands_or_splat_weights() {
         let layer = |min_height: f32| TerrainLayer {
             min_height,
@@ -518,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn terrain_atlas_survives_a_texture_shorter_than_its_size() {
+    fn terrain_layers_survive_a_texture_shorter_than_its_size() {
         let mut assets = AssetServer::default();
         assets
             .textures
@@ -539,11 +732,67 @@ mod tests {
             }],
             ..Terrain::default()
         };
-        let atlas = layer_atlas(&terrain, &mut assets);
-        assert_eq!(atlas.size, [8, 8]);
+        let colors = layer_colors(&terrain, &mut assets);
+        // Four layers of the image's full size, back to back.
+        assert_eq!(colors.size, [4, 4]);
+        assert_eq!(colors.rgba8.len(), 4 * 4 * 4 * 4);
         // The first texel exists; missing ones read as white.
-        assert_eq!(atlas.rgba8[..3], [10; 3]);
-        assert_eq!(atlas.rgba8[4..8], [255; 4]);
+        assert_eq!(colors.rgba8[..3], [10; 3]);
+        assert_eq!(colors.rgba8[4..8], [255; 4]);
+    }
+
+    #[test]
+    fn terrain_layers_carry_normal_roughness_and_tiling() {
+        let mut assets = AssetServer::default();
+        let image = |rgba: [u8; 4]| TextureAsset {
+            size: [2, 2],
+            rgba8: rgba.repeat(4),
+            color_space: TextureColorSpace::Linear,
+            sampler: TextureSampler::default(),
+        };
+        assets
+            .textures
+            .insert_with_path("bump.png", image([200, 100, 250, 255]))
+            .unwrap();
+        assets
+            .textures
+            .insert_with_path("rough.png", image([51, 0, 0, 255]))
+            .unwrap();
+        let terrain = Terrain {
+            layers: vec![
+                TerrainLayer {
+                    normal: "bump.png".into(),
+                    tiling: 8.0,
+                    ..TerrainLayer::default()
+                },
+                TerrainLayer {
+                    roughness: "rough.png".into(),
+                    ..TerrainLayer::default()
+                },
+            ],
+            ..Terrain::default()
+        };
+        let normals = layer_normals(&terrain, &mut assets).unwrap();
+        assert_eq!(normals.size, [2, 2]);
+        // Layer 0: its normal map with the plain 0.9 roughness. Layer 1: a
+        // flat normal with its roughness map's red channel.
+        assert_eq!(normals.rgba8[..4], [200, 100, 250, 230]);
+        assert_eq!(normals.rgba8[16..20], [128, 128, 255, 51]);
+        // Without maps there is no array.
+        assert!(layer_normals(&Terrain::default(), &mut assets).is_none());
+
+        let mut world = World::new();
+        world.insert_resource(assets);
+        let entity = world.spawn((terrain, field(5, 9))).id();
+        build_terrains(&mut world);
+        let chunks = world.get::<TerrainChunks>(entity).unwrap().clone();
+        let assets = world.resource::<AssetServer>();
+        let material = assets.materials.get(chunks.material).unwrap();
+        assert_eq!(material.normal_texture, chunks.normals);
+        // Roughness comes from the array alone.
+        assert_eq!(material.roughness, 1.0);
+        // Layer 0 spans 8 m against the terrain's 4 m: half the repeats.
+        assert_eq!(material.splat_scale, [0.5, 1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -572,12 +821,15 @@ mod tests {
         assert_eq!(assets.meshes.iter().count(), baseline + 6);
         let material = assets.materials.get(chunks.material).unwrap();
         assert!(material.splat);
-        let atlas = assets.textures.get(chunks.atlas).unwrap();
-        // Plain layers fill 4 x 4 quadrants; layer 0 is red, the unused
-        // layer 1 stays white.
-        assert_eq!(atlas.size, [8, 8]);
-        assert_eq!(atlas.rgba8[..4], [255, 0, 0, 255]);
-        assert_eq!(atlas.rgba8[4 * 4..4 * 5], [255, 255, 255, 255]);
+        let colors = assets.textures.get(chunks.colors).unwrap();
+        // Plain layers are 4 x 4; layer 0 is red, the unused layer 1 stays
+        // white.
+        assert_eq!(colors.size, [4, 4]);
+        assert_eq!(colors.rgba8[..4], [255, 0, 0, 255]);
+        assert_eq!(colors.rgba8[16 * 4..16 * 4 + 4], [255, 255, 255, 255]);
+        // No normal or roughness maps: no normal array, the old roughness.
+        assert_eq!(chunks.normals, None);
+        assert_eq!(material.roughness, 0.9);
         let group = assets.lod_groups.get(chunks.groups[0]).unwrap();
         assert_eq!(group.levels[0].mesh, chunks.meshes[0]);
         assert_eq!(group.levels[1].until, 100.0);

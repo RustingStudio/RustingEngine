@@ -2468,13 +2468,16 @@ pub fn cook_scene(
 
 /// Applies one path conversion to every mesh and texture in a scene,
 /// including reflected handles in components.
+/// Calls `convert` with each asset path of the scene and whether the path is
+/// a terrain layer image, which may still be relative to the project root.
 fn map_scene_asset_paths(
     document: &mut SceneDocument,
-    mut convert: impl FnMut(&Path) -> Result<PathBuf, SceneIoError>,
+    mut convert: impl FnMut(&Path, bool) -> Result<PathBuf, SceneIoError>,
 ) -> Result<(), SceneIoError> {
     for entity in &mut document.entities {
-        super::scene_instance::map_instance_source(entity, &mut convert)?;
-        super::scene_instance::map_override_paths(entity, &mut convert)?;
+        let mut asset = |path: &Path| convert(path, false);
+        super::scene_instance::map_instance_source(entity, &mut asset)?;
+        super::scene_instance::map_override_paths(entity, &mut asset)?;
         for serialized in entity.components.values_mut() {
             // Only reflected handles write this key; skip parsing the rest.
             if !serialized.contains(reflect::ASSET_KEY) {
@@ -2484,14 +2487,28 @@ fn map_scene_asset_paths(
             else {
                 continue;
             };
-            reflect::map_asset_paths(&mut value, &mut convert)?;
+            reflect::map_asset_paths(&mut value, &mut asset)?;
             *serialized = value.to_string();
+        }
+        if let Some(serialized) = entity.components.get_mut(TERRAIN_COMPONENT) {
+            if let Ok(mut value) = serde_json::from_str::<Value>(serialized) {
+                let mut changed = false;
+                for path in terrain_layer_paths(&mut value) {
+                    *path = convert(Path::new(path.as_str()), true)?
+                        .to_string_lossy()
+                        .into_owned();
+                    changed = true;
+                }
+                if changed {
+                    *serialized = value.to_string();
+                }
+            }
         }
         let Some(renderer) = &mut entity.mesh_renderer else {
             continue;
         };
         if let SceneMesh::AssetPath(path) = &mut renderer.mesh {
-            *path = convert(path)?;
+            *path = convert(path, false)?;
         }
         let SceneMaterial::Inline(material) = &mut renderer.material else {
             continue;
@@ -2506,10 +2523,55 @@ fn map_scene_asset_paths(
         .into_iter()
         .flatten()
         {
-            *current = convert(current)?;
+            *current = convert(current, false)?;
         }
     }
     Ok(())
+}
+
+/// The image paths (`texture`, `normal`, `roughness`) of a serialized
+/// `rusting.terrain` component's layers; empty paths are skipped.
+pub(crate) fn terrain_layer_paths(
+    value: &mut Value,
+) -> impl Iterator<Item = &mut String> {
+    value
+        .get_mut("layers")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object_mut)
+        .flat_map(|layer| layer.iter_mut())
+        .filter(|(key, _)| {
+            matches!(key.as_str(), "texture" | "normal" | "roughness")
+        })
+        .filter_map(|(_, path)| match path {
+            Value::String(path) if !path.is_empty() => Some(path),
+            _ => None,
+        })
+}
+
+/// Resolves a relative terrain layer image against the scene folder, like
+/// every scene asset path. Before 2.6 layer images were relative to the
+/// project root (the nearest folder with a `project.json`, else the working
+/// directory); a path that only exists there still resolves there, and the
+/// second value is true.
+pub(crate) fn resolve_terrain_layer(
+    scene_folder: &Path,
+    path: &Path,
+) -> (PathBuf, bool) {
+    let scene_relative = normalize_lexical(&scene_folder.join(path));
+    if path.is_absolute() || scene_relative.exists() {
+        return (scene_relative, false);
+    }
+    let root = scene_folder
+        .ancestors()
+        .find(|folder| folder.join("project.json").is_file())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    match root.map(|root| normalize_lexical(&root.join(path))) {
+        Some(legacy) if legacy.exists() => (legacy, true),
+        _ => (scene_relative, false),
+    }
 }
 
 /// Converts scene-relative asset paths to normalized absolute paths.
@@ -2518,9 +2580,18 @@ pub fn absolutize_scene_assets(
     scene_folder: &Path,
 ) -> Result<(), SceneIoError> {
     let base = absolute_path(scene_folder)?;
-    map_scene_asset_paths(document, |path| {
+    map_scene_asset_paths(document, |path, terrain| {
         if path.is_absolute() {
             Ok(path.to_path_buf())
+        } else if terrain {
+            let (resolved, legacy) = resolve_terrain_layer(&base, path);
+            if legacy {
+                eprintln!(
+                    "terrain layer `{}` is relative to the project root, which is deprecated; write it relative to the scene file",
+                    path.display()
+                );
+            }
+            Ok(resolved)
         } else {
             Ok(normalize_lexical(&base.join(path)))
         }
@@ -2533,7 +2604,7 @@ pub fn relativize_scene_assets(
     scene_folder: &Path,
 ) -> Result<(), SceneIoError> {
     let base = absolute_path(scene_folder)?;
-    map_scene_asset_paths(document, |path| {
+    map_scene_asset_paths(document, |path, _| {
         let target = absolute_path(path)?;
         Ok(path_relative_to(&base, &target).unwrap_or(target))
     })
@@ -3231,6 +3302,7 @@ fn runtime_material(
         uv_offset: material.uv_offset,
         flat_shading: material.flat_shading,
         splat: false,
+        splat_scale: [1.0; 4],
         // ponytail: scene files do not save surface shaders yet; that
         // needs a cooked format version.
         shader: String::new(),

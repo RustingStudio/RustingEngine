@@ -25,20 +25,30 @@ pub fn safe_relative(path: &str) -> Option<PathBuf> {
     (!clean.as_os_str().is_empty()).then_some(clean)
 }
 
-/// [`safe_relative`] for a path a peer may write: also refuses build
-/// output, per-user sidecars, and any part starting with `.` (`.git` hooks,
-/// `.cargo` config and editor task files run code outside the trust prompt).
+/// [`safe_relative`] for a path a peer may write, in canonical `a/b` form
+/// only, so every check sees the file that is written. Also refuses build
+/// output, per-user sidecars, and parts that run code outside the trust
+/// prompt: any part starting with `.` (`.git` hooks, `.cargo` config,
+/// editor task files), `rust-toolchain` files, and Windows short names
+/// (`GIT~1`) or streams (`:`).
 #[must_use]
 pub fn shareable(path: &str) -> Option<PathBuf> {
     let clean = safe_relative(path)?;
-    let blocked = clean.components().any(|part| {
-        let part = part.as_os_str().to_string_lossy();
+    let parts: Vec<String> = clean
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let blocked = parts.iter().any(|part| {
         part.starts_with('.')
+            || part.contains(['~', ':', '\\'])
+            || part.to_ascii_lowercase().starts_with("rust-toolchain")
             || SKIPPED_DIRS
                 .iter()
-                .any(|dir| dir.eq_ignore_ascii_case(&part))
+                .any(|dir| dir.eq_ignore_ascii_case(part))
     });
-    (!blocked && !is_local(&path.to_ascii_lowercase())).then_some(clean)
+    let canonical = parts.join("/") == path;
+    (canonical && !blocked && !is_local(&path.to_ascii_lowercase()))
+        .then_some(clean)
 }
 
 /// `root.join(relative)` when it stays inside `root` after resolving the
@@ -61,7 +71,7 @@ pub fn inside_root(root: &Path, relative: &Path) -> Option<PathBuf> {
 /// True for scene files, which travel as operations instead of whole files.
 #[must_use]
 pub fn is_scene(path: &str) -> bool {
-    path.ends_with(".rscene")
+    path.to_ascii_lowercase().ends_with(".rscene")
 }
 
 /// Per-user files that stay local: editor camera and selection sidecars.
@@ -194,6 +204,12 @@ mod tests {
             "Target/debug/game",
             "scenes/main.rscene.editor.json",
             "../x",
+            "scenes/main.rscene/.",
+            "./src/main.rs",
+            "src//main.rs",
+            "rust-toolchain.toml",
+            "GIT~1/hooks/pre-commit",
+            "src/main.rs:stream",
         ] {
             assert_eq!(shareable(bad), None, "{bad}");
         }

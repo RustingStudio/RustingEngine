@@ -459,6 +459,8 @@ With thousands of bodies, a few per-body costs decide the frame rate:
 - Compare runs with `rusting test --json`: `perf.tick_ms_p95` is the CPU
   side and `perf.render.gpu_ms_p95` the GPU side. `perf.render.cameras`
   splits the GPU time, draws and triangles per camera and camera screen.
+  `perf.render.passes_ms` splits it per pass (`Shadow.cascade0`,
+  `Scene.terrain`, `Scene.foliage`..).
   `perf.render` is filled when the scenario renders: a `max_draws` or
   `max_triangles` budget, `"gpu": true`, or a capture or `expect_pixels`
   step. Without one it is null.

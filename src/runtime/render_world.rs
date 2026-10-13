@@ -273,10 +273,30 @@ pub struct RenderWorld {
     index: HashMap<Entity, usize>,
     /// Each `Foliage` copy: its place in `renderables`, its unleaned
     /// matrix and its owner's `sway`.
-    foliage: Vec<(usize, [[f32; 4]; 4], f32)>,
+    pub(crate) foliage: Vec<(usize, f32)>,
     renderables_signature: Option<u64>,
     /// Tick and component counts seen by the last signature hash.
     renderables_fingerprint: Option<(Tick, [usize; 8])>,
+}
+
+impl RenderWorld {
+    /// Material keys of the `Foliage` copies, so GPU timing can tell
+    /// foliage draws apart.
+    pub(crate) fn foliage_materials(&self) -> std::collections::HashSet<u64> {
+        self.foliage
+            .iter()
+            .filter_map(|(at, _)| self.renderables.get(*at))
+            .map(|renderable| renderable.material.key())
+            .collect()
+    }
+
+    /// Index into `renderables` and sway of each `Foliage` copy. The scene
+    /// vertex shaders lean these by the force fields at their base.
+    pub(crate) fn foliage_sways(
+        &self,
+    ) -> impl Iterator<Item = (usize, f32)> + '_ {
+        self.foliage.iter().copied()
+    }
 }
 
 /// One [`Sprite`](super::Sprite) ready to draw.
@@ -696,6 +716,12 @@ pub fn extract_render_world(world: &mut World) {
             {
                 (physics.gpu_colliders(), physics.gpu_force_fields(world))
             }
+            // Foliage leans by the fields in the vertex shader.
+            Some(physics)
+                if !world.resource::<RenderWorld>().foliage.is_empty() =>
+            {
+                (Vec::new(), physics.gpu_force_fields(world))
+            }
             _ => Default::default(),
         };
     let gpu_lod = world.get_resource::<super::GpuSimulationLod>().copied();
@@ -747,10 +773,6 @@ pub fn extract_render_world(world: &mut World) {
     let new_foliage = renderables
         .as_ref()
         .map(|renderables| collect_foliage(world, renderables));
-    let leaned = {
-        let previous = &world.resource::<RenderWorld>().foliage;
-        lean_foliage(world, new_foliage.as_ref().unwrap_or(previous), seconds)
-    };
     let mut render_world = world.resource_mut::<RenderWorld>();
     render_world.flashes = flashes;
     render_world.material_overrides = material_overrides;
@@ -817,18 +839,6 @@ pub fn extract_render_world(world: &mut World) {
     }
     if let Some(foliage) = new_foliage {
         render_world.foliage = foliage;
-    }
-    let mut leaned_any = false;
-    for (at, matrix) in leaned {
-        let transform = &mut render_world.renderables[at].transform;
-        if transform.matrix != matrix {
-            transform.matrix = matrix;
-            leaned_any = true;
-        }
-    }
-    if leaned_any {
-        render_world.renderables_revision =
-            render_world.renderables_revision.wrapping_add(1);
     }
     render_world.renderables_signature = renderables_signature;
     render_world.active_camera = active_camera;
@@ -1189,48 +1199,17 @@ fn collect_flashes(world: &mut World) -> Vec<(Entity, [f32; 4])> {
     flashes
 }
 
-/// Each `Foliage` copy in `renderables` with its unleaned matrix and sway.
+/// Each `Foliage` copy in `renderables` with its sway.
 fn collect_foliage(
     world: &World,
     renderables: &[ExtractedRenderable],
-) -> Vec<(usize, [[f32; 4]; 4], f32)> {
+) -> Vec<(usize, f32)> {
     renderables
         .iter()
         .enumerate()
         .filter_map(|(at, renderable)| {
             let foliage = world.get::<super::Foliage>(renderable.entity)?;
-            Some((at, renderable.transform.matrix, foliage.sway))
-        })
-        .collect()
-}
-
-/// Each foliage copy's matrix leaned by the force fields at its base.
-fn lean_foliage(
-    world: &World,
-    foliage: &[(usize, [[f32; 4]; 4], f32)],
-    seconds: f32,
-) -> Vec<(usize, [[f32; 4]; 4])> {
-    let bases = foliage
-        .iter()
-        .map(|(_, matrix, _)| [matrix[3][0], matrix[3][1], matrix[3][2]])
-        .collect::<Vec<_>>();
-    let pushes = match world.get_resource::<super::PhysicsWorld>() {
-        Some(physics) if !foliage.is_empty() => {
-            physics.field_accelerations(world, &bases, seconds)
-        }
-        _ => vec![[0.0; 3]; foliage.len()],
-    };
-    foliage
-        .iter()
-        .zip(bases)
-        .zip(pushes)
-        .map(|((&(at, rest, sway), base), push)| {
-            let lean = nalgebra::Vector2::new(push[0], push[2]) * sway;
-            // Past 45 degrees a copy would stretch more than it leans.
-            let lean = lean.cap_magnitude(1.0);
-            let matrix = super::lean_matrix(base, [lean.x, lean.y])
-                * nalgebra::Matrix4::from(rest);
-            (at, matrix.into())
+            Some((at, foliage.sway))
         })
         .collect()
 }
@@ -1576,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn foliage_scatters_copies_that_lean_with_wind_fields() {
+    fn foliage_copies_carry_their_sway_and_the_wind_to_the_renderer() {
         use crate::runtime::{
             Collider, ColliderShape, FieldKind, Foliage, ForceField,
             PhysicsBody, RigidBody, RigidBodyKind,
@@ -1630,23 +1609,30 @@ mod tests {
                 .map(|renderable| renderable.transform.matrix)
                 .collect::<Vec<_>>()
         };
-        let leaned = copies(&app);
-        assert_eq!(leaned.len(), 50, "the owner draws only its copies");
+        let standing = copies(&app);
+        assert_eq!(standing.len(), 50, "the owner draws only its copies");
         assert_eq!(app.world().resource::<RenderWorld>().renderables.len(), 51);
         assert_eq!(foliage.placements(), foliage.placements());
-        for matrix in &leaned {
+        let render_world = app.world().resource::<RenderWorld>();
+        for matrix in &standing {
             let [x, _, z, _] = matrix[3];
             assert!(((x - 10.0).powi(2) + z * z).sqrt() <= 2.0 + 1e-4);
-            // Steady 10 m/s² wind along +x at sway 0.03: 0.3 m per metre.
-            let [lean_x, up, lean_z, _] = matrix[1];
-            assert!((lean_x / up - 0.3).abs() < 1e-4, "{lean_x} {up}");
-            assert!(lean_z.abs() < 1e-4);
+            // The vertex shader leans copies; the CPU matrix stays upright.
+            assert!(matrix[1][0].abs() < 1e-6 && matrix[1][2].abs() < 1e-6);
         }
+        let sways = render_world.foliage_sways().collect::<Vec<_>>();
+        assert_eq!(sways.len(), 50);
+        for (at, sway) in sways {
+            assert_eq!(render_world.renderables[at].entity, owner);
+            assert_eq!(sway, Foliage::default().sway);
+        }
+        // The wind reaches the shader without GPU physics in the scene.
+        assert_eq!(render_world.gpu_force_fields.len(), 1);
+        assert_eq!(render_world.gpu_force_fields[0].field.strength, 10.0);
         app.world_mut().entity_mut(wind).remove::<ForceField>();
         step(&mut app);
-        for matrix in copies(&app) {
-            assert!(matrix[1][0].abs() < 1e-6, "no wind, standing straight");
-        }
+        let render_world = app.world().resource::<RenderWorld>();
+        assert!(render_world.gpu_force_fields.is_empty());
     }
 
     #[test]

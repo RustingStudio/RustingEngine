@@ -78,6 +78,12 @@ intensity.
 Code: `LINT_LIGHT_OFF`.
 Fix: raise intensity and range; intensity 0 is fine for a light code turns on.
 
+**A terrain cut into hundreds of small chunks.** Each chunk is one draw per
+view and shadow cascade, so the frame becomes CPU-bound.
+Code: `LINT_TERRAIN_CHUNKS` (more than 300 chunks).
+Fix: set `chunk_cells` to 0 (the default) to pick the size from the
+heightfield, or raise it.
+
 ## Assets and scene files
 
 **An asset path in code that is not a file.** `play_sound` or `load_text` with
@@ -88,6 +94,14 @@ Fix: paths are relative to `assets/`; fix the path or add the file.
 **A scene that names a missing asset.**
 Code: `SCENE_MISSING_ASSET`.
 Fix: import the file with `rusting asset import`, or fix the reference.
+
+**A terrain layer image relative to the project root.** Layer `texture`,
+`normal` and `roughness` paths are relative to the scene file, like every
+scene asset path. A path written relative to the project root still loads,
+with a warning. A layer image that fails to load paints the layer's plain
+color and logs the path once.
+Code: `SCENE_TERRAIN_ROOT_PATH`, or `SCENE_MISSING_ASSET` for a missing file.
+Fix: write the path from the scene's folder, such as `../assets/textures/grass.png`.
 
 **A misspelled scene key.** Loading ignores it and the field keeps its default.
 Code: `SCENE_UNKNOWN_FIELD`.

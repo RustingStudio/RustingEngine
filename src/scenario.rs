@@ -1011,7 +1011,10 @@ pub struct PerfReport {
     /// of the last rendered frame; `gpu_ms_p50`, `gpu_ms_p95` and
     /// `gpu_ms_max` over all `gpu_frames` frames drawn (every tick with a render
     /// budget or `gpu`, else the few ticks before each image step; GPU
-    /// physics steps on the other ticks without drawing); and
+    /// physics steps on the other ticks without drawing); `passes_ms`, the
+    /// last frame's GPU milliseconds per pass (`Shadow`, `Scene`,
+    /// `ToneMap`..) and per part of a pass (`Shadow.cascade0`,
+    /// `Scene.opaque`, `Scene.terrain`, `Scene.foliage`, `Scene.sky`); and
     /// `cameras`:
     /// `[{name, gpu_ms, draws, triangles}]`, one per viewport camera, then
     /// one per camera screen drawn that frame (with `"screen": true`);
@@ -2794,6 +2797,7 @@ fn perf_report(tick_ms: &[f64], render: Option<Value>) -> PerfReport {
             "gpu_ms_p50": meta["gpu_ms_p50"],
             "gpu_ms_p95": meta["gpu_ms_p95"],
             "gpu_ms_max": meta["gpu_ms_max"],
+            "passes_ms": meta["passes_ms"],
             "cameras": meta["cameras"],
             "dropped_lights": meta["dropped_lights"],
             "lights": meta["lights"],
@@ -4592,6 +4596,8 @@ mod tests {
         assert!(frames >= report.ticks_run, "{render}");
         let p95 = render["gpu_ms_p95"].as_f64().unwrap();
         assert!(p95 <= render["gpu_ms_max"].as_f64().unwrap(), "{render}");
+        let passes = render["passes_ms"].as_object().unwrap();
+        assert!(passes.contains_key("Scene.opaque"), "{render}");
         assert!(report.perf.environment["device"].is_string());
         assert!(!report.passed);
         assert!(report

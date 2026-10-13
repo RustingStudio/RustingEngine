@@ -302,11 +302,30 @@ impl GpuPassTimes {
     }
 }
 
+/// GPU time of parts of a pass in the last frame whose results are known,
+/// as `(pass, part, time)`: each shadow view (`cascade0`..), and the
+/// scene pass's `opaque`, `terrain` (splat materials), `foliage` (materials
+/// of `rusting.foliage` copies) and `sky` (sky, sky fog and fog volumes)
+/// draws. Parts come from timestamps between draws, so they are
+/// approximate where draws overlap on the GPU. Empty without timestamps.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GpuPartTimes(pub Vec<(FramePass, &'static str, Duration)>);
+
+/// Timestamp queries after the pass pairs, for part boundaries.
+const PART_MARKS: u32 = 64;
+
+/// Names of shadow views as [`GpuPartTimes`] parts.
+const SHADOW_VIEW_PARTS: [&str; SHADOW_VIEWS] = [
+    "cascade0", "cascade1", "cascade2", "cascade3", "cascade4", "cascade5",
+];
+
 /// A frame whose pass timestamps are read once it completes.
 struct PendingPassTimes {
     fence: FrameFence,
     pool: Arc<QueryPool>,
     passes: Vec<FramePass>,
+    /// Part boundaries: pass, part opened there (`None` closes), query.
+    marks: Vec<(FramePass, Option<&'static str>, u32)>,
 }
 
 /// A GPU-culled frame whose counts and time are read once it completes.
@@ -487,6 +506,8 @@ struct RenderInstanceUpload {
     transmission: [f32; 4],
     /// xy: texture repeats per face; zw: texture offset.
     uv_transform: [f32; 4],
+    /// Repeats of each terrain layer per unit of texture coordinates.
+    splat_scale: [f32; 4],
 }
 
 /// Rougher surfaces keep the environment reflection only; the shader fades
@@ -1018,7 +1039,8 @@ struct ScreenFeed {
 }
 
 /// Set 1 of one material: base color, normal, metallic-roughness, occlusion,
-/// and emissive maps, white where the material has none.
+/// and emissive maps, white where the material has none, then the terrain
+/// color and normal arrays of a splat material.
 struct PreparedMaterial {
     handle: Handle<MaterialAsset>,
     set: Arc<DescriptorSet>,
@@ -1028,7 +1050,35 @@ struct PreparedMaterial {
     shader: String,
 }
 
-const MATERIAL_TEXTURES: usize = 5;
+const MATERIAL_TEXTURES: usize = 7;
+
+/// A material's set-1 textures in binding order. A splat material's base
+/// color and normal textures are layer arrays, so they move to the array
+/// bindings 5 and 6.
+fn material_slots(
+    material: &MaterialAsset,
+) -> [Option<Handle<TextureAsset>>; MATERIAL_TEXTURES] {
+    let (flat, layers) = if material.splat {
+        (
+            [None, None],
+            [material.base_color_texture, material.normal_texture],
+        )
+    } else {
+        (
+            [material.base_color_texture, material.normal_texture],
+            [None, None],
+        )
+    };
+    [
+        flat[0],
+        flat[1],
+        material.metallic_roughness_texture,
+        material.occlusion_texture,
+        material.emissive_texture,
+        layers[0],
+        layers[1],
+    ]
+}
 
 /// Pixels waiting to be copied into their image by the next recorded frame.
 type PendingTextureUpload = (Subbuffer<[u8]>, Arc<Image>);
@@ -1141,7 +1191,9 @@ impl PreparedRenderInstances {
                 continue;
             }
             instance.model = matrix;
+            let sway = instance.normal[0][3];
             instance.normal = normal_columns(Matrix4::from(matrix));
+            instance.normal[0][3] = sway;
             if let Some(local) = self.local_bounds[index] {
                 self.bounds[index] = Some(local.transformed(&matrix));
             }
@@ -1545,6 +1597,7 @@ type GraphicsBuffers = (
     Subbuffer<[GpuBodyState]>,
     Subbuffer<[RenderInstanceUpload]>,
     Subbuffer<[LightUpload]>,
+    Subbuffer<[GpuForceFieldUpload]>,
 );
 
 fn same_buffer<T: ?Sized>(a: &Subbuffer<T>, b: &Subbuffer<T>) -> bool {
@@ -1956,6 +2009,11 @@ pub struct SceneRenderer {
     pending_cull: Vec<PendingCullReadback>,
     pending_pass_times: Vec<PendingPassTimes>,
     gpu_pass_times: GpuPassTimes,
+    gpu_part_times: GpuPartTimes,
+    /// Force fields the scene vertex shaders lean foliage by (set 0
+    /// binding 14), kept while they stay the same.
+    lean_fields:
+        Option<(Vec<GpuForceFieldUpload>, Subbuffer<[GpuForceFieldUpload]>)>,
     preparation_time: Duration,
     recording_time: Duration,
     counters: RenderCounters,
@@ -2102,7 +2160,8 @@ impl SceneRenderer {
                     QueryPool::new(
                         queue.device().clone(),
                         QueryPoolCreateInfo {
-                            query_count: 2 * FramePass::ALL.len() as u32,
+                            query_count: 2 * FramePass::ALL.len() as u32
+                                + PART_MARKS,
                             ..QueryPoolCreateInfo::query_type(
                                 QueryType::Timestamp,
                             )
@@ -2143,6 +2202,18 @@ impl SceneRenderer {
             &mut pending_texture_uploads,
         )?;
         let white_texture = (white_view, default_sampler.clone());
+        // Two white layers make an array view for the terrain bindings.
+        let white_layers = create_texture(
+            &memory_allocator,
+            &TextureAsset {
+                size: [1, 1],
+                rgba8: vec![255; 8],
+                color_space: TextureColorSpace::Linear,
+                sampler: TextureSampler::default(),
+            },
+            &mut pending_texture_uploads,
+        )
+        .map(|view| (view, default_sampler.clone()))?;
         let mut solid = |rgba8: [u8; 4]| {
             create_texture(
                 &memory_allocator,
@@ -2162,6 +2233,8 @@ impl SceneRenderer {
             white_texture.clone(),
             white_texture.clone(),
             white_texture.clone(),
+            white_layers.clone(),
+            white_layers,
         ];
         let post_pipelines = PostPipelines::new(&queue)?;
         let bloom_chain = BloomChain::new(
@@ -2335,6 +2408,8 @@ impl SceneRenderer {
             pending_cull: Vec::new(),
             pending_pass_times: Vec::new(),
             gpu_pass_times: GpuPassTimes::default(),
+            gpu_part_times: GpuPartTimes::default(),
+            lean_fields: None,
             preparation_time: Duration::ZERO,
             recording_time: Duration::ZERO,
             counters: RenderCounters::default(),
@@ -2373,6 +2448,33 @@ impl SceneRenderer {
     pub fn gpu_pass_times(&mut self) -> GpuPassTimes {
         self.collect_cull_readbacks();
         self.gpu_pass_times.clone()
+    }
+
+    /// GPU time of parts of passes; see [`GpuPartTimes`]. Collects
+    /// completed readbacks first, without waiting.
+    pub fn gpu_part_times(&mut self) -> GpuPartTimes {
+        self.collect_cull_readbacks();
+        self.gpu_part_times.clone()
+    }
+
+    /// Milliseconds of each timed pass and part of the last known frame,
+    /// keyed `Shadow`, `Scene`, `ToneMap`.. and `Shadow.cascade0`,
+    /// `Scene.terrain`.. for the bench and `rusting test` JSON.
+    pub fn gpu_pass_breakdown(
+        &mut self,
+    ) -> std::collections::BTreeMap<String, f64> {
+        let ms = |time: Duration| time.as_secs_f64() * 1000.0;
+        let mut breakdown = std::collections::BTreeMap::new();
+        for (pass, time) in self.gpu_pass_times().0 {
+            *breakdown.entry(pass.label().to_owned()).or_insert(0.0) +=
+                ms(time);
+        }
+        for (pass, part, time) in self.gpu_part_times().0 {
+            *breakdown
+                .entry(format!("{}.{part}", pass.label()))
+                .or_insert(0.0) += ms(time);
+        }
+        breakdown
     }
 
     /// Work counters of the last frame. Collects completed readbacks first,
@@ -2420,6 +2522,8 @@ impl SceneRenderer {
                 continue;
             }
             let pending = self.pending_pass_times.remove(index);
+            self.gpu_part_times =
+                GpuPartTimes(part_times(&pending.pool, &pending.marks, period));
             self.gpu_pass_times = GpuPassTimes(
                 pending
                     .passes
@@ -3003,7 +3107,6 @@ impl SceneRenderer {
         let first_tick = self.last_physics_tick + 1;
         let last_tick = self.last_physics_tick + steps;
 
-        let render_instances = self.prepared_instances.as_ref().unwrap();
         let frame_key = Arc::as_ptr(&target) as usize;
         self.frames_rendered += 1;
         // A recreated swapchain (resize, vsync toggle, out-of-date) brings
@@ -3013,15 +3116,45 @@ impl SceneRenderer {
         let frames_rendered = self.frames_rendered;
         self.prepared_frames
             .retain(|_, frame| frames_rendered - frame.last_used < 16);
+        // Without fields one zeroed entry leans nothing.
+        let mut lean_fields = render_world
+            .gpu_force_fields
+            .iter()
+            .map(GpuForceFieldUpload::from)
+            .collect::<Vec<_>>();
+        if lean_fields.is_empty() {
+            lean_fields.push(GpuForceFieldUpload::default());
+        }
+        if self
+            .lean_fields
+            .as_ref()
+            .is_none_or(|(fields, _)| *fields != lean_fields)
+        {
+            let buffer = self
+                .instance_allocator
+                .allocate_slice::<GpuForceFieldUpload>(
+                    lean_fields.len() as DeviceSize
+                )
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            buffer
+                .write()
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .copy_from_slice(&lean_fields);
+            self.counters.upload_bytes += buffer.size();
+            self.lean_fields = Some((lean_fields, buffer));
+        }
+        let render_instances = self.prepared_instances.as_ref().unwrap();
         let bound: GraphicsBuffers = (
             physics.states.clone(),
             render_instances.instances.clone(),
             lights.buffer.clone(),
+            self.lean_fields.as_ref().unwrap().1.clone(),
         );
         let stale = self.prepared_frames.get(&frame_key).is_none_or(|frame| {
             !same_buffer(&frame.bound.0, &bound.0)
                 || !same_buffer(&frame.bound.1, &bound.1)
                 || !same_buffer(&frame.bound.2, &bound.2)
+                || !same_buffer(&frame.bound.3, &bound.3)
         });
         if stale {
             let graphics_set = DescriptorSet::new(
@@ -3031,6 +3164,7 @@ impl SceneRenderer {
                     WriteDescriptorSet::buffer(0, bound.0.clone()),
                     WriteDescriptorSet::buffer(1, bound.1.clone()),
                     WriteDescriptorSet::buffer(2, bound.2.clone()),
+                    WriteDescriptorSet::buffer(14, bound.3.clone()),
                 ],
                 [],
             )
@@ -4161,6 +4295,7 @@ impl SceneRenderer {
             labels,
             timestamps,
             passes: Vec::new(),
+            marks: Vec::new(),
         };
         if let (Some(params), Some(bake)) = (sky, &mut self.sky_bake) {
             bake.record(&mut commands, params)?;
@@ -4474,11 +4609,18 @@ impl SceneRenderer {
             .map_err(|error| SceneRenderError(error.to_string()))?;
         let tile_size = shadow_size / tiles;
         for (index, light_view_projection) in cascades.iter().enumerate() {
+            passes.part(
+                &mut commands,
+                Some(SHADOW_VIEW_PARTS[index.min(SHADOW_VIEWS - 1)]),
+            )?;
             // ponytail: masked casters cast as fully opaque and blended ones
             // not at all; add an alpha-tested shadow shader when scenes need
             // foliage shadows.
-            // ponytail: every cascade draws every caster; cull per cascade
-            // when shadow draws show up in profiles (Eco could use 2).
+            // Casters outside the cascade's sides and far plane are skipped.
+            // The near plane stays open: a caster between the light and the
+            // cascade still shades it.
+            let mut planes = frustum_planes(light_view_projection);
+            planes[4] = [0.0, 0.0, 0.0, 1.0];
             let offset = [
                 (index as u32 % tiles) * tile_size,
                 (index as u32 / tiles) * tile_size,
@@ -4524,31 +4666,74 @@ impl SceneRenderer {
                 )
                 .map_err(|error| SceneRenderError(error.to_string()))?;
             for batch in &render_instances.batches {
-                let Some(mesh) = self.prepared_meshes.get(&batch.mesh_key)
+                let (runs, level) = shadow_runs(
+                    batch.first_instance,
+                    batch.instance_count,
+                    |instance| {
+                        let index = instance as usize;
+                        if render_instances.bounds[index]
+                            .is_some_and(|b| !bounds_in_frustum(&planes, &b))
+                        {
+                            return None;
+                        }
+                        let coarsest = batch.levels.saturating_sub(1);
+                        let cull = &render_instances.cull_source[index];
+                        Some(match render_instances.lod_spheres[index] {
+                            Some(sphere) => lod_level(
+                                lod_value(
+                                    lod_camera,
+                                    sphere,
+                                    cull.lod[1] != 0.0,
+                                ),
+                                cull.lod,
+                                cull.lod_ends,
+                            )
+                            .unwrap_or(coarsest)
+                            .min(coarsest),
+                            None => 0,
+                        })
+                    },
+                );
+                let mesh_key = render_instances
+                    .draw_meshes
+                    .get((batch.first_draw + level) as usize)
+                    .copied()
+                    .unwrap_or(batch.mesh_key);
+                let Some(mesh) = self
+                    .prepared_meshes
+                    .get(&mesh_key)
+                    .or_else(|| self.prepared_meshes.get(&batch.mesh_key))
                 else {
                     continue;
                 };
+                if runs.is_empty() {
+                    continue;
+                }
                 commands
                     .bind_vertex_buffers(0, mesh.vertices.clone())
                     .map_err(|error| SceneRenderError(error.to_string()))?
                     .bind_index_buffer(mesh.indices.clone())
                     .map_err(|error| SceneRenderError(error.to_string()))?;
-                count_work(
-                    &recorded,
-                    1,
-                    0,
-                    mesh.indices.len() / 3 * u64::from(batch.instance_count),
-                );
-                unsafe {
-                    commands
-                        .draw_indexed(
-                            mesh.indices.len() as u32,
-                            batch.instance_count,
-                            0,
-                            0,
-                            batch.first_instance,
-                        )
-                        .map_err(|error| SceneRenderError(error.to_string()))?;
+                for (first, count) in runs {
+                    count_work(
+                        &recorded,
+                        1,
+                        0,
+                        mesh.indices.len() / 3 * u64::from(count),
+                    );
+                    unsafe {
+                        commands
+                            .draw_indexed(
+                                mesh.indices.len() as u32,
+                                count,
+                                0,
+                                0,
+                                first,
+                            )
+                            .map_err(|error| {
+                                SceneRenderError(error.to_string())
+                            })?;
+                    }
                 }
             }
         }
@@ -4591,9 +4776,21 @@ impl SceneRenderer {
         // Binds the scene state and draws the opaque batches, or only the
         // listed ones, with `pipeline` from `cull`'s outputs, or from the CPU
         // list without one. Returns the bound material set.
+        // Draws timed apart as `GpuPartTimes`.
+        let foliage_materials = render_world.foliage_materials();
+        let part_of = |material: Handle<MaterialAsset>| {
+            if assets.materials.get(material).is_some_and(|m| m.splat) {
+                "terrain"
+            } else if foliage_materials.contains(&material.key()) {
+                "foliage"
+            } else {
+                "opaque"
+            }
+        };
         let draw_batches = |commands: &mut AutoCommandBufferBuilder<
             PrimaryAutoCommandBuffer,
         >,
+                            passes: &mut PassRecorder,
                             cull: Option<&GpuCullSet>,
                             pipeline: &Arc<GraphicsPipeline>,
                             only: Option<&[usize]>|
@@ -4668,6 +4865,7 @@ impl SceneRenderer {
                     else {
                         continue;
                     };
+                    passes.part(commands, Some(part_of(batch.material)))?;
                     let wanted =
                         surface_pipeline(batch.material, pass, pipeline);
                     if !Arc::ptr_eq(&wanted, &bound_pipeline) {
@@ -4731,6 +4929,7 @@ impl SceneRenderer {
             passes.begin(&mut commands, FramePass::DepthPrepass)?;
             draw_batches(
                 &mut commands,
+                &mut passes,
                 early_cull.or(gpu_cull),
                 &self.depth_prepass_pipeline,
                 None,
@@ -4769,7 +4968,13 @@ impl SceneRenderer {
                 )
                 .map_err(|error| SceneRenderError(error.to_string()))?;
             passes.begin(&mut commands, FramePass::Scene)?;
-            draw_batches(&mut commands, Some(early), &active.pipeline, None)?;
+            draw_batches(
+                &mut commands,
+                &mut passes,
+                Some(early),
+                &active.pipeline,
+                None,
+            )?;
             passes.end(&mut commands)?;
             commands
                 .next_subpass(Default::default(), SubpassBeginInfo::default())
@@ -4855,14 +5060,20 @@ impl SceneRenderer {
             FramePass::Scene
         };
         passes.begin(&mut commands, scene_pass)?;
-        let mut bound_texture =
-            draw_batches(&mut commands, gpu_cull, &active.pipeline, None)?;
+        let mut bound_texture = draw_batches(
+            &mut commands,
+            &mut passes,
+            gpu_cull,
+            &active.pipeline,
+            None,
+        )?;
         if fog.is_some_and(|fog| fog.sky_affect > 0.0)
             || !fog_volumes.is_empty()
             || sky.is_some()
             || environment_background
             || sky_shader.is_some()
         {
+            passes.part(&mut commands, Some("sky"))?;
             // Same layout as the scene pipelines, so their sets and camera
             // stay bound.
             commands
@@ -4940,6 +5151,7 @@ impl SceneRenderer {
             bound_texture = match &render_instances.glossy_batches {
                 glossy if reflections && !glossy.is_empty() => draw_batches(
                     &mut commands,
+                    &mut passes,
                     gpu_cull,
                     &active.reflection_pipeline,
                     Some(glossy),
@@ -5910,6 +6122,7 @@ impl SceneRenderer {
                 fence: fence.clone(),
                 pool,
                 passes: passes.passes,
+                marks: passes.marks,
             });
         }
         if path.on_gpu() {
@@ -6826,19 +7039,10 @@ impl SceneRenderer {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let slots = |material: &MaterialAsset| {
-            [
-                material.base_color_texture,
-                material.normal_texture,
-                material.metallic_roughness_texture,
-                material.occlusion_texture,
-                material.emissive_texture,
-            ]
-        };
         let used = materials
             .iter()
             .filter_map(|material| assets.materials.get(*material))
-            .flat_map(|material| slots(material).into_iter().flatten())
+            .flat_map(|material| material_slots(material).into_iter().flatten())
             .chain(lit)
             .collect::<Vec<_>>();
         for &handle in &used {
@@ -6910,11 +7114,16 @@ impl SceneRenderer {
                 continue;
             };
             let mut slot_index = 0;
-            let mut textures = slots(material).map(|slot| {
+            let mut textures = material_slots(material).map(|slot| {
                 let fallback = &self.missing_textures[slot_index];
                 slot_index += 1;
                 let Some(texture) = slot else {
-                    return self.white_texture.clone();
+                    // The array bindings need array views.
+                    return if slot_index > 5 {
+                        fallback.clone()
+                    } else {
+                        self.white_texture.clone()
+                    };
                 };
                 self.prepared_textures
                     .get(&texture.key())
@@ -7329,9 +7538,17 @@ impl SceneRenderer {
                 }
                 group
             });
+        let sways: HashMap<u32, f32> = render_world
+            .foliage_sways()
+            .map(|(at, sway)| (at as u32, sway))
+            .collect();
         let mut instances = Vec::with_capacity(order.len().max(1));
         for &index in &order {
             let renderable = renderables[index];
+            let mut normal =
+                normal_columns(Matrix4::from(renderable.transform.matrix));
+            normal[0][3] =
+                sways.get(&expanded_sources[index]).copied().unwrap_or(0.0);
             let material = assets.materials.get(renderable.material);
             let mut color = material
                 .map_or([1.0, 0.0, 1.0, 1.0], |material| material.base_color);
@@ -7399,9 +7616,7 @@ impl SceneRenderer {
                 };
             instances.push(RenderInstanceUpload {
                 model: renderable.transform.matrix,
-                normal: normal_columns(Matrix4::from(
-                    renderable.transform.matrix,
-                )),
+                normal,
                 color,
                 emissive,
                 surface,
@@ -7425,6 +7640,8 @@ impl SceneRenderer {
                     ]
                 }),
                 uv_transform,
+                splat_scale: material
+                    .map_or([1.0; 4], |material| material.splat_scale),
             });
         }
         // ponytail: GPU-physics bodies sort by their last CPU transform;
@@ -7445,6 +7662,10 @@ impl SceneRenderer {
                 let local = renderable
                     .bounds
                     .or_else(|| mesh.and_then(|mesh| mesh.bounds));
+                let local = match sways.contains_key(&expanded_sources[index]) {
+                    true => local.map(lean_room),
+                    false => local,
+                };
                 // ponytail: the GPU tests a sphere around the box, which
                 // keeps some instances the CPU box test drops; send boxes
                 // if that overdraw ever shows up.
@@ -8406,15 +8627,8 @@ fn material_group(material: Option<&MaterialAsset>) -> MaterialGroup {
         material.shader.hash(&mut hasher);
         hasher.finish() | 1
     };
-    let key = |texture: &Option<Handle<TextureAsset>>| texture.map(Handle::key);
     (
-        [
-            key(&material.base_color_texture),
-            key(&material.normal_texture),
-            key(&material.metallic_roughness_texture),
-            key(&material.occlusion_texture),
-            key(&material.emissive_texture),
-        ],
+        material_slots(material).map(|texture| texture.map(Handle::key)),
         material.model == MaterialModel::Pbr
             && material.roughness < SSR_MAX_ROUGHNESS,
         shader,
@@ -8512,6 +8726,57 @@ fn compact_visible(
         })
         .collect();
     (list, ranges, blended)
+}
+
+/// `bounds` widened sideways by their height above the origin, so a foliage
+/// copy leaned up to 45 degrees in the vertex shader stays inside them.
+fn lean_room(bounds: RenderBounds) -> RenderBounds {
+    match bounds {
+        RenderBounds::Aabb { mut min, mut max } => {
+            let reach = min[1].abs().max(max[1].abs());
+            for axis in [0, 2] {
+                min[axis] -= reach;
+                max[axis] += reach;
+            }
+            RenderBounds::Aabb { min, max }
+        }
+        RenderBounds::Sphere { center, radius } => RenderBounds::Sphere {
+            center,
+            radius: radius + center[1].abs() + radius,
+        },
+    }
+}
+
+/// Culled instances shorter than this between two kept ones are drawn
+/// anyway, so a scattered batch stays a few draws.
+const SHADOW_RUN_GAP: u32 = 32;
+
+/// Instance ranges `(first, count)` of the batch `first..first + count` to
+/// draw into one shadow cascade, and the LOD level to draw them at: the
+/// finest level `keep` gives, so no caster draws coarser than it shows.
+/// `keep` returns `None` for an instance outside the cascade.
+fn shadow_runs(
+    first: u32,
+    count: u32,
+    keep: impl Fn(u32) -> Option<u32>,
+) -> (Vec<(u32, u32)>, u32) {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    let mut level = u32::MAX;
+    for instance in first..first + count {
+        let Some(at) = keep(instance) else {
+            continue;
+        };
+        level = level.min(at);
+        match runs.last_mut() {
+            Some((start, length))
+                if instance - (*start + *length) < SHADOW_RUN_GAP =>
+            {
+                *length = instance + 1 - *start;
+            }
+            _ => runs.push((instance, 1)),
+        }
+    }
+    (runs, if level == u32::MAX { 0 } else { level })
 }
 
 /// Gribb-Hartmann planes `(normal, distance)` of a Vulkan clip matrix: left,
@@ -8666,6 +8931,8 @@ struct PassRecorder {
     labels: bool,
     timestamps: Option<Arc<QueryPool>>,
     passes: Vec<FramePass>,
+    /// Part boundaries inside passes; see [`GpuPartTimes`].
+    marks: Vec<(FramePass, Option<&'static str>, u32)>,
 }
 
 impl PassRecorder {
@@ -8684,11 +8951,38 @@ impl PassRecorder {
         self.timestamp(commands, 2 * pass as u32)
     }
 
+    /// Starts timing `part` of the open pass, ending the part before it;
+    /// `None` only ends it. Repeating the open part does nothing, and past
+    /// [`PART_MARKS`] boundaries a frame's later parts go untimed.
+    fn part(
+        &mut self,
+        commands: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        part: Option<&'static str>,
+    ) -> Result<(), SceneRenderError> {
+        let Some(&pass) = self.passes.last() else {
+            return Ok(());
+        };
+        let open = self
+            .marks
+            .last()
+            .filter(|(at, ..)| *at == pass)
+            .and_then(|(_, open, _)| *open);
+        let used = self.marks.len() as u32;
+        if open == part || self.timestamps.is_none() || used >= PART_MARKS {
+            return Ok(());
+        }
+        let query = 2 * FramePass::ALL.len() as u32 + used;
+        self.timestamp(commands, query)?;
+        self.marks.push((pass, part, query));
+        Ok(())
+    }
+
     fn end(
         &mut self,
         commands: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     ) -> Result<(), SceneRenderError> {
         let pass = *self.passes.last().expect("`end` follows a `begin`");
+        self.part(commands, None)?;
         self.timestamp(commands, 2 * pass as u32 + 1)?;
         if self.labels {
             // Safety: pairs with the `begin` of the same pass.
@@ -8737,6 +9031,47 @@ fn pass_time(
     Some(Duration::from_nanos(
         (ticks as f64 * f64::from(period)) as u64,
     ))
+}
+
+/// Time of each part between consecutive marks, summed per pass and part
+/// in first-seen order. `period` is nanoseconds per tick.
+fn part_times(
+    pool: &QueryPool,
+    marks: &[(FramePass, Option<&'static str>, u32)],
+    period: f32,
+) -> Vec<(FramePass, &'static str, Duration)> {
+    let mut times: Vec<(FramePass, &'static str, Duration)> = Vec::new();
+    for pair in marks.windows(2) {
+        let [(pass, Some(part), first), (next, _, last)] = [pair[0], pair[1]]
+        else {
+            continue;
+        };
+        if next != pass {
+            continue;
+        }
+        let read = |query: u32| {
+            let mut ticks = [0_u64];
+            pool.get_results(
+                query..query + 1,
+                &mut ticks,
+                QueryResultFlags::empty(),
+            )
+            .ok()
+            .filter(|&available| available)
+            .map(|_| ticks[0])
+        };
+        let (Some(start), Some(end)) = (read(first), read(last)) else {
+            continue;
+        };
+        let time = Duration::from_nanos(
+            (end.saturating_sub(start) as f64 * f64::from(period)) as u64,
+        );
+        match times.iter_mut().find(|(p, n, _)| *p == pass && *n == part) {
+            Some(entry) => entry.2 += time,
+            None => times.push((pass, part, time)),
+        }
+    }
+    times
 }
 
 /// Draws `count` instances of `mesh` from `list[first..]`. With `indirect`,
@@ -8943,9 +9278,14 @@ fn create_texture(
         TextureColorSpace::Linear => (Format::R8G8B8A8_UNORM, 4),
         TextureColorSpace::Hdr => (Format::R16G16B16A16_SFLOAT, 8),
     };
+    // Data longer than one image holds more layers back to back and
+    // makes an array texture.
+    let layer_bytes = width as usize * height as usize * texel_bytes;
+    let layers = texture.rgba8.len() / layer_bytes.max(1);
     if width == 0
         || height == 0
-        || texture.rgba8.len() != width as usize * height as usize * texel_bytes
+        || layers == 0
+        || texture.rgba8.len() != layers * layer_bytes
     {
         return Err(SceneRenderError(format!(
             "texture of {width}x{height} has {} bytes of {format:?} data",
@@ -8971,6 +9311,7 @@ fn create_texture(
         ImageCreateInfo {
             format,
             extent: [width, height, 1],
+            array_layers: layers as u32,
             mip_levels: 32 - width.max(height).leading_zeros(),
             // Transfer source for the mip chain blits.
             usage: ImageUsage::TRANSFER_SRC
@@ -11826,6 +12167,7 @@ fn normal_columns(model: Matrix4<f32>) -> [[f32; 4]; 3] {
 mod vertex_shader {
     vulkano_shaders::shader! {
                             ty: "vertex",
+                            include: ["src/shaders"],
                             src: r"
 #version 450
 layout(location = 0) in vec3 position;
@@ -11861,6 +12203,7 @@ struct RenderInstance {
     uvec4 physics;
     vec4 transmission;
     vec4 uv_transform;
+    vec4 splat_scale;
 };
 layout(set = 0, binding = 1) readonly buffer RenderInstances {
     RenderInstance data[];
@@ -11873,14 +12216,30 @@ layout(location = 5) out vec4 v_tangent;
 layout(location = 6) flat out vec4 v_emissive;
 layout(location = 7) flat out vec4 v_surface;
 layout(location = 8) flat out vec4 v_transmission;
+layout(location = 9) flat out vec4 v_splat_scale;
 // Index into render_instances from the per-frame visible list.
 layout(location = 4) in uint instance_index;
+// Foliage lean: `Foliage` copies carry their sway in normal[0].w and bend
+// by the force fields at their base, as `lean_matrix` on the CPU did.
+#define NO_BODY_SHAPES
+#include <physics_shapes.glsl>
+#include <physics_fields.glsl>
+vec2 foliage_lean(float sway, vec3 base, float seconds) {
+    if (sway <= 0.0) return vec2(0.0);
+    vec3 push = field_push(base, 0.001, uint(force_fields.data.length()), seconds);
+    vec2 lean = push.xz * sway;
+    // Past 45 degrees a copy would stretch more than it leans.
+    float size = length(lean);
+    return size > 1.0 ? lean / size : lean;
+}
 void main() {
     RenderInstance instance = render_instances.data[instance_index];
     mat4 model = instance.physics.x == 0xffffffffu
         ? instance.model
         : physics_states.data[instance.physics.x].model;
     vec4 world_position = model * vec4(position, 1.0);
+    vec2 lean = foliage_lean(instance.normal[0].w, model[3].xyz, camera.ambient.w);
+    world_position.xz += lean * (world_position.y - model[3].y);
     gl_Position = camera.view_projection * world_position;
     mat3 normal_matrix;
     if (instance.physics.x == 0xffffffffu) {
@@ -11895,15 +12254,19 @@ void main() {
             linear[2] / dot(linear[2], linear[2]));
     }
     v_normal = normal_matrix * normal;
+    // The lean is a shear; normals take its inverse transpose.
+    v_normal.y -= lean.x * v_normal.x + lean.y * v_normal.z;
     v_color = instance.color * color;
     v_world_position = world_position.xyz;
     v_alpha = instance.physics.yzw;
     v_uv = uv * instance.uv_transform.xy + instance.uv_transform.zw;
     // Tangents follow the surface, so they take the model's linear part.
     v_tangent = vec4(mat3(model) * tangent.xyz, tangent.w);
+    v_tangent.xz += lean * v_tangent.y;
     v_emissive = instance.emissive;
     v_surface = instance.surface;
     v_transmission = instance.transmission;
+    v_splat_scale = instance.splat_scale;
 }
 "
                         }
@@ -11922,6 +12285,7 @@ mod fragment_shader {
 mod shadow_vertex_shader {
     vulkano_shaders::shader! {
                             ty: "vertex",
+                            include: ["src/shaders"],
                             src: r"
 #version 450
 layout(location = 0) in vec3 position;
@@ -11952,10 +12316,24 @@ struct RenderInstance {
     uvec4 physics;
     vec4 transmission;
     vec4 uv_transform;
+    vec4 splat_scale;
 };
 layout(set = 0, binding = 1) readonly buffer RenderInstances {
     RenderInstance data[];
 } render_instances;
+// Foliage lean: `Foliage` copies carry their sway in normal[0].w and bend
+// by the force fields at their base, as `lean_matrix` on the CPU did.
+#define NO_BODY_SHAPES
+#include <physics_shapes.glsl>
+#include <physics_fields.glsl>
+vec2 foliage_lean(float sway, vec3 base, float seconds) {
+    if (sway <= 0.0) return vec2(0.0);
+    vec3 push = field_push(base, 0.001, uint(force_fields.data.length()), seconds);
+    vec2 lean = push.xz * sway;
+    // Past 45 degrees a copy would stretch more than it leans.
+    float size = length(lean);
+    return size > 1.0 ? lean / size : lean;
+}
 void main() {
     RenderInstance instance = render_instances.data[gl_InstanceIndex];
     if ((instance.physics.w & 1u) == 0u) {
@@ -11966,7 +12344,10 @@ void main() {
     mat4 model = instance.physics.x == 0xffffffffu
         ? instance.model
         : physics_states.data[instance.physics.x].model;
-    gl_Position = camera.view_projection * model * vec4(position, 1.0);
+    vec4 world_position = model * vec4(position, 1.0);
+    vec2 lean = foliage_lean(instance.normal[0].w, model[3].xyz, camera.ambient.w);
+    world_position.xz += lean * (world_position.y - model[3].y);
+    gl_Position = camera.view_projection * world_position;
 }
 "
                         }
@@ -12413,6 +12794,7 @@ struct RenderInstance {
     uvec4 physics;
     vec4 transmission;
     vec4 uv_transform;
+    vec4 splat_scale;
 };
 layout(set = 0, binding = 1) readonly buffer RenderInstances {
     RenderInstance data[];
@@ -12881,6 +13263,23 @@ mod tests {
     }
 
     #[test]
+    fn shadow_runs_merge_short_gaps_and_take_the_finest_level() {
+        // Kept: 10, 11 (level 2), 20 (level 1), 100 (level 3).
+        let keep = |instance: u32| match instance {
+            10 | 11 => Some(2),
+            20 => Some(1),
+            100 => Some(3),
+            _ => None,
+        };
+        let (runs, level) = shadow_runs(0, 200, keep);
+        assert_eq!(runs, vec![(10, 11), (100, 1)]);
+        assert_eq!(level, 1);
+        let (runs, level) = shadow_runs(0, 5, |_| None);
+        assert!(runs.is_empty());
+        assert_eq!(level, 0);
+    }
+
+    #[test]
     fn frustum_test_keeps_bounds_that_touch_the_view_and_drops_the_rest() {
         // Default camera: at the origin looking down -Z, 60 degree vertical
         // field of view, near 0.1, far 1000, square aspect.
@@ -12990,7 +13389,13 @@ mod tests {
         let (order, batches, blended_start) = render_batch_order(
             &renderables,
             |_| false,
-            |m| ([Some(m.key()), None, None, None, None], false, 0),
+            |m| {
+                (
+                    [Some(m.key()), None, None, None, None, None, None],
+                    false,
+                    0,
+                )
+            },
         );
 
         assert_eq!(order.len(), 10_000);
@@ -13076,7 +13481,13 @@ mod tests {
         let (order, batches, blended_start) = render_batch_order(
             &renderables,
             |material| material == glass,
-            |m| ([Some(m.key()), None, None, None, None], false, 0),
+            |m| {
+                (
+                    [Some(m.key()), None, None, None, None, None, None],
+                    false,
+                    0,
+                )
+            },
         );
 
         assert_eq!(blended_start, 2);
@@ -23162,20 +23573,30 @@ mod tests {
                 app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
                     .unwrap();
             }
-            app.world().resource::<RenderWorld>().renderables.clone()
+            let extracted = app.world().resource::<RenderWorld>();
+            (
+                extracted.renderables.clone(),
+                extracted.foliage.clone(),
+                extracted.gpu_force_fields.clone(),
+            )
         };
         let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        let load = |scene: &mut SlabScene, wind| {
+            let world = &mut scene.render_world;
+            (world.renderables, world.foliage, world.gpu_force_fields) =
+                extract(wind);
+            world.renderables_revision += 1;
+        };
         // Pixels are 1/16 m; row 4 is 0.72 m up, near the pillar's top.
         let lit = |pixel: [u8; 3]| pixel.iter().any(|&channel| channel > 40);
-        scene.render_world.renderables = extract(false);
+        load(&mut scene, false);
         assert_eq!(scene.render_world.renderables.len(), 1);
         let upright = [16, 4];
         // 0.5 m lean per metre: the top sits 0.36 m to the right.
         let leaned = [21, 4];
         assert!(lit(render_pixel(&mut scene, upright)), "still air: upright");
         assert!(!lit(render_pixel(&mut scene, leaned)));
-        scene.render_world.renderables = extract(true);
-        scene.render_world.renderables_revision += 1;
+        load(&mut scene, true);
         assert!(lit(render_pixel(&mut scene, leaned)), "wind leans the top");
         assert!(!lit(render_pixel(&mut scene, upright)));
     }
@@ -24872,6 +25293,119 @@ mod tests {
         scene.render_world.renderables_revision += 1;
         let painted = render_pixel(&mut scene, [8, 16]);
         assert!(blue(painted), "coarse level skips column 1: {painted:?}");
+    }
+
+    /// WILDROOT F14: the old 2x2 atlas cropped each layer to 94% of its
+    /// image, so every texture repeat drew a one-pixel seam. A camera at a
+    /// round coordinate looking down an axis put that repeat at the screen
+    /// centre, where it looked fixed to the screen.
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn terrain_layers_repeat_without_a_seam() {
+        use crate::runtime::{
+            Heightfield, RenderExtractPlugin, Terrain, TerrainLayer,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // Smooth random grey: 8 x 8 texels, each about six pixels wide, so
+        // neighbouring pixels differ little except at a seam.
+        let mut seed = 12345_u32;
+        let rgba8 = (0..64)
+            .flat_map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let grey = 40 + (seed >> 24) as u8 / 2;
+                [grey, grey, grey, 255]
+            })
+            .collect();
+        let mut app = crate::App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let mut assets = AssetServer::default();
+        assets
+            .textures
+            .insert_with_path(
+                "noise.png",
+                TextureAsset {
+                    size: [8, 8],
+                    rgba8,
+                    color_space: TextureColorSpace::Srgb,
+                    sampler: TextureSampler::default(),
+                },
+            )
+            .unwrap();
+        app.insert_resource(assets);
+        // A flat 4 x 4 m terrain centred on the camera axis and turned to
+        // face it. The image repeats every metre, so one repeat runs down
+        // the screen centre.
+        app.spawn((
+            crate::Transform {
+                rotation: [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+                ..crate::Transform::default()
+            },
+            Heightfield {
+                heights: vec![vec![0.0; 9]; 9],
+                spacing: 0.5,
+                ..Heightfield::default()
+            },
+            Terrain {
+                layers: vec![TerrainLayer {
+                    texture: "noise.png".into(),
+                    ..TerrainLayer::default()
+                }],
+                tiling: 1.0,
+                lod_distance: 0.0,
+                cast_shadows: false,
+                ..Terrain::default()
+            },
+        ));
+        app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+            .unwrap();
+        let world = app.world_mut();
+        let renderables = world.resource::<RenderWorld>().renderables.clone();
+        let mut scene = SlabScene::with_extent(&[], [128, 96]);
+        (scene.render_world.renderables, scene.assets) =
+            (renderables, world.remove_resource::<AssetServer>().unwrap());
+        let before = scene.now();
+        scene
+            .render(before)
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+        let pixels = scene.pixels();
+        let [width, height] = scene.extent.map(|side| side as usize);
+        // Mean neighbour difference of each column pair over the frame.
+        let differences = (0..width - 1)
+            .map(|x| {
+                (0..height)
+                    .map(|y| {
+                        let at = |x: usize| 4 * (y * width + x);
+                        (0..3)
+                            .map(|channel| {
+                                (f32::from(pixels[at(x) + channel])
+                                    - f32::from(pixels[at(x + 1) + channel]))
+                                .abs()
+                            })
+                            .sum::<f32>()
+                    })
+                    .sum::<f32>()
+                    / height as f32
+            })
+            .collect::<Vec<_>>();
+        let mut sorted = differences.clone();
+        sorted.sort_by(f32::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        assert!(median > 0.0, "the terrain shows its texture");
+        for (x, &difference) in differences.iter().enumerate() {
+            assert!(
+                difference <= 2.0 * median,
+                "column {x}: {difference} against median {median}"
+            );
+        }
     }
 
     #[test]

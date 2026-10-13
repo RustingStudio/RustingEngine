@@ -156,9 +156,15 @@ pub const BENCH_MARKER: &str = "[rusting] bench";
 /// p95, p99 and max (nearest rank). `work` holds each measured frame's CPU
 /// and GPU milliseconds; their medians give `cpu_p50_ms`, `gpu_p50_ms` and
 /// `bound`, the side that limits the frame (`null` without GPU times).
+/// `passes` holds each measured frame's GPU milliseconds per pass, keyed
+/// like `Shadow` or `Scene.terrain`; their medians go into `passes_p50_ms`.
 /// Sorts `lengths`.
 #[must_use]
-pub fn bench_line(lengths: &mut [f64], work: &[[f64; 2]]) -> String {
+pub fn bench_line(
+    lengths: &mut [f64],
+    work: &[[f64; 2]],
+    passes: &[std::collections::BTreeMap<String, f64>],
+) -> String {
     fn rank(sorted: &[f64], p: f64) -> f64 {
         let index = (p * sorted.len() as f64).ceil() as usize;
         sorted.get(index.saturating_sub(1)).copied().unwrap_or(0.0)
@@ -171,6 +177,21 @@ pub fn bench_line(lengths: &mut [f64], work: &[[f64; 2]]) -> String {
         times.sort_by(f64::total_cmp);
         rank(&times, 0.5)
     });
+    // A frame without a pass counts as 0 ms for it.
+    let mut by_pass = std::collections::BTreeMap::<&str, Vec<f64>>::new();
+    for frame in passes {
+        for (pass, ms) in frame {
+            by_pass.entry(pass).or_default().push(*ms);
+        }
+    }
+    let passes_p50: serde_json::Map<String, serde_json::Value> = by_pass
+        .into_iter()
+        .map(|(pass, mut times)| {
+            times.resize(passes.len(), 0.0);
+            times.sort_by(f64::total_cmp);
+            (pass.to_owned(), rank(&times, 0.5).into())
+        })
+        .collect();
     // No timestamp queries means no GPU times, not an idle GPU.
     let bound = (gpu > 0.0).then_some(if gpu > cpu { "gpu" } else { "cpu" });
     let summary = serde_json::json!({
@@ -183,6 +204,7 @@ pub fn bench_line(lengths: &mut [f64], work: &[[f64; 2]]) -> String {
         "cpu_p50_ms": cpu,
         "gpu_p50_ms": gpu,
         "bound": bound,
+        "passes_p50_ms": passes_p50,
     });
     format!("{BENCH_MARKER} {summary}")
 }
@@ -3262,7 +3284,18 @@ mod tests {
     fn a_bench_line_round_trips_its_frame_times() {
         let mut lengths: Vec<f64> = (1..=100).rev().map(f64::from).collect();
         let work: Vec<_> = (0..100).map(|i| [3.0, f64::from(i % 7)]).collect();
-        let line = bench_line(&mut lengths, &work);
+        let passes: Vec<_> = (0..100)
+            .map(|i| {
+                let mut frame = std::collections::BTreeMap::new();
+                frame.insert("Shadow".to_owned(), 2.0);
+                // Terrain shows in only 40 of 100 frames: its median is 0.
+                if i % 5 < 2 {
+                    frame.insert("Scene.terrain".to_owned(), 1.0);
+                }
+                frame
+            })
+            .collect();
+        let line = bench_line(&mut lengths, &work, &passes);
         assert!(line.starts_with(BENCH_MARKER), "{line}");
         let summary = bench_result(&format!("noise\n{line}\nmore")).unwrap();
         assert_eq!(summary["frames"], 100);
@@ -3271,15 +3304,17 @@ mod tests {
         assert_eq!(summary["p95_ms"], 95.0);
         assert_eq!(summary["p99_ms"], 99.0);
         assert_eq!(summary["max_ms"], 100.0);
+        assert_eq!(summary["passes_p50_ms"]["Shadow"], 2.0);
+        assert_eq!(summary["passes_p50_ms"]["Scene.terrain"], 0.0);
         // The GPU median (3) is not above the CPU median (3).
         assert_eq!(summary["gpu_p50_ms"], 3.0);
         assert_eq!(summary["bound"], "cpu");
         let gpu_heavy = [[2.0, 9.0], [2.5, 8.0], [3.0, 10.0]];
-        let line = bench_line(&mut [10.0, 11.0, 12.0], &gpu_heavy);
+        let line = bench_line(&mut [10.0, 11.0, 12.0], &gpu_heavy, &[]);
         let summary = bench_result(&line).unwrap();
         assert_eq!(summary["bound"], "gpu");
         assert_eq!(summary["cpu_p50_ms"], 2.5);
-        let untimed = bench_line(&mut [10.0], &[[4.0, 0.0]]);
+        let untimed = bench_line(&mut [10.0], &[[4.0, 0.0]], &[]);
         assert!(bench_result(&untimed).unwrap()["bound"].is_null());
         assert!(bench_result("no bench here").is_none());
     }

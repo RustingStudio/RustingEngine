@@ -8801,3 +8801,45 @@ fn a_slide_sound_picks_its_clip_by_the_floor_material_under_it() {
     assert_eq!(playing, 0);
     assert!(app.world().resource::<AudioQueue>().playing().is_empty());
 }
+
+/// One ball on a 1501 x 1501 heightfield (4.5M triangles, WILDROOT F10):
+/// a step must test only the cells under the ball, not every triangle.
+#[test]
+#[ignore = "timing: run on a quiet machine with --release -- --ignored --nocapture"]
+fn large_heightfield_step_tests_only_cells_under_the_body() {
+    let mut app = App::new();
+    let world = app.world_mut();
+    let ground = cpu_body(
+        world,
+        [0.0; 3],
+        ColliderShape::Heightfield,
+        RigidBodyKind::Fixed,
+    );
+    let heights = (0..1501)
+        .map(|row| {
+            (0..1501)
+                .map(|column| ((row * 7 + column * 13) % 17) as f32 * 0.05)
+                .collect()
+        })
+        .collect();
+    world.entity_mut(ground).insert(Heightfield {
+        heights,
+        spacing: 2.0,
+        ..Heightfield::default()
+    });
+    let ball = cpu_body(
+        world,
+        [10.0, 3.0, -20.0],
+        ColliderShape::Sphere { radius: 0.5 },
+        RigidBodyKind::Dynamic,
+    );
+    // The first steps build the collision grid once.
+    run_fixed_steps(&mut app, 2);
+    let start = std::time::Instant::now();
+    run_fixed_steps(&mut app, 60);
+    let per_tick = start.elapsed().as_secs_f64() * 1e3 / 60.0;
+    println!("1501 x 1501 heightfield: {per_tick:.3} ms per tick");
+    let rest = app.world().get::<Transform>(ball).unwrap().position;
+    assert!(rest[1] > 0.0 && rest[1] < 1.5, "{rest:?}");
+    assert!(per_tick < 1.0, "{per_tick:.3} ms per tick");
+}

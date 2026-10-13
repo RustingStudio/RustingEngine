@@ -4973,7 +4973,13 @@ struct ProjectApplication {
 
 /// A bench run's frames still to skip, frames to measure, frame lengths in
 /// milliseconds, and each measured frame's CPU and GPU milliseconds.
-type BenchRun = (u32, usize, Vec<f64>, Vec<[f64; 2]>);
+type BenchRun = (
+    u32,
+    usize,
+    Vec<f64>,
+    Vec<[f64; 2]>,
+    Vec<std::collections::BTreeMap<String, f64>>,
+);
 
 /// Environment variable that makes a running game print, once a second, its
 /// frame rate, frame-time percentiles and where the frame time goes.
@@ -5019,7 +5025,7 @@ impl ProjectApplication {
                 .and_then(|frames| frames.parse().ok())
                 .map(|frames: usize| {
                     let warmup = crate::project::BENCH_WARMUP_FRAMES;
-                    (warmup, frames.max(1), Vec::new(), Vec::new())
+                    (warmup, frames.max(1), Vec::new(), Vec::new(), Vec::new())
                 }),
         }
     }
@@ -5085,7 +5091,7 @@ impl ProjectApplication {
     /// recording, not waits on the GPU) and the newest GPU pass time to a
     /// bench run past its warm-up.
     fn record_bench_work(&mut self, update: std::time::Duration) {
-        let Some((0, _, _, work)) = &mut self.bench else {
+        let Some((0, _, _, work, passes)) = &mut self.bench else {
             return;
         };
         let Some(renderer) = self.window.scene_renderer.as_mut() else {
@@ -5099,6 +5105,7 @@ impl ProjectApplication {
         let cpu = update + cpu.extraction + cpu.preparation + cpu.recording;
         let gpu = renderer.gpu_pass_times().total();
         work.push([cpu, gpu].map(|time| time.as_secs_f64() * 1000.0));
+        passes.push(renderer.gpu_pass_breakdown());
     }
 
     /// F3: starts or stops the once-a-second perf line and its overlay.
@@ -5332,7 +5339,9 @@ impl ApplicationHandler for ProjectApplication {
                 let now = Instant::now();
                 let delta = now.saturating_duration_since(self.previous_frame);
                 self.previous_frame = now;
-                if let Some((warmup, frames, lengths, work)) = &mut self.bench {
+                if let Some((warmup, frames, lengths, work, passes)) =
+                    &mut self.bench
+                {
                     match warmup.checked_sub(1) {
                         Some(left) => *warmup = left,
                         None => lengths.push(delta.as_secs_f64() * 1000.0),
@@ -5340,7 +5349,7 @@ impl ApplicationHandler for ProjectApplication {
                     if lengths.len() >= *frames {
                         eprintln!(
                             "{}",
-                            crate::project::bench_line(lengths, work)
+                            crate::project::bench_line(lengths, work, passes)
                         );
                         event_loop.exit();
                         return;

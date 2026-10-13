@@ -61,12 +61,9 @@ pub(super) struct CollabState {
     /// Leave was pressed; the next tick ends the session.
     leave: bool,
     session: Option<Session>,
-    /// Project folders an ended session left with code from others that
-    /// the user did not trust; their builds still ask.
-    untrusted: HashSet<PathBuf>,
-    /// A build waiting for the trust prompt's answer, with the untrusted
-    /// folder it builds when no session is open.
-    pending_build: Option<(Option<PathBuf>, BuildRequest)>,
+    /// A build waiting for the trust prompt's answer, with its project
+    /// folder.
+    pending_build: Option<(PathBuf, BuildRequest)>,
 }
 
 impl Default for CollabState {
@@ -86,7 +83,6 @@ impl Default for CollabState {
             status: None,
             leave: false,
             session: None,
-            untrusted: HashSet::new(),
             pending_build: None,
         }
     }
@@ -194,12 +190,10 @@ pub(super) fn collab_tick(
 ) -> Option<PathBuf> {
     let mut collab = world.remove_resource::<CollabState>()?;
     let mut open = None;
-    let mut ended = None;
     if std::mem::take(&mut collab.leave) {
         if let Some(mut session) = collab.session.take() {
             flush(world, &mut session);
             collab.status = Some("Left the session".into());
-            ended = Some(session);
         }
     }
     if let Some(session) = &mut collab.session {
@@ -211,12 +205,9 @@ pub(super) fn collab_tick(
                     flush(world, session);
                 }
                 collab.status = Some(reason);
-                ended = collab.session.take();
+                collab.session = None;
             }
         }
-    }
-    if let Some(session) = ended.filter(|s| s.foreign_code && !s.trusted) {
-        collab.untrusted.insert(session.root.clone());
     }
     world.insert_resource(collab);
     open
@@ -639,8 +630,22 @@ pub(super) fn remote_selection(
     marks
 }
 
+/// Marks a project folder that holds code from other peers the user has
+/// not trusted. It outlives the session and the editor; peers cannot write
+/// or delete it, as [`files::shareable`] refuses names starting with `.`.
+const UNTRUSTED: &str = ".rusting-untrusted";
+
+fn mark_untrusted(root: &Path) -> Result<(), String> {
+    std::fs::write(
+        root.join(UNTRUSTED),
+        "Code from a collaboration session. The editor asks before it \
+         builds this project.\n",
+    )
+    .map_err(|e| format!("could not mark shared code untrusted: {e}"))
+}
+
 /// Lets `request` run unless it would build code other peers sent that
-/// the user has not trusted, in this session or one that ended in the
+/// the user has not trusted, in this session or an earlier one in the
 /// project at `project_root`; then it waits for the prompt.
 pub(super) fn gate_build(
     world: &mut World,
@@ -648,19 +653,16 @@ pub(super) fn gate_build(
     request: BuildRequest,
 ) -> Option<BuildRequest> {
     let mut collab = world.resource_mut::<CollabState>();
-    let ended = Path::new(project_root)
-        .canonicalize()
-        .ok()
-        .filter(|root| collab.untrusted.contains(root));
+    let root = PathBuf::from(project_root);
     let untrusted = match &collab.session {
-        Some(s) => s.foreign_code && !s.trusted,
-        None => ended.is_some(),
+        Some(s) if s.trusted => false,
+        Some(s) if s.foreign_code => true,
+        _ => !project_root.is_empty() && root.join(UNTRUSTED).exists(),
     };
     if !untrusted {
         return Some(request);
     }
-    collab.pending_build =
-        Some((ended.filter(|_| collab.session.is_none()), request));
+    collab.pending_build = Some((root, request));
     None
 }
 
@@ -703,17 +705,15 @@ pub(super) fn draw_trust_prompt(
         },
     );
     let answer = answer?;
-    let (ended, request) = collab.pending_build.take()?;
+    let (root, request) = collab.pending_build.take()?;
     if !answer {
         return None;
     }
-    match (collab.session.as_mut(), ended) {
-        (Some(s), _) => s.trusted = true,
-        (None, Some(root)) => {
-            collab.untrusted.remove(&root);
-        }
-        (None, None) => {}
+    if let Some(s) = collab.session.as_mut() {
+        s.trusted = true;
     }
+    // ponytail: a marker that fails to go only asks again next time.
+    let _ = std::fs::remove_file(root.join(UNTRUSTED));
     Some(request)
 }
 
@@ -972,6 +972,12 @@ fn receive_file(
     if files::is_scene(path) && s.root.join(path).exists() {
         return false;
     }
+    if !s.trusted {
+        if let Err(error) = mark_untrusted(&s.root) {
+            log(world, ConsoleLevel::Error, error);
+            return false;
+        }
+    }
     if let Err(error) = collab::write_received(&s.root, path, bytes, false) {
         log(world, ConsoleLevel::Warning, error);
         return false;
@@ -1111,6 +1117,7 @@ fn start_join(
     // The mirror is a cache: an earlier session's files would linger.
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    mark_untrusted(&root)?;
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let net = match collab.link {
         Link::Direct => NetSession::join(collab.address.trim(), ""),

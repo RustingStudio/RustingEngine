@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- `rusting run --bench --json` reports `passes_p50_ms`, and `rusting test --json` reports `perf.render.passes_ms`: GPU milliseconds per pass, per shadow cascade, and per opaque, terrain, foliage and sky part of the scene pass. The plain `bench:` output names the three costliest passes (WILDROOT F15).
+- `rusting.terrain` layers take optional `normal` (OpenGL-style normal map), `roughness` (red channel) and `tiling` (metres per repeat; 0 uses the terrain's) fields. Layers without them look as before (WILDROOT F3).
+- `rusting lint` warns `LINT_TERRAIN_CHUNKS` when a terrain draws more than 300 chunks (WILDROOT F11).
+
+### Changed
+
+- Terrain layers are kept in a mipmapped texture array at full size up to 2048 px (was a 2x2 atlas of tiles cut to 512 px) and sampled with anisotropic filtering, so distant terrain shows no grid lines or moiré at layer repeats (WILDROOT F5, F6).
+
+### Fixed
+
+- Terrain: the one-pixel vertical seam at the screen centre is gone. The atlas cropped each layer to 94% of its image, so every texture repeat drew a seam, and a camera at a round coordinate looking down an axis put one at the screen centre (WILDROOT F14).
+- Terrain: layer `texture`, `normal` and `roughness` paths are relative to the scene file, like every other scene asset path. Paths relative to the project root still load, with a deprecation warning. `rusting lint` and `validate` report a missing layer image (`SCENE_MISSING_ASSET`) and a project-root path (`SCENE_TERRAIN_ROOT_PATH`), and a run logs once per path when a layer image fails to load instead of painting it white silently (WILDROOT F4).
+
+### Performance
+
+- Foliage: wind lean of `rusting.foliage` copies runs in the scene and shadow vertex shaders instead of on the CPU, so a wind field no longer re-uploads every copy's transform each frame. `Custom` force fields no longer lean foliage (WILDROOT F13).
+- Shadows: each cascade draws only the casters inside it, at the finest LOD level any of them shows on screen, instead of every caster at full detail. WILDROOT's densest forest went from 13.2 ms to 2.4 ms of shadow GPU time, and from 25.8 ms to 17.1 ms per frame (WILDROOT F15).
+- Terrain: `rusting.terrain` `chunk_cells` 0, the new default, picks the chunk size from the heightfield so a terrain makes at most about 150 chunks (a 1501 x 1501 island draws 144 instead of 2,209); an explicit size still wins (WILDROOT F11).
+- CPU physics: `TriangleMesh` and `Heightfield` colliders test only the triangles under the other body's bounds through the mesh's box tree; one ball on a 1501 x 1501 heightfield steps in 0.05 ms instead of 40 ms (WILDROOT F10).
+
 ## [2.5.0] - 2026-10-12
 
 Concave dynamic colliders, terrain destruction and debris budgets, decals and physics-driven particles, 2D rendering in the scene, world-space text, golden-image tests, packed asset archives, mods, and procedural generation. Needs `rusting-core` 0.2.1.

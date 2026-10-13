@@ -533,6 +533,7 @@ impl HeadlessCapture {
             "gpu_ms_p50": rank(0.5),
             "gpu_ms_p95": rank(0.95),
             "gpu_ms_max": rank(1.0),
+            "passes_ms": self.renderer.gpu_pass_breakdown(),
             "cameras": cameras,
             "device": properties.device_name,
             "driver": properties.driver_info,

@@ -3754,21 +3754,34 @@ fn boxes(
     Some((normal, depth, point))
 }
 
-/// `other` against each triangle of a static mesh `body`; the deepest
-/// triangle contact wins. The normal points from `other` to the mesh.
-// ponytail: every triangle is tested against a bounding sphere; add a BVH
-// when meshes get large.
+/// `other` against the triangles of a static mesh `body` near it; the
+/// deepest triangle contact wins. The normal points from `other` to the
+/// mesh. The mesh's box tree picks the triangles within `other`'s reach,
+/// so a large heightfield costs only the cells under the body.
 fn triangles(
     other: &Body,
     body: &Body,
     mesh: &MeshData,
 ) -> Option<(Hit, Option<u8>)> {
     let reach = other.bounding_radius();
-    let (hit, index) = mesh
-        .triangles
-        .iter()
-        .map(|triangle| triangle.map(|v| body.position + body.rotation * v))
-        .enumerate()
+    let local = body.rotation.inverse() * (other.position - body.position);
+    let mut near = Vec::new();
+    mesh.ray_tree.overlapping(
+        local - Vector3::repeat(reach),
+        local + Vector3::repeat(reach),
+        |item| near.push(item),
+    );
+    // Ascending order, so ties pick the same triangle as a full scan.
+    near.sort_unstable();
+    let (hit, index) = near
+        .into_iter()
+        .map(|index| {
+            let triangle = mesh.triangles[index as usize];
+            (
+                index as usize,
+                triangle.map(|v| body.position + body.rotation * v),
+            )
+        })
         .filter(|(_, [a, b, c])| {
             let center = (a + b + c) / 3.0;
             let radius = [a, b, c]
@@ -4242,6 +4255,35 @@ impl RayTree {
         };
         self.build(child, start, middle, bounds);
         self.build(child + 1, middle, end, bounds);
+    }
+
+    /// Calls `visit` with each item whose box overlaps `[min, max]`.
+    fn overlapping(
+        &self,
+        min: Vector3<f32>,
+        max: Vector3<f32>,
+        mut visit: impl FnMut(u32),
+    ) {
+        let mut stack = Vec::with_capacity(64);
+        if !self.nodes.is_empty() {
+            stack.push(0);
+        }
+        while let Some(index) = stack.pop() {
+            let node = self.nodes[index];
+            if (0..3).any(|axis| {
+                node.min[axis] > max[axis] || node.max[axis] < min[axis]
+            }) {
+                continue;
+            }
+            let first = node.first as usize;
+            if node.count == 0 {
+                stack.extend([first + 1, first]);
+                continue;
+            }
+            self.items[first..first + node.count as usize]
+                .iter()
+                .for_each(|&item| visit(item));
+        }
     }
 
     /// The nearest hit within `max_distance` that `test` reports for an

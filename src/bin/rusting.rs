@@ -926,6 +926,25 @@ fn render_human(result: &CliResult) -> String {
                     ms("gpu_p50_ms")
                 ));
             }
+            if let Some(passes) = bench["passes_p50_ms"].as_object() {
+                let mut top: Vec<_> = passes
+                    .iter()
+                    .filter(|(pass, _)| !pass.contains('.'))
+                    .filter_map(|(pass, ms)| Some((pass, ms.as_f64()?)))
+                    .collect();
+                top.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let top: Vec<_> = top
+                    .iter()
+                    .take(3)
+                    .map(|(pass, ms)| format!("{pass} {ms:.2}"))
+                    .collect();
+                if !top.is_empty() {
+                    lines.push(format!(
+                        "top GPU passes (p50 ms): {}",
+                        top.join(", ")
+                    ));
+                }
+            }
         }
         if let Some(root) = data.get("root").and_then(|v| v.as_str()) {
             lines.push(format!("Project: {root}"));

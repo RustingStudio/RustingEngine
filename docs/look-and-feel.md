@@ -463,8 +463,16 @@ builds and uploads), measures the next 1000, closes itself, and reports
 `timings.bench` with `frames`, `mean_ms`, `p50_ms`, `p95_ms`, `p99_ms` and
 `max_ms`. It also gives `cpu_p50_ms` (update plus extraction, preparation
 and recording, without waits on the GPU), `gpu_p50_ms` (GPU pass time) and
-`bound`: `"cpu"` or `"gpu"`, whichever median is larger. Without `--json` it
-prints one `bench:` line. Check `bound` before cutting cost: fewer triangles,
+`bound`: `"cpu"` or `"gpu"`, whichever median is larger.
+`passes_p50_ms` splits the GPU time by pass: `Shadow`, `DepthPrepass`,
+`Scene`, `Bloom`, `ToneMap` and the others, plus parts of a pass:
+`Shadow.cascade0` to `Shadow.cascade3`, and `Scene.opaque`,
+`Scene.terrain`, `Scene.foliage` and `Scene.sky`. `Scene.sky` includes sky
+fog and fog volumes. Fog on objects is shaded with them and counts toward
+their part. Post-processing is the `Bloom`, `Exposure` and `ToneMap`
+passes. Part times are approximate, because the GPU overlaps work around
+the marks. Without `--json` it prints one `bench:` line and the three
+costliest passes. Check `bound` before cutting cost: fewer triangles,
 mesh LOD and smaller shadow maps only help a `"gpu"` frame. A `"cpu"` frame
 needs fewer objects, fewer distinct meshes and materials, or less game code
 per frame. An opaque object in a `.rlod` group stays one instance: its batch
@@ -476,12 +484,32 @@ Without a window, `rusting test` gives GPU frame times. A scenario with
 `"gpu": true` and `"capture_size": [1920, 1080]` draws one offscreen frame
 per tick and reports `perf.render.gpu_ms_p50`, `gpu_ms_p95` and
 `gpu_ms_max` over those frames (`gpu_frames` counts them). These are GPU
-pass times only, without present or CPU work.
+pass times only, without present or CPU work. `perf.render.passes_ms`
+splits the last frame's GPU time by pass and part, with the same keys as
+`passes_p50_ms` above.
 
 `capture_size` is the render size (resolution) of every headless frame,
 captures and `perf.render` included: `[1920, 1080]` for 1080p, `[2560,
 1440]` for 1440p. It defaults to `[1280, 720]`. Windowed runs use the
 window's size.
+
+## Terrain layers
+
+A `rusting.terrain` paints up to four layers. Each layer keeps its image at
+full size up to 2048 px, with mipmaps and anisotropic filtering, so a 1K or
+2K ground texture stays sharp near the camera and calm in the distance.
+Make layer images seamless: they repeat every `tiling` metres.
+
+```json
+{"texture": "textures/grass.png", "color": [1, 1, 1], "tiling": 3.0,
+ "normal": "textures/grass_normal.png", "roughness": "textures/grass_rough.png"}
+```
+
+- `tiling` on a layer overrides the terrain's `tiling` for that layer only,
+  so rock can repeat every 8 m while grass repeats every 3 m.
+- `normal` is an OpenGL-style normal map (green up). `roughness` reads the
+  red channel. A layer without them stays flat at roughness 0.9.
+- Layer images of different sizes are scaled to the largest one.
 
 ## Free models
 

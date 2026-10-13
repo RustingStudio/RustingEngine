@@ -12,7 +12,10 @@ struct BodyShape {
     vec4 material;
     uvec4 layers;
 };
+// Scene vertex shaders define NO_BODY_SHAPES: they read only force fields.
+#ifndef NO_BODY_SHAPES
 layout(set = 0, binding = 6) readonly buffer BodyShapes { BodyShape data[]; } body_shapes;
+#endif
 // How far a shape reaches from its center along world direction `n`.
 float support(vec4 shape, mat3 rotation, vec3 n) {
     vec3 local = sim_mul_transposed(rotation, n);

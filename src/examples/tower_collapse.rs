@@ -12,8 +12,7 @@
 //! the tower comes down on its own. The GPU solver never rotates bodies, so
 //! the columns do not tip over; they pour out at the base and spread across
 //! the floor. The camera rises at the end to show the whole debris field. It
-//! follows game time and the centre of the pile, which creeps sideways as it
-//! settles, so a replay films the same shot.
+//! follows game time, so a replay films the same shot.
 
 use rusting_engine::prelude::*;
 use rusting_engine::runtime::{Collider, DirectionalLight, RigidBodyKind};
@@ -25,10 +24,7 @@ const GAP: f32 = 0.02;
 const BLAST_AT: f32 = 2.5;
 /// Layers below this height (metres) get the kick.
 const BLAST_HEIGHT: f32 = 6.0;
-const BLAST_SPEED: f32 = 10.0;
-/// Every `TRACK_EVERY`th cube reports its position, so the camera can follow
-/// the pile: the GPU contact pass lets a big heap creep sideways.
-const TRACK_EVERY: usize = 250;
+const BLAST_SPEED: f32 = 14.0;
 const CHARGE: &str = r#"
 void condition(inout PhysicsState body) {
     vec4 blast = condition_params.values[0]; // x time, y height, z speed
@@ -114,7 +110,6 @@ fn create(scene: &mut GameScene<'_>) {
         })
     });
     let shape = CubeSpawn::new().class("tower_cube");
-    let tracker = CubeSpawn::new().class("tower_tracker");
     let pitch = 1.0 + GAP;
     let centre = (SIDE - 1) as f32 / 2.0;
     for layer in 0..LAYERS {
@@ -122,32 +117,22 @@ fn create(scene: &mut GameScene<'_>) {
         for cell in 0..SIDE * SIDE {
             let x = ((cell % SIDE) as f32 - centre) * pitch;
             let z = ((cell / SIDE) as f32 - centre) * pitch;
-            let index = layer * SIDE * SIDE + cell;
             scene.spawn_cube_with_material(
-                format!("Cube {index}"),
+                format!("Cube {}", layer * SIDE * SIDE + cell),
                 Transform::new([x, 0.5 + layer as f32, z]),
-                if index.is_multiple_of(TRACK_EVERY) {
-                    &tracker
-                } else {
-                    &shape
-                },
+                &shape,
                 material,
             );
         }
     }
-    let cubes = GpuBodySettings {
-        solver: PhysicsSolver::Full,
-        collider: rough(),
-        ..GpuBodySettings::default()
-    };
     scene.apply_gpu_physics_to_class(
-        "tower_tracker",
+        "tower_cube",
         &GpuBodySettings {
-            sync: PhysicsSyncMode::SelectedState,
-            ..cubes.clone()
+            solver: PhysicsSolver::Full,
+            collider: rough(),
+            ..GpuBodySettings::default()
         },
     );
-    scene.apply_gpu_physics_to_class("tower_cube", &cubes);
     println!("tower of {} cubes", SIDE * SIDE * LAYERS);
 }
 
@@ -159,29 +144,6 @@ fn update(scene: &mut GameScene<'_>, time: &FrameTime) {
         params: vec![[BLAST_AT, BLAST_HEIGHT, BLAST_SPEED, 0.0]],
         events_per_body: 1,
     }]);
-
-    // Ground-plane centre of the tracked cubes, eased so a straggler does
-    // not jerk the shot.
-    let mut sum = [0.0_f32; 2];
-    let mut count = 0.0_f32;
-    for index in (0..SIDE * SIDE * LAYERS).step_by(TRACK_EVERY) {
-        if let Some(state) = scene.gpu_state(&format!("Cube {index}")) {
-            sum[0] += state.transform.position[0];
-            sum[1] += state.transform.position[2];
-            count += 1.0;
-        }
-    }
-    let focus = FOCUS.with(|focus| {
-        let mut current = focus.get();
-        if count > 0.0 {
-            let ease = (2.0 * time.delta_seconds()).min(1.0);
-            for axis in 0..2 {
-                current[axis] += (sum[axis] / count - current[axis]) * ease;
-            }
-            focus.set(current);
-        }
-        current
-    });
 
     // A slow turn around the tower. As it comes down the camera aims lower,
     // then rises and pulls back to look down on the debris field.
@@ -197,19 +159,11 @@ fn update(scene: &mut GameScene<'_>, time: &FrameTime) {
     let angle = 0.7 + 0.04 * t;
     let height = 55.0 - 15.0 * fall + 110.0 * rise;
     let aim = 38.0 - 32.0 * fall - 6.0 * rise;
-    let position = [
-        focus[0] + distance * angle.cos(),
-        height,
-        focus[1] + distance * angle.sin(),
-    ];
+    let position = [distance * angle.cos(), height, distance * angle.sin()];
     scene
         .object("Game Camera")
         .set_position(position)
-        .look_at([focus[0], aim, focus[1]]);
-}
-
-thread_local! {
-    static FOCUS: std::cell::Cell<[f32; 2]> = const { std::cell::Cell::new([0.0; 2]) };
+        .look_at([0.0, aim, 0.0]);
 }
 
 rusting_game!("testGame/build/main.rscene.bin", update);

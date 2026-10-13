@@ -8,12 +8,18 @@ layout(location = 5) in vec4 v_tangent;
 layout(location = 6) flat in vec4 v_emissive;
 layout(location = 7) flat in vec4 v_surface;
 layout(location = 8) flat in vec4 v_transmission;
+// Repeats of each terrain layer per unit of v_uv.
+layout(location = 9) flat in vec4 v_splat_scale;
 layout(location = 0) out vec4 f_color;
 layout(set = 1, binding = 0) uniform sampler2D base_color_texture;
 layout(set = 1, binding = 1) uniform sampler2D normal_texture;
 layout(set = 1, binding = 2) uniform sampler2D metallic_roughness_texture;
 layout(set = 1, binding = 3) uniform sampler2D occlusion_texture;
 layout(set = 1, binding = 4) uniform sampler2D emissive_texture;
+// Terrain layers: base color, and normal (rgb) with roughness (alpha), one
+// array layer each. Bound for splat materials only.
+layout(set = 1, binding = 5) uniform sampler2DArray terrain_colors;
+layout(set = 1, binding = 6) uniform sampler2DArray terrain_normals;
 const float PI = 3.14159265;
 layout(push_constant) uniform Camera {
     mat4 view_projection;
@@ -419,21 +425,33 @@ float shadow_factor(vec3 surface_normal) {
 }
 void main() {
     vec4 base_color = v_color * texture(base_color_texture, v_uv);
+    // Terrain normal (rgb) and roughness (alpha), blended like the colors.
+    vec4 terrain_bump = vec4(0.5, 0.5, 1.0, 1.0);
     if (v_transmission.w > 0.5) {
-        // Terrain: blend the 2x2 layer atlas by the vertex color's weights.
-        // Each layer repeats inside its quadrant, inset so filtering does
-        // not bleed in its neighbors; gradients of the unwrapped uv keep
-        // the seam at each repeat from picking the smallest mip.
+        // Terrain: blend the layer arrays by the vertex color's weights.
+        // Each layer repeats with the sampler's wrap, so mips and
+        // anisotropic filtering stay seamless; gradients are taken here,
+        // outside the branch on the weight.
         vec4 weights = max(v_color, vec4(0.0));
         weights /= max(dot(weights, vec4(1.0)), 1e-4);
-        vec2 cell = 0.5 * (0.03 + 0.94 * fract(v_uv));
-        vec2 dx = 0.47 * dFdx(v_uv);
-        vec2 dy = 0.47 * dFdy(v_uv);
+        vec2 dx = dFdx(v_uv);
+        vec2 dy = dFdy(v_uv);
         base_color = vec4(0.0);
+        if (v_surface.z > 0.5) {
+            terrain_bump = vec4(0.0);
+        }
         for (int layer = 0; layer < 4; ++layer) {
-            vec2 corner = 0.5 * vec2(layer % 2, layer / 2);
+            if (weights[layer] <= 0.0) {
+                continue;
+            }
+            float scale = v_splat_scale[layer];
+            vec3 at = vec3(v_uv * scale, float(layer));
             base_color += weights[layer]
-                * textureGrad(base_color_texture, corner + cell, dx, dy);
+                * textureGrad(terrain_colors, at, dx * scale, dy * scale);
+            if (v_surface.z > 0.5) {
+                terrain_bump += weights[layer]
+                    * textureGrad(terrain_normals, at, dx * scale, dy * scale);
+            }
         }
         base_color.a = 1.0;
     }
@@ -454,7 +472,8 @@ void main() {
             v_tangent.xyz - normal * dot(normal, v_tangent.xyz)
         );
         vec3 bitangent = cross(normal, tangent) * v_tangent.w;
-        vec3 sampled = texture(normal_texture, v_uv).xyz * 2.0 - 1.0;
+        vec3 sampled = (v_transmission.w > 0.5
+            ? terrain_bump.xyz : texture(normal_texture, v_uv).xyz) * 2.0 - 1.0;
         normal = normalize(mat3(tangent, bitangent, normal) * sampled);
     }
     vec3 view_dir = camera.eye.w > 0.5
@@ -463,7 +482,7 @@ void main() {
     // glTF packs roughness in green and metallic in blue.
     vec4 packed = texture(metallic_roughness_texture, v_uv);
     Surface s = Surface(base_color, normal, v_surface.x * packed.b,
-        v_surface.y * packed.g,
+        v_surface.y * packed.g * terrain_bump.a,
         v_emissive.rgb * texture(emissive_texture, v_uv).rgb);
     // camera.ambient.w carries the time.
     surface(SurfaceInput(v_uv, v_world_position, view_dir, v_color,

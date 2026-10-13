@@ -379,6 +379,12 @@ pub const CODES: &[CodeInfo] = &[
         "rusting lint --json",
     ),
     code(
+        "LINT_TERRAIN_CHUNKS",
+        "A `rusting.terrain` draws more than 300 chunks. Each chunk is one draw per view and per shadow cascade, so a large heightfield with small chunks makes the frame CPU-bound.",
+        "Set `chunk_cells` to 0 so the engine picks the chunk size from the heightfield size (at most about 150 chunks), or raise it.",
+        "rusting lint --json",
+    ),
+    code(
         "LINT_TEXT_CONTRAST",
         "HUD button text has a WCAG contrast ratio against the dark button fill below 4.5:1 (3:1 from 24 px), so it is hard to read. Plain HUD text is not judged: the scene behind it is only known from a rendered frame.",
         "Use light text on buttons (the default white gives about 11:1), or raise the color's alpha to 1.",
@@ -623,6 +629,12 @@ pub const CODES: &[CodeInfo] = &[
         "The scene has a duplicate ID, a duplicate unique name, a missing parent, or a parent cycle.",
         "Patch the entity the message names; `reparent` and `set` on /name fix most cases.",
         "{\"operations\": [{\"op\": \"reparent\", \"id\": \"Lamp\", \"parent\": null}]}",
+    ),
+    code(
+        "SCENE_TERRAIN_ROOT_PATH",
+        "A terrain layer image path is relative to the project root. It still loads, but this is deprecated: scene asset paths are relative to the scene file.",
+        "Patch the layer path to be relative to the scene file, such as `../assets/textures/grass.png`.",
+        "rusting lint --json",
     ),
     code(
         "SCENE_UNKNOWN_FIELD",

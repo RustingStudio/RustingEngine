@@ -58,8 +58,9 @@ A guest's copy of the project holds code the host sent. A host's project
 can hold code a guest sent. Building or running that code can do anything
 your user account can do. The first time you press Play, Build or Check
 with such code, the editor asks you to confirm. It asks once per session.
-If you leave without trusting, it still asks in that folder until you
-trust it or restart the editor.
+The editor marks such a folder with a `.rusting-untrusted` file. It keeps
+asking in that folder, after the session and after a restart, until you
+trust it.
 Press **Trust and Run** only if you trust everyone in the session.
 
 ## Security
@@ -73,7 +74,13 @@ invite, over a channel you trust. Received file paths are checked: a peer
 cannot write outside the project folder, into build output (`target`,
 `build`), or into any file or folder whose name starts with `.`, such as
 `.git` hooks or `.cargo` config, which could run code without the trust
-prompt. Those files are not synced.
+prompt. `rust-toolchain` files, Windows short names (`GIT~1`) and paths
+not in plain `folder/file` form are refused too. Those files are not
+synced.
+
+The trust prompt guards the editor only. Another tool that builds the
+project, such as `cargo` in a terminal or rust-analyzer in your code
+editor, runs `build.rs` and macros from shared code without asking.
 
 ## Limits
 

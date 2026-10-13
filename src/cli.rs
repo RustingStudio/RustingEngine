@@ -669,6 +669,7 @@ pub fn inspect_project(root: &Path) -> CliResult {
 
 fn scene_warnings(path: &Path, document: &SceneDocument) -> Vec<Diagnostic> {
     let mut diagnostics = missing_asset_diagnostics(path, document);
+    diagnostics.extend(terrain_layer_diagnostics(path, document));
     diagnostics.extend(bodiless_collider_diagnostics(document));
     diagnostics
 }
@@ -735,6 +736,60 @@ fn missing_asset_diagnostics(
             })
         })
         .collect()
+}
+
+/// A `SCENE_MISSING_ASSET` per terrain layer image that does not exist, and
+/// a `SCENE_TERRAIN_ROOT_PATH` per one found only relative to the project
+/// root instead of the scene file.
+fn terrain_layer_diagnostics(
+    path: &Path,
+    document: &SceneDocument,
+) -> Vec<Diagnostic> {
+    let base = path.parent().unwrap_or(Path::new("."));
+    let base = std::path::absolute(base).unwrap_or_else(|_| base.to_owned());
+    let mut diagnostics = Vec::new();
+    for (index, entity) in document.entities.iter().enumerate() {
+        let Some(mut terrain) = entity
+            .components
+            .get(crate::runtime::TERRAIN_COMPONENT)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        else {
+            continue;
+        };
+        for layer in crate::runtime::terrain_layer_paths(&mut terrain) {
+            let (resolved, legacy) = crate::runtime::resolve_terrain_layer(
+                &base,
+                Path::new(layer.as_str()),
+            );
+            let (code, message) = if !resolved.is_file() {
+                (
+                    "SCENE_MISSING_ASSET",
+                    format!("terrain layer image `{layer}` does not exist"),
+                )
+            } else if legacy {
+                (
+                    "SCENE_TERRAIN_ROOT_PATH",
+                    format!(
+                        "terrain layer image `{layer}` is relative to the project root; write it relative to the scene file"
+                    ),
+                )
+            } else {
+                continue;
+            };
+            diagnostics.push(Diagnostic {
+                code,
+                severity: "warning",
+                message,
+                file: Some(resolved),
+                scene_location: Some(format!(
+                    "/entities/{index}/components/rusting.terrain"
+                )),
+                entity: Some(EntityRef::of(entity)),
+                ..Diagnostic::default()
+            });
+        }
+    }
+    diagnostics
 }
 
 /// A `SCENE_MISSING_ASSET` per sound cue whose clip is not a file under
@@ -2117,6 +2172,8 @@ pub fn lint_project(root: &Path) -> CliResult {
     diagnostics.extend(lint_missing_names(&project.root));
     diagnostics.extend(lint_color_only_status(&project.root));
     diagnostics.extend(lint_missing_translations(&project.root, &document));
+    diagnostics
+        .extend(terrain_layer_diagnostics(&project.scene_path, &document));
     CliResult {
         schema_version: 1,
         ok: diagnostics.is_empty(),
@@ -2965,6 +3022,18 @@ fn lint_scene(
 
 /// The `LINT_*` warnings of one scene document, judging button text
 /// against `button_fill`, the fill the project's UI theme gives buttons.
+/// Chunks the `rusting.terrain` on `entity` draws over its
+/// `rusting.heightfield`, when it has both.
+fn terrain_chunks(entity: &SceneEntity) -> Option<usize> {
+    use crate::runtime::{HEIGHTFIELD_COMPONENT, TERRAIN_COMPONENT};
+    let component = |key| entity.components.get(key).map(String::as_str);
+    let terrain: crate::runtime::Terrain =
+        serde_json::from_str(component(TERRAIN_COMPONENT)?).ok()?;
+    let field: crate::runtime::Heightfield =
+        serde_json::from_str(component(HEIGHTFIELD_COMPONENT)?).ok()?;
+    Some(terrain.chunk_count(&field))
+}
+
 fn lint_scene_with_fill(
     document: &SceneDocument,
     named_in_code: &BTreeSet<String>,
@@ -3147,6 +3216,16 @@ fn lint_scene_with_fill(
         &inside,
     );
     for (index, entity) in document.entities.iter().enumerate() {
+        if let Some(chunks) = terrain_chunks(entity).filter(|&n| n > 300) {
+            warn(
+                "LINT_TERRAIN_CHUNKS",
+                index,
+                "/components/rusting.terrain",
+                format!(
+                    "draws its terrain as {chunks} chunks, one draw each per view and shadow cascade, which makes the frame CPU-bound; raise chunk_cells or set it to 0 to pick the size from the heightfield"
+                ),
+            );
+        }
         if let Some(player) = unreachable
             .iter()
             .find(|(goal, _)| *goal == index)
@@ -7196,6 +7275,92 @@ src/main.rs:30:5: error[E0425]: cannot find value `x` in this scope";
             ],
             "Kid (0.9 m), Torch (switched on in code), Clear Cam, Eye Cam, Ball and Zone pass"
         );
+    }
+
+    #[test]
+    fn lint_warns_about_terrains_with_more_than_300_chunks() {
+        let id = |n: u16| format!("00000000-0000-0000-0000-00000000{n:04}");
+        let heights = json!(vec![vec![0.0; 1501]; 1501]).to_string();
+        let field = format!(r#"{{"heights": {heights}, "spacing": 2.0}}"#);
+        let scene = json!({"format_version": 7, "name": "Island", "entities": [
+            {"id": id(1), "name": "Small Chunks", "components": {
+                "rusting.heightfield": field,
+                "rusting.terrain": json!({"chunk_cells": 64}).to_string()}},
+            {"id": id(2), "name": "Auto Chunks", "components": {
+                "rusting.heightfield": field,
+                "rusting.terrain": json!({}).to_string()}},
+        ]});
+        let document =
+            crate::runtime::parse_scene_document(scene.to_string().as_bytes())
+                .unwrap();
+        let found: Vec<_> = lint_scene(&document, &BTreeSet::new())
+            .into_iter()
+            .map(|d| (d.code, d.entity.unwrap().name.unwrap_or_default()))
+            .collect();
+        assert_eq!(found, [("LINT_TERRAIN_CHUNKS", "Small Chunks".to_owned())]);
+    }
+
+    #[test]
+    fn validate_reports_missing_and_root_relative_terrain_layers() {
+        let root = std::env::temp_dir()
+            .join(format!("rusting-test-terrain-paths-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("scenes")).unwrap();
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("project.json"), "{}").unwrap();
+        std::fs::write(root.join("assets/grass.png"), "").unwrap();
+        let layers = json!({"layers": [
+            {"texture": "../assets/grass.png"},
+            {"texture": "assets/grass.png"},
+            {"texture": "../assets/rock.png", "normal": ""},
+        ]});
+        let scene = json!({"format_version": 7, "name": "Island", "entities": [
+            {"id": "00000000-0000-0000-0000-000000000001", "name": "Ground",
+             "components": {"rusting.terrain": layers.to_string()}},
+        ]});
+        let document =
+            crate::runtime::parse_scene_document(scene.to_string().as_bytes())
+                .unwrap();
+        let found: Vec<_> = terrain_layer_diagnostics(
+            &root.join("scenes/main.rscene"),
+            &document,
+        )
+        .into_iter()
+        .map(|d| (d.code, d.file.unwrap()))
+        .collect();
+        assert_eq!(
+            found,
+            [
+                ("SCENE_TERRAIN_ROOT_PATH", root.join("assets/grass.png")),
+                ("SCENE_MISSING_ASSET", root.join("assets/rock.png")),
+            ]
+        );
+        // Loading resolves both spellings to the same file.
+        let mut document = document;
+        crate::runtime::absolutize_scene_assets(
+            &mut document,
+            &root.join("scenes"),
+        )
+        .unwrap();
+        let terrain: crate::runtime::Terrain = serde_json::from_str(
+            &document.entities[0].components["rusting.terrain"],
+        )
+        .unwrap();
+        let grass = root.canonicalize().unwrap().join("assets/grass.png");
+        assert_eq!(terrain.layers[0].texture, grass);
+        assert_eq!(terrain.layers[1].texture, grass);
+        assert!(terrain.layers[2].normal.as_os_str().is_empty());
+        // Saving writes every layer relative to the scene again.
+        crate::runtime::relativize_scene_assets(
+            &mut document,
+            &root.join("scenes"),
+        )
+        .unwrap();
+        let terrain: crate::runtime::Terrain = serde_json::from_str(
+            &document.entities[0].components["rusting.terrain"],
+        )
+        .unwrap();
+        assert_eq!(terrain.layers[1].texture, Path::new("../assets/grass.png"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

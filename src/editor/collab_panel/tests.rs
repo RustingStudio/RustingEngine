@@ -114,6 +114,7 @@ fn joined(name: &str) -> (App, App, PathBuf) {
     let mirror = folder.join("mirror");
     std::fs::create_dir_all(&mirror).unwrap();
     let mirror = mirror.canonicalize().unwrap();
+    mark_untrusted(&mirror).unwrap(); // as `start_join` does
     collab::send(
         &guest_net,
         HOST,
@@ -291,9 +292,12 @@ fn guest_build_waits_for_trust_once() {
     assert!(g.resource::<CollabState>().session.is_none());
     assert!(gate_build(g, &mirror, BuildRequest::Check).is_none());
     // Trusting it once lets later builds run.
-    let mut collab = g.resource_mut::<CollabState>();
-    let (ended, _) = collab.pending_build.take().unwrap();
-    collab.untrusted.remove(&ended.unwrap());
+    let (root, _) = g
+        .resource_mut::<CollabState>()
+        .pending_build
+        .take()
+        .unwrap();
+    std::fs::remove_file(root.join(UNTRUSTED)).unwrap();
     assert!(gate_build(g, &mirror, BuildRequest::Check).is_some());
     // The host runs its own code without asking.
     let root = session_mut(host.world_mut())
