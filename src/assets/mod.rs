@@ -811,6 +811,66 @@ pub fn generate_tangents(vertices: &mut [MeshVertex], indices: &[u32]) {
     }
 }
 
+/// A `KHR_texture_transform` as `(offset, rotation, scale)`.
+#[cfg(feature = "gltf")]
+type UvTransform = ([f32; 2], f32, [f32; 2]);
+
+/// The `KHR_texture_transform` a glTF material puts on its textures, to fold into the vertex UVs. `None` when no
+/// texture has one; an error when the textures disagree, since a mesh has
+/// one set of UVs.
+// ponytail: the gltf crate reads the extension on base color, metallic
+// roughness and emissive textures only; normal and occlusion maps are
+// assumed to share it, which Blender exports do.
+#[cfg(feature = "gltf")]
+fn gltf_uv_transform(
+    material: &gltf::Material,
+) -> Result<Option<UvTransform>, String> {
+    let pbr = material.pbr_metallic_roughness();
+    let transforms = [
+        pbr.base_color_texture(),
+        pbr.metallic_roughness_texture(),
+        material.emissive_texture(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|info| {
+        info.texture_transform().map_or(
+            ([0.0; 2], 0.0, [1.0; 2]),
+            |transform| {
+                (transform.offset(), transform.rotation(), transform.scale())
+            },
+        )
+    })
+    .collect::<Vec<_>>();
+    let Some(&first) = transforms.first() else {
+        return Ok(None);
+    };
+    if transforms.iter().any(|transform| *transform != first) {
+        return Err(format!(
+            "material {:?} gives its textures different KHR_texture_transform \
+             values; a mesh has one set of UVs, so bake them into TEXCOORD_0 \
+             or give every texture the same transform",
+            material.name().unwrap_or("unnamed")
+        ));
+    }
+    Ok((first != ([0.0; 2], 0.0, [1.0; 2])).then_some(first))
+}
+
+/// Applies a `KHR_texture_transform` to one UV: scale, then rotate
+/// counter-clockwise by `rotation` radians, then offset.
+#[cfg(feature = "gltf")]
+fn transform_uv(
+    [u, v]: [f32; 2],
+    (offset, rotation, scale): UvTransform,
+) -> [f32; 2] {
+    let (sin, cos) = rotation.sin_cos();
+    let [x, y] = [u * scale[0], v * scale[1]];
+    [
+        cos * x + sin * y + offset[0],
+        -sin * x + cos * y + offset[1],
+    ]
+}
+
 /// Maps glTF sampler state; unspecified filters keep the linear default.
 #[cfg(feature = "gltf")]
 fn gltf_texture_sampler(sampler: &gltf::texture::Sampler) -> TextureSampler {
@@ -1298,6 +1358,12 @@ pub struct MaterialAsset {
     /// in `SceneRenderer::surface_shader_errors`. See
     /// `rusting docs show guide/surface-shaders`.
     pub shader: String,
+    /// Wind sway: the mesh bends in the `rusting.force_field` winds around
+    /// its origin, in the vertex shader. Zero `amplitude` keeps it still.
+    pub sway: MaterialSway,
+    /// Water look that reads the ground under the surface; set by
+    /// `rusting.water`. The default draws a plain surface.
+    pub water: WaterShading,
     pub base_color_texture: Option<Handle<TextureAsset>>,
     pub normal_texture: Option<Handle<TextureAsset>>,
     pub metallic_roughness_texture: Option<Handle<TextureAsset>>,
@@ -1324,6 +1390,8 @@ impl Default for MaterialAsset {
             splat: false,
             splat_scale: [1.0; 4],
             shader: String::new(),
+            sway: MaterialSway::default(),
+            water: WaterShading::default(),
             base_color_texture: None,
             normal_texture: None,
             metallic_roughness_texture: None,
@@ -1331,6 +1399,59 @@ impl Default for MaterialAsset {
             emissive_texture: None,
         }
     }
+}
+
+/// How a blended [`MaterialAsset`] looks as water. Depth is measured to the
+/// opaque scene behind the surface, so it needs the lit view. All zero is a
+/// plain surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WaterShading {
+    /// Color the water takes where the view crosses `depth_fade` metres of
+    /// it or more; it starts at the base color.
+    pub deep_color: [f32; 4],
+    /// Metres of water the view crosses before the color is `deep_color`.
+    /// 0 keeps the base color everywhere.
+    pub depth_fade: f32,
+    /// Width of the white foam band where the surface meets the ground, in
+    /// metres of water depth. 0 draws no foam.
+    pub shore_foam: f32,
+    /// Strength of the small scrolling waves lit on top of the mesh, 0 to
+    /// 1. 0 draws none.
+    pub ripples: f32,
+    /// Distance between those small waves in metres.
+    pub ripple_length: f32,
+}
+
+impl WaterShading {
+    /// Whether the renderer draws this material as water.
+    #[must_use]
+    pub fn is_water(&self) -> bool {
+        self.depth_fade > 0.0 || self.shore_foam > 0.0 || self.ripples > 0.0
+    }
+
+    /// Whether drawing it needs the opaque depth copy.
+    #[must_use]
+    pub fn reads_depth(&self) -> bool {
+        self.depth_fade > 0.0 || self.shore_foam > 0.0
+    }
+}
+
+/// How a [`MaterialAsset`] bends in the wind. The vertex shader reads the
+/// `rusting.force_field` push at each object's origin on the GPU, as
+/// `rusting.foliage` does, so a forest of tree crowns sways for no CPU cost.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MaterialSway {
+    /// Lean per m/s² of force field push, in metres per metre of height,
+    /// as `rusting.foliage` `sway`: up to 45 degrees. 0 is still.
+    pub amplitude: f32,
+    /// Gusts per second: the lean pulses between half and one and a half
+    /// times, phased by position so neighbours do not move together. 0 is
+    /// a steady lean.
+    pub frequency: f32,
+    /// Height above the origin, in metres, over which the bend grows: the
+    /// base stays rooted and the mesh curves like a trunk. 0 leans the
+    /// whole mesh as one straight shear.
+    pub height: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1566,6 +1687,32 @@ impl AssetServer {
         self.textures.get_or_insert_with(path, decode_texture_file)
     }
 
+    /// Loads a texture for a normal, metallic-roughness or occlusion slot.
+    /// A plain image holds data there, not color, so it loads linear (WILDROOT
+    /// F24); a cooked `.rtexture` keeps the color space it was cooked with.
+    // ponytail: one path is one texture, so an image used both as a color
+    // and as a data map takes the space of its last load here. Cook a
+    // linear copy with `asset import --linear` if that shows up.
+    pub fn load_linear_texture(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<Handle<TextureAsset>, AssetError> {
+        let cooked = path
+            .as_ref()
+            .extension()
+            .is_some_and(|extension| extension == "rtexture");
+        let handle = self.load_texture(path)?;
+        let srgb = self.textures.get(handle).is_some_and(|texture| {
+            texture.color_space == TextureColorSpace::Srgb
+        });
+        if !cooked && srgb {
+            if let Some(texture) = self.textures.get_mut(handle) {
+                texture.color_space = TextureColorSpace::Linear;
+            }
+        }
+        Ok(handle)
+    }
+
     /// Starts worker decodes for every mesh and texture whose source file
     /// changed on disk. Returns how many reloads started. Changed scene
     /// paths are left for the caller via `scenes.changed()`.
@@ -1579,11 +1726,21 @@ impl AssetServer {
             );
         }
         for (handle, _) in self.textures.changed() {
-            started += usize::from(
-                self.textures
-                    .reload_async(handle, decode_texture_file)
-                    .is_ok(),
-            );
+            // A plain image loaded into a data slot stays linear.
+            let linear = self.textures.get(handle).is_some_and(|texture| {
+                texture.color_space == TextureColorSpace::Linear
+            });
+            let decode = move |path: &Path| {
+                decode_texture_file(path).map(|mut texture| {
+                    if linear && texture.color_space == TextureColorSpace::Srgb
+                    {
+                        texture.color_space = TextureColorSpace::Linear;
+                    }
+                    texture
+                })
+            };
+            started +=
+                usize::from(self.textures.reload_async(handle, decode).is_ok());
         }
         started
     }
@@ -1684,10 +1841,23 @@ impl AssetServer {
                 // Replaced by flat face normals below.
                 let normals = imported_normals
                     .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
-                let uvs = reader
+                let mut uvs: Vec<[f32; 2]> = reader
                     .read_tex_coords(0)
                     .map(|values| values.into_f32().collect())
                     .unwrap_or_else(|| vec![[0.0; 2]; positions.len()]);
+                // The engine has no per-texture UV transform, so the one
+                // the material's textures share goes into the UVs.
+                if let Some(transform) = gltf_uv_transform(
+                    &primitive.material(),
+                )
+                .map_err(|message| AssetError::Load {
+                    path: source.clone(),
+                    message,
+                })? {
+                    for uv in &mut uvs {
+                        *uv = transform_uv(*uv, transform);
+                    }
+                }
                 // glTF stores COLOR_0 linear, as the shader wants it.
                 let colors = reader
                     .read_colors(0)
@@ -2232,6 +2402,17 @@ impl AssetServer {
     }
 }
 
+/// Cooks the image at `image` into a linear `.rtexture` at `output`, for
+/// normal, roughness and other data maps (`asset import --linear`).
+pub fn cook_linear_texture(
+    image: &Path,
+    output: &Path,
+) -> Result<(), AssetError> {
+    let mut texture = decode_texture_file(image)?;
+    texture.color_space = TextureColorSpace::Linear;
+    write_cooked_bytes(output, bincode::serialize(&texture))
+}
+
 /// Writes an importer-produced asset as bincode at its synthesized key.
 #[cfg(feature = "gltf")]
 fn write_cooked_asset(
@@ -2272,7 +2453,6 @@ fn generated_lods(mesh: &MeshAsset) -> Vec<MeshAsset> {
     levels
 }
 
-#[cfg(feature = "gltf")]
 fn write_cooked_bytes(
     path: &Path,
     bytes: bincode::Result<Vec<u8>>,
@@ -3816,6 +3996,86 @@ mod tests {
 
         // Small meshes stay single-level.
         assert!(generated_lods(&MeshAsset::default()).is_empty());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "gltf")]
+    fn gltf_import_folds_a_shared_texture_transform_into_the_uvs() {
+        let folder = std::env::temp_dir()
+            .join(format!("rusting-gltf-uv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        image::RgbaImage::from_raw(1, 1, vec![1, 2, 3, 255])
+            .unwrap()
+            .save(folder.join("pixel.png"))
+            .unwrap();
+        let bytes: Vec<u8> = [
+            0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, // positions
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, // uvs
+        ]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+        std::fs::write(folder.join("tri.bin"), &bytes).unwrap();
+        let gltf = |emissive_transform: &str| {
+            format!(
+                r#"{{
+              "asset": {{"version": "2.0"}},
+              "extensionsUsed": ["KHR_texture_transform"],
+              "extensionsRequired": ["KHR_texture_transform"],
+              "buffers": [{{"uri": "tri.bin", "byteLength": 60}}],
+              "bufferViews": [{{"buffer": 0, "byteLength": 36}},
+                {{"buffer": 0, "byteOffset": 36, "byteLength": 24}}],
+              "accessors": [{{"bufferView": 0, "componentType": 5126,
+                "count": 3, "type": "VEC3",
+                "min": [0, 0, 0], "max": [1, 1, 0]}},
+                {{"bufferView": 1, "componentType": 5126, "count": 3,
+                "type": "VEC2"}}],
+              "images": [{{"uri": "pixel.png"}}],
+              "textures": [{{"source": 0}}],
+              "materials": [{{
+                "pbrMetallicRoughness": {{"baseColorTexture": {{"index": 0,
+                  "extensions": {{"KHR_texture_transform":
+                    {{"offset": [0.5, 0.25], "scale": [2, 3],
+                      "rotation": 1.5707964}}}}}}}},
+                "emissiveTexture": {{"index": 0,
+                  "extensions": {{"KHR_texture_transform": {emissive_transform}}}}}}}],
+              "meshes": [{{"primitives": [{{"attributes":
+                {{"POSITION": 0, "TEXCOORD_0": 1}}, "material": 0}}]}}]
+            }}"#
+            )
+        };
+        let path = folder.join("tri.gltf");
+        std::fs::write(
+            &path,
+            gltf(r#"{"offset": [0.5, 0.25], "scale": [2, 3], "rotation": 1.5707964}"#),
+        )
+        .unwrap();
+        let mut server = AssetServer::default();
+
+        let imported = server.import_gltf(&path).unwrap();
+
+        // Scale, rotate a quarter turn counter-clockwise, then offset:
+        // (1, 0) scales to (2, 0) and turns to (0, -2).
+        let mesh = server.meshes.get(imported[0].mesh).unwrap();
+        let uvs = mesh.vertices.iter().map(|vertex| vertex.uv);
+        let expected = [[0.5, 0.25], [0.5, -1.75], [3.5, 0.25]];
+        for (uv, expected) in uvs.zip(expected) {
+            assert!(
+                (uv[0] - expected[0]).abs() < 1e-5
+                    && (uv[1] - expected[1]).abs() < 1e-5,
+                "{uv:?} != {expected:?}"
+            );
+        }
+
+        std::fs::write(&path, gltf(r#"{"offset": [0.5, 0.0]}"#)).unwrap();
+        let error = AssetServer::default().import_gltf(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("different KHR_texture_transform"),
+            "{error}"
+        );
         std::fs::remove_dir_all(folder).unwrap();
     }
 

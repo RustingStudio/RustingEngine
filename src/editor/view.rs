@@ -2772,10 +2772,14 @@ pub fn draw_editor_view(world: &mut World, context: &Context) {
                 } else {
                     path
                 };
-                let texture = world
-                    .resource_mut::<AssetServer>()
-                    .load_texture(&path)
-                    .map_err(|error| error.to_string())?;
+                // Normal, metallic-roughness and occlusion maps are data.
+                let mut assets = world.resource_mut::<AssetServer>();
+                let texture = if (1..=3).contains(&slot) {
+                    assets.load_linear_texture(&path)
+                } else {
+                    assets.load_texture(&path)
+                }
+                .map_err(|error| error.to_string())?;
                 remember_scene_before_edit(world, &mut history)?;
                 *crate::editor::inspector::texture_slots(&mut material)[slot] =
                     Some(texture);

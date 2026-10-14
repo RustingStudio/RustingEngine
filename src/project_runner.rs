@@ -1410,7 +1410,9 @@ impl GameScene<'_> {
     /// Whether the cooldown called `name` has run out, or never started.
     /// Cooldowns count fixed ticks, so pause and time scale stop and slow
     /// them like the simulation and a scenario repeats them exactly. The
-    /// counter `name` holds the fixed tick the cooldown ends on.
+    /// counter `"cooldown:<name>"` holds the fixed tick the cooldown ends
+    /// on, so a counter called `name` is a separate value. Pass that key to
+    /// [`Self::save_counters`] to save a cooldown.
     #[must_use]
     pub fn cooldown_ready(&self, name: &str) -> bool {
         self.cooldown_left(name) == 0.0
@@ -1419,32 +1421,42 @@ impl GameScene<'_> {
     /// Starts the cooldown called `name` for `seconds` of game time, from
     /// this tick. See [`Self::cooldown_ready`].
     pub fn start_cooldown(&mut self, name: &str, seconds: f32) {
-        let time = self.frame_time();
-        let ticks =
-            (f64::from(seconds) / time.fixed_delta.as_secs_f64()).ceil();
-        let end = time.fixed_tick as f64 + ticks.max(0.0);
-        self.set_counter(name, end.min(f64::from(i32::MAX)) as i32);
+        self.start_timer(&cooldown_key(name), seconds);
     }
 
     /// Seconds of game time left on the cooldown called `name`, 0 when it
     /// is ready. Use it for a HUD meter.
     #[must_use]
     pub fn cooldown_left(&self, name: &str) -> f32 {
+        self.timer_left(&cooldown_key(name))
+    }
+
+    /// Sets the counter `key` to the fixed tick `seconds` from this one.
+    fn start_timer(&mut self, key: &str, seconds: f32) {
         let time = self.frame_time();
-        let end = i64::from(self.counter_or(name, 0));
+        let ticks =
+            (f64::from(seconds) / time.fixed_delta.as_secs_f64()).ceil();
+        let end = time.fixed_tick as f64 + ticks.max(0.0);
+        self.set_counter(key, end.min(f64::from(i32::MAX)) as i32);
+    }
+
+    /// Seconds until the fixed tick in the counter `key`, 0 once passed.
+    fn timer_left(&self, key: &str) -> f32 {
+        let time = self.frame_time();
+        let end = i64::from(self.counter_or(key, 0));
         let left = (end - time.fixed_tick as i64).max(0);
         (left as f64 * time.fixed_delta.as_secs_f64()) as f32
     }
 
     /// Puts the status `effect` (such as `"poisoned"` or `"stunned"`) on
     /// the named object for `seconds` of game time. A longer remaining
-    /// time is kept, so reapplying refreshes but never shortens. Statuses
-    /// are cooldowns in the counter `"<object>/<effect>"`, so they count
-    /// fixed ticks and snapshots and [`Self::save_counters`] keep them.
+    /// time is kept, so reapplying refreshes but never shortens. A status
+    /// holds its end tick in the counter `"<object>/<effect>"`, so it counts
+    /// fixed ticks and snapshots and [`Self::save_counters`] keep it.
     pub fn add_status(&mut self, object: &str, effect: &str, seconds: f32) {
         let key = format!("{object}/{effect}");
-        if self.cooldown_left(&key) < seconds {
-            self.start_cooldown(&key, seconds);
+        if self.timer_left(&key) < seconds {
+            self.start_timer(&key, seconds);
         }
     }
 
@@ -1459,7 +1471,7 @@ impl GameScene<'_> {
     /// has none.
     #[must_use]
     pub fn status_left(&self, object: &str, effect: &str) -> f32 {
-        self.cooldown_left(&format!("{object}/{effect}"))
+        self.timer_left(&format!("{object}/{effect}"))
     }
 
     /// Ends the status `effect` on the named object early.
@@ -1588,6 +1600,12 @@ impl GameScene<'_> {
         self.world
             .get_resource::<crate::runtime::RandomSeed>()
             .map_or(0, |seed| seed.0)
+    }
+
+    /// Replaces the run's seed, such as with the host's
+    /// `NetSession::seed` on a client, so both build the same world.
+    pub fn set_seed(&mut self, seed: u64) {
+        self.world.insert_resource(crate::runtime::RandomSeed(seed));
     }
 
     /// A value in `[0, 1)` from the run's seed, the fixed tick and
@@ -2061,6 +2079,16 @@ impl GameScene<'_> {
         self.world
             .resource_mut::<crate::runtime::ExitState>()
             .requested = true;
+    }
+
+    /// True in the game's last update, which runs once when the window
+    /// closes, after [`Self::quit`], and when a dedicated server gets
+    /// Ctrl+C or SIGTERM. Write saves here; the process ends after it.
+    #[must_use]
+    pub fn exiting(&self) -> bool {
+        self.world
+            .get_resource::<crate::runtime::ExitState>()
+            .is_some_and(|state| state.exiting)
     }
 
     /// Stops fixed ticks while `paused`: physics, tweens, player
@@ -3446,6 +3474,31 @@ impl GameScene<'_> {
         true
     }
 
+    /// Sets the terrain-wide `tint` (linear rgb multiplied into every layer)
+    /// and `roughness` (multiplies every layer's) of the `rusting.terrain`
+    /// on a named object. Only the material changes, with no chunk rebuild
+    /// and no trip through JSON, so it is cheap to call every frame, such as
+    /// for ground that darkens while it rains. Returns false when the object
+    /// or its terrain does not exist.
+    pub fn set_terrain_look(
+        &mut self,
+        name: &str,
+        tint: [f32; 3],
+        roughness: f32,
+    ) -> bool {
+        let Some(entity) = find_named_entity(self.world, name) else {
+            return false;
+        };
+        let Some(mut terrain) =
+            self.world.get_mut::<crate::runtime::Terrain>(entity)
+        else {
+            return false;
+        };
+        terrain.tint = tint;
+        terrain.roughness = roughness;
+        true
+    }
+
     /// Tries to return a scene object by name.
     pub fn try_object(&mut self, name: &str) -> Option<GameObject<'_>> {
         let entity = find_named_entity(self.world, name)?;
@@ -4158,6 +4211,11 @@ impl Plugin for SimpleGamePlugin {
             .register_snapshot_component::<SphereMeshCache>();
         Ok(())
     }
+}
+
+/// The counter that holds the end tick of the cooldown `name`.
+fn cooldown_key(name: &str) -> String {
+    format!("cooldown:{name}")
 }
 
 /// Copies each `rusting.spawn_grid` object onto its grid, in spawn order,
@@ -5440,6 +5498,11 @@ impl ApplicationHandler for ProjectApplication {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Every way out (close, quit, bench end) gives game code one last
+        // update to save in.
+        if let Err(error) = self.runtime.run_exit_update() {
+            eprintln!("last update failed: {error}");
+        }
         // The egui clipboard talks to the Wayland connection, which closes
         // when the event loop returns; dropping it later crashes the exit.
         #[cfg(feature = "ui")]
@@ -5675,6 +5738,7 @@ pub fn run_project_server<P: Plugin>(
     let mut server = crate::net::DedicatedServer::default();
     let step = runtime.world().resource::<FrameTime>().fixed_delta;
     let mut deadline = Instant::now();
+    let stop = stop_signal();
     loop {
         runtime.world_mut().insert_resource(server);
         let started = Instant::now();
@@ -5684,7 +5748,8 @@ pub fn run_project_server<P: Plugin>(
             .resource_mut::<RuntimeInput>()
             .clear_frame_edges();
         announce_first_frame();
-        if runtime.exit_requested() {
+        if runtime.exit_requested() || stop.load(Ordering::Relaxed) {
+            runtime.run_exit_update()?;
             return Ok(());
         }
         let now = Instant::now();
@@ -5708,6 +5773,48 @@ pub fn run_project_server<P: Plugin>(
             server.late_ticks += 1;
         }
     }
+}
+
+/// Set once the process gets Ctrl+C or SIGTERM (a console close on
+/// Windows). The handler is installed on the first call; a second signal
+/// ends the process the default way.
+fn stop_signal() -> &'static AtomicBool {
+    static STOP: AtomicBool = AtomicBool::new(false);
+    STOP.store(false, Ordering::Relaxed);
+    #[cfg(unix)]
+    {
+        // ponytail: plain `signal` from the C library std already links;
+        // a crate such as signal-hook if more signals need handling.
+        extern "C" {
+            fn signal(signum: i32, handler: usize) -> usize;
+        }
+        extern "C" fn handle(signum: i32) {
+            STOP.store(true, Ordering::Relaxed);
+            // SIG_DFL, so a second signal ends a stuck last update.
+            unsafe { signal(signum, 0) };
+        }
+        const SIGINT: i32 = 2;
+        const SIGTERM: i32 = 15;
+        for signum in [SIGINT, SIGTERM] {
+            unsafe { signal(signum, handle as *const () as usize) };
+        }
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<unsafe extern "system" fn(u32) -> i32>,
+                add: i32,
+            ) -> i32;
+        }
+        unsafe extern "system" fn handle(_: u32) -> i32 {
+            STOP.store(true, Ordering::Relaxed);
+            1
+        }
+        unsafe { SetConsoleCtrlHandler(Some(handle), 1) };
+    }
+    &STOP
 }
 
 /// Loads a cooked scene and runs `ticks` updates of one `fixed_delta` each
@@ -6484,6 +6591,65 @@ mod tests {
     }
 
     #[test]
+    fn a_tick_function_steps_by_the_fixed_delta_whatever_the_frame_time() {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Vec<(f32, f32)>> = Mutex::new(Vec::new());
+        fn update(_: &mut GameScene<'_>, time: &FrameTime) {
+            SEEN.lock().unwrap().push((-1.0, time.delta_seconds()));
+        }
+        fn tick(_: &mut GameScene<'_>, time: &FrameTime) {
+            SEEN.lock()
+                .unwrap()
+                .push((time.delta_seconds(), time.fixed_delta.as_secs_f32()));
+        }
+        let mut app = App::new();
+        app.add_plugin(SimpleGamePlugin {
+            update,
+            tick: Some(tick),
+            components: None,
+        })
+        .unwrap();
+        let step = app
+            .world()
+            .resource::<crate::runtime::TimeControl>()
+            .fixed_delta;
+        // One frame of 2.5 steps runs two ticks; each tick sees one step.
+        let frame = step * 5 / 2;
+        app.update_exact(frame).unwrap();
+        let seen = SEEN.lock().unwrap().clone();
+        let (step, frame) = (step.as_secs_f32(), frame.as_secs_f32());
+        assert_eq!(seen, [(step, step), (step, step), (-1.0, frame)]);
+        let time = app.world().resource::<FrameTime>();
+        assert_eq!(time.delta_seconds(), frame);
+    }
+
+    #[test]
+    fn the_exit_update_runs_once_with_exiting_set_and_no_tick() {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Vec<&str>> = Mutex::new(Vec::new());
+        fn update(scene: &mut GameScene<'_>, _: &FrameTime) {
+            let seen = if scene.exiting() { "exit" } else { "update" };
+            SEEN.lock().unwrap().push(seen);
+        }
+        fn tick(_: &mut GameScene<'_>, _: &FrameTime) {
+            SEEN.lock().unwrap().push("tick");
+        }
+        let mut app = App::new();
+        app.add_plugin(SimpleGamePlugin {
+            update,
+            tick: Some(tick),
+            components: None,
+        })
+        .unwrap();
+        let step = app.world().resource::<FrameTime>().fixed_delta;
+        app.update_exact(step).unwrap();
+        app.run_exit_update().unwrap();
+        app.run_exit_update().unwrap();
+        assert!(app.exit_requested());
+        assert_eq!(*SEEN.lock().unwrap(), ["tick", "update", "exit"]);
+    }
+
+    #[test]
     fn a_tick_function_sees_a_press_from_a_frame_without_a_tick() {
         use crate::runtime::{InputBinding, KeyCode};
         use std::time::Duration;
@@ -6591,7 +6757,12 @@ mod tests {
     #[test]
     fn a_dedicated_server_ticks_in_real_time_until_the_game_quits() {
         static TICKS: AtomicU32 = AtomicU32::new(0);
+        static EXITS: AtomicU32 = AtomicU32::new(0);
         fn serve(scene: &mut GameScene<'_>, _: &FrameTime) {
+            if scene.exiting() {
+                EXITS.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
             let ticks = TICKS.fetch_add(1, Ordering::Relaxed);
             let server = *scene.world.resource::<crate::net::DedicatedServer>();
             assert_eq!(server.ticks, u64::from(ticks));
@@ -6619,6 +6790,7 @@ mod tests {
             .unwrap();
         crate::runtime::cook_scene(&source, &cooked).unwrap();
         let start = Instant::now();
+        let _one_server = SERVER_TESTS.lock();
         run_project_server(
             &cooked,
             SimpleGamePlugin {
@@ -6631,9 +6803,56 @@ mod tests {
         let elapsed = start.elapsed();
         std::fs::remove_dir_all(&directory).unwrap();
         assert_eq!(TICKS.load(Ordering::Relaxed), 6);
+        // The quit gives the game one last update to save in.
+        assert_eq!(EXITS.load(Ordering::Relaxed), 1);
         // Five sleeps of one fixed step each, not a busy loop.
         let step = FrameTime::default().fixed_delta;
         assert!(elapsed >= step * 5, "{elapsed:?}");
+    }
+
+    /// Server runs share the process's stop signal.
+    static SERVER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_gives_a_dedicated_server_one_last_update_then_stops() {
+        static SEEN: std::sync::Mutex<Vec<(u64, bool)>> =
+            std::sync::Mutex::new(Vec::new());
+        fn serve(scene: &mut GameScene<'_>, _: &FrameTime) {
+            extern "C" {
+                fn raise(signum: i32) -> i32;
+            }
+            let ticks = scene.world.resource::<crate::net::DedicatedServer>();
+            let entry = (ticks.ticks, scene.exiting());
+            SEEN.lock().unwrap().push(entry);
+            if entry == (2, false) {
+                assert_eq!(unsafe { raise(15) }, 0);
+            }
+        }
+        let directory = std::env::temp_dir()
+            .join(format!("rusting-server-{}", uuid::Uuid::new_v4()));
+        let source = directory.join("main.rscene");
+        let cooked = directory.join("main.rscene.bin");
+        let mut editor = App::new();
+        editor.add_plugin(AssetPlugin).unwrap();
+        crate::runtime::save_scene(editor.world_mut(), &source, "main")
+            .unwrap();
+        crate::runtime::cook_scene(&source, &cooked).unwrap();
+        let _one_server = SERVER_TESTS.lock();
+        run_project_server(
+            &cooked,
+            SimpleGamePlugin {
+                update: serve,
+                tick: None,
+                components: None,
+            },
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(
+            *SEEN.lock().unwrap(),
+            [(0, false), (1, false), (2, false), (2, true)]
+        );
     }
 
     #[test]
@@ -8534,11 +8753,28 @@ mod tests {
         world.resource_mut::<FrameTime>().fixed_tick = 130;
         let scene = GameScene { world: &mut world };
         assert!(scene.cooldown_ready("dash"));
-        assert_eq!(scene.counter_value("dash"), 130);
+        assert_eq!(scene.counter_value("cooldown:dash"), 130);
         world.insert_resource(crate::runtime::TimeControl::default());
         let mut scene = GameScene { world: &mut world };
         scene.set_time_scale(-2.0);
         assert_eq!(scene.time_scale(), 0.0);
+    }
+
+    #[test]
+    fn a_cooldown_and_a_counter_of_the_same_name_are_separate() {
+        let mut world = World::new();
+        world.insert_resource(FrameTime {
+            fixed_tick: 100,
+            ..FrameTime::default()
+        });
+        let mut scene = GameScene { world: &mut world };
+        scene.set_counter("strike", 15);
+        scene.start_cooldown("strike", 0.5);
+        assert_eq!(scene.counter_value("strike"), 15);
+        scene.add_to_counter("strike", -1);
+        assert!(!scene.cooldown_ready("strike"));
+        assert!((scene.cooldown_left("strike") - 0.5).abs() < 1e-6);
+        assert_eq!(scene.counter_value("strike"), 14);
     }
 
     #[test]

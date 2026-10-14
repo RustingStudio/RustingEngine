@@ -3814,6 +3814,8 @@ pub struct AssetImportFlags {
     pub from: Option<PathBuf>,
     pub provenance: AssetProvenance,
     pub max_size: Option<u32>,
+    /// `--linear`: cook images as linear data textures.
+    pub linear: bool,
     pub dry_run: bool,
 }
 
@@ -3827,7 +3829,11 @@ fn asset_result(
                 .warnings
                 .iter()
                 .map(|warning| Diagnostic {
-                    code: "ASSET_NO_LICENSE",
+                    code: if warning.starts_with(asset_import::EDITED_COPY) {
+                        "ASSET_EDITED_COPY"
+                    } else {
+                        "ASSET_NO_LICENSE"
+                    },
                     severity: "warning",
                     message: warning.clone(),
                     file: Some(root.join(&report.path)),
@@ -3858,6 +3864,7 @@ pub fn import_asset(
     };
     let settings = ImportSettings {
         max_size: flags.max_size,
+        linear: flags.linear,
     };
     asset_result(
         asset_import::import_asset(
@@ -3881,9 +3888,11 @@ pub fn reimport_asset(
         Ok(project) => project,
         Err(error) => return project_error(error, root),
     };
-    let settings = flags.max_size.map(|max_size| ImportSettings {
-        max_size: Some(max_size),
-    });
+    let settings =
+        (flags.max_size.is_some() || flags.linear).then_some(ImportSettings {
+            max_size: flags.max_size,
+            linear: flags.linear,
+        });
     asset_result(
         asset_import::reimport_asset(
             &project.root,
@@ -3895,6 +3904,34 @@ pub fn reimport_asset(
         ),
         &project.root,
     )
+}
+
+/// Bakes a tree's foliage into alpha-tested cards, and an impostor with
+/// `options.impostor`, next to `model` or at `out` (a path without
+/// extension). The files are plain GLB; import them with `asset import`.
+#[cfg(feature = "gltf")]
+pub fn bake_foliage(
+    model: &Path,
+    out: Option<&Path>,
+    options: &crate::foliage_bake::FoliageBakeOptions,
+) -> CliResult {
+    let out = out.map_or_else(|| model.with_extension(""), Path::to_owned);
+    match crate::foliage_bake::bake_foliage(model, &out, options) {
+        Ok(bake) => CliResult::success(json!({
+            "source_triangles": bake.source_triangles,
+            "foliage_triangles": bake.foliage_triangles,
+            "cards": bake.cards,
+            "card_triangles": bake.card_triangles,
+            "impostor_triangles": options.impostor.then_some(4),
+            "coverage": bake.coverage,
+            "files": bake.files,
+        })),
+        Err(error) => CliResult::failure(
+            "ASSET_BAKE_FAILED",
+            error,
+            Some(model.to_owned()),
+        ),
+    }
 }
 
 /// Runs a `project.json` generator hook and imports its file into
@@ -5616,7 +5653,14 @@ fn run_game_project_once(root: &Path, options: RunOptions) -> CliResult {
             game.env(variable, std::path::absolute(path).unwrap_or_default());
         }
     }
-    let report_path = root.join("build/scenario-report.json");
+    // Each run gets its own report file, so two runs in one project at
+    // once each read their own; the last one is kept as
+    // build/scenario-report.json.
+    let last_report = root.join("build/scenario-report.json");
+    let report_path = root.join(format!(
+        "build/scenario-report.{}.json",
+        uuid::Uuid::new_v4().simple()
+    ));
     if let Some(scenario) = &options.scenario {
         let scenario = match std::path::absolute(scenario) {
             Ok(scenario) if scenario.is_file() => scenario,
@@ -5628,7 +5672,7 @@ fn run_game_project_once(root: &Path, options: RunOptions) -> CliResult {
                 )
             }
         };
-        let _ = std::fs::remove_file(&report_path);
+        let _ = std::fs::create_dir_all(root.join("build"));
         // Each scenario starts with an empty data folder of its own, so
         // saves from one run never leak into the next.
         let user_data = root
@@ -5694,13 +5738,15 @@ fn run_game_project_once(root: &Path, options: RunOptions) -> CliResult {
         .retain(|diagnostic| diagnostic.code == "ASSET_RELOAD_FAILED");
     let mut result = 'result: {
         if let Some(scenario) = options.scenario {
-            let report =
-                std::fs::read_to_string(&report_path).ok().and_then(|text| {
-                    serde_json::from_str::<crate::scenario::ScenarioReport>(
-                        &text,
-                    )
+            let text = std::fs::read_to_string(&report_path).ok();
+            let _ = match text {
+                Some(_) => std::fs::rename(&report_path, &last_report),
+                None => std::fs::remove_file(&last_report),
+            };
+            let report = text.and_then(|text| {
+                serde_json::from_str::<crate::scenario::ScenarioReport>(&text)
                     .ok()
-                });
+            });
             let Some(report) = report else {
                 let mut result = CliResult::failure(
                     "GAME_FAILED",
@@ -6902,6 +6948,61 @@ mod shape_tests {
             },
         );
         assert_eq!(missing.diagnostics[0].code, "FILE_NOT_FOUND");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn two_runs_at_once_each_read_their_own_scenario_report() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir()
+            .join(format!("rusting-test-reports-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        // `first` writes its report, then outlives `second`, which writes
+        // its own in between.
+        let game = root.join("game");
+        std::fs::write(
+            &game,
+            "#!/bin/sh
+name=$(cat \"$RUSTING_TEST_SCENARIO\")
+             report() { printf '{\"name\":\"%s\",\"seed\":0,             \"passed\":true,\"ticks_run\":3,\"first_failure\":null,             \"steps\":[],\"captures\":[]}' \"$name\"              > \"$RUSTING_TEST_REPORT\"; }
+             if [ \"$name\" = first ]; then report; sleep 1;              else sleep 0.3; report; fi
+",
+        )
+        .unwrap();
+        std::fs::set_permissions(&game, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let runs: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|name| {
+                let scenario = root.join(format!("{name}.json"));
+                std::fs::write(&scenario, name).unwrap();
+                let (root, game) = (root.clone(), game.clone());
+                std::thread::spawn(move || {
+                    let options = RunOptions {
+                        scenario: Some(scenario),
+                        exe: Some(game),
+                        ..RunOptions::default()
+                    };
+                    run_game_project(&root, options)
+                })
+            })
+            .collect();
+        for (run, name) in runs.into_iter().zip(["first", "second"]) {
+            let result = run.join().unwrap();
+            assert!(result.ok, "{:?}", result.diagnostics);
+            assert_eq!(result.data["scenario"]["name"], name);
+        }
+        // The last run to finish leaves its report for `--full` readers.
+        let last =
+            std::fs::read_to_string(root.join("build/scenario-report.json"))
+                .unwrap();
+        assert!(last.contains("\"first\""), "{last}");
+        let left = std::fs::read_dir(root.join("build"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(left, ["scenario-report.json"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

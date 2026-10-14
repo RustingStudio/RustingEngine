@@ -2153,6 +2153,91 @@ fn player_controller_falls_walks_jumps_and_stops_at_walls() {
 }
 
 #[test]
+fn player_step_replays_the_controller_from_an_input_without_global_actions() {
+    let mut app = App::new();
+    cpu_ground(app.world_mut());
+    // A 0.2 m ledge ahead, low enough to step onto.
+    cpu_body(
+        app.world_mut(),
+        [0.0, 0.1, -2.5],
+        ColliderShape::Box {
+            half_extents: [5.0, 0.1, 1.0],
+        },
+        RigidBodyKind::Fixed,
+    );
+    let player = cpu_body(
+        app.world_mut(),
+        [0.0, 1.0, 0.0],
+        DEFAULT_PLAYER_SHAPE,
+        RigidBodyKind::Kinematic,
+    );
+    app.world_mut()
+        .entity_mut(player)
+        .insert(PlayerController::default());
+    run_fixed_steps(&mut app, 30);
+    let start = *app.world().get::<PlayerController>(player).unwrap();
+    let start_position = app.world().get::<Transform>(player).unwrap().position;
+    assert!(start.grounded);
+
+    // Step a copy by hand from a peer's input; no action is held.
+    let world = app.world();
+    let dt = world.resource::<FrameTime>().fixed_delta.as_secs_f32();
+    let pose = |entity| {
+        let transform = world.get::<Transform>(entity)?;
+        Some((
+            cpu_physics::world_position(transform, None, None),
+            cpu_physics::world_rotation(transform, None, None),
+        ))
+    };
+    let walk = PlayerInput {
+        forward: 1.0,
+        ..PlayerInput::default()
+    };
+    let replay = || {
+        let (mut state, mut position) = (start, start_position);
+        for _ in 0..30 {
+            state.step(
+                world.resource::<PhysicsWorld>(),
+                player,
+                DEFAULT_PLAYER_SHAPE,
+                &mut position,
+                walk,
+                None,
+                pose,
+                dt,
+            );
+        }
+        (state, position)
+    };
+    let (stepped, position) = replay();
+    assert_eq!(
+        replay(),
+        (stepped, position),
+        "a replay gives the same result"
+    );
+    assert!(stepped.grounded);
+    assert!(
+        (position[1] - 1.11).abs() < 0.02,
+        "on the ledge: {position:?}"
+    );
+    assert!(position[2] < -1.6, "{position:?}");
+
+    // The controller walks the same path from the same keys.
+    app.world_mut()
+        .resource_mut::<RuntimeInput>()
+        .record_key(KeyCode::KeyW, true);
+    run_fixed_steps(&mut app, 30);
+    assert_eq!(
+        app.world().get::<Transform>(player).unwrap().position,
+        position
+    );
+    assert_eq!(
+        *app.world().get::<PlayerController>(player).unwrap(),
+        stepped
+    );
+}
+
+#[test]
 fn player_look_needs_captured_cursor_and_clamps_pitch() {
     let mut app = App::new();
     let player = app.spawn((Transform::default(), PlayerController::default()));

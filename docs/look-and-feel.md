@@ -274,6 +274,36 @@ A `rusting.fluid_block` surface draws as translucent water for the
 liquid solvers and as opaque sand for `Granular`, so a heap of grains
 reads as a heap and not as a puddle.
 
+## Water
+
+`rusting.water` draws one color by default. Three optional fields make
+it read as water; each reads the opaque scene behind the surface, so the
+frame pays for one copy of the depth buffer (the one screen-space
+reflections already make) while any of them is on.
+
+```json
+"rusting.water": {
+  "size": [40.0, 40.0],
+  "color": [0.2, 0.55, 0.6, 0.55],
+  "deep_color": [0.02, 0.1, 0.2, 0.95],
+  "depth_fade": 3.0,
+  "shore_foam": 0.3,
+  "ripples": 0.6,
+  "ripple_length": 0.8
+}
+```
+
+- `deep_color` and `depth_fade`: the water starts at `color` and reaches
+  `deep_color` once the view crosses `depth_fade` metres of it, so the
+  shallows show the ground and open water darkens. `null` keeps one color.
+- `shore_foam`: a white band where the ground is closer than this many
+  metres under the surface, broken up toward its edge in a slow pattern.
+- `ripples` and `ripple_length`: small waves that travel at the
+  deep-water speed for their length, lit on top of the mesh. They fade out
+  in the distance before they would shimmer.
+
+The depth needs the lit view; debug views draw the plain `color`.
+
 ## Text in the world
 
 `rusting.text` puts text on a sign, over a door or above an object. It
@@ -510,6 +540,62 @@ Make layer images seamless: they repeat every `tiling` metres.
 - `normal` is an OpenGL-style normal map (green up). `roughness` reads the
   red channel. A layer without them stays flat at roughness 0.9.
 - Layer images of different sizes are scaled to the largest one.
+- The terrain's own `tint` (linear rgb) multiplies every layer and its
+  `roughness` scales every layer's roughness. Changing only these two
+  updates the material without rebuilding the chunks. `set_terrain_look`
+  sets them without a trip through JSON, so a game can step them every
+  frame, such as darker and glossier ground while it rains:
+
+  ```rust
+  let wet = rain.min(1.0);
+  scene.set_terrain_look("Island", [1.0 - 0.3 * wet; 3], 1.0 - 0.4 * wet);
+  ```
+
+  `set_field` on `/components/rusting.terrain/tint` also skips the
+  rebuild, but it copies the whole terrain, splat weights included,
+  through JSON on each call.
+
+### Grass on the terrain
+
+`rusting.foliage` scatters over a flat disc. On a hilly terrain, set
+`conform` to drop each copy onto the ground below it, and `layers` to keep
+copies on chosen terrain layers only:
+
+```json
+"rusting.foliage": {"count": 4000, "radius": 30.0, "conform": true, "layers": [1]}
+```
+
+- `layers` holds indices into the terrain's `layers` list. A copy stays
+  where those layers make up at least half of the ground's blend, so grass
+  on layer 1 skips the sand on layer 0.
+- Copies off every heightfield keep the disc height with `conform` alone;
+  with `layers`, they are dropped.
+- Copies are placed again when the foliage object moves or the heightfield
+  or terrain changes, not every frame.
+
+### Trees in the wind
+
+A material with a `sway` block bends every mesh that uses it in the
+`rusting.force_field` winds around the mesh's origin, as foliage copies do.
+The bend runs in the vertex shader, so a forest of tree crowns costs no CPU
+time:
+
+```json
+"material": {"Inline": {"base_color": [0.2, 0.45, 0.15, 1.0],
+  "sway": {"amplitude": 0.01, "frequency": 0.3, "height": 4.0}}}
+```
+
+- `amplitude` is the lean per m/s² of push, in metres per metre of height
+  above the origin, the same unit as foliage `sway`. 0 keeps the mesh still.
+- `frequency` pulses the lean between half and one and a half times this
+  many times a second. Each tree's phase comes from its position, so
+  neighbours do not move together.
+- `height` keeps the base rooted: the bend grows over this many metres
+  above the origin, then runs straight. 0 leans the whole mesh as one.
+- Put the origin at the foot of the trunk. Nothing below it bends when
+  `height` is above 0.
+- Only `rusting.force_field` sensors move it, so add a Wind field around the
+  trees. Fields of kind Custom do not bend meshes.
 
 ## Free models
 

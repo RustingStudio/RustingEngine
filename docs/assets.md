@@ -41,7 +41,23 @@ Flags:
   `ASSET_NO_LICENSE`.
 - `--max-size 512` scales an image down so its longest edge is 512 pixels,
   keeping its shape.
+- `--linear` marks an image as data, not color: a normal map, a
+  metallic-roughness map or an occlusion map. Import also cooks
+  `<name>-linear.rtexture` next to it, and the `reference` field points at
+  that file, so the texture reads its values without sRGB decoding.
 - `--dry-run` runs every check on a staged copy and writes nothing.
+
+Importing a glTF cooks it at once, so the first play does not pay for it.
+The report lists every cooked mesh under `meshes`, with its triangle count
+and the triangle count of each generated level of detail:
+
+```text
+Asset: assets/models/fir.glb (5cd9ac84-..., license CC0-1.0)
+Mesh: fir.mesh-0-0.rmesh 48210 triangles, LODs 24104/12051/6024
+```
+
+A count that is far too high for the model's size on screen is the cue to
+bake its foliage into cards (see "Bake foliage into cards").
 
 ### The `.rmeta` file
 
@@ -70,6 +86,11 @@ Import writes `<file>.rmeta` next to the asset:
   follow an asset across edits. Scenes still refer to the file by path.
 - `dependencies` lists the files a glTF loads, such as its `.bin` buffers
   and textures.
+- `cooked` lists the files import cooked beside the asset: a glTF's
+  `.rmesh` meshes, their `.lodN.rmesh` levels and `.rlod` groups, and its
+  `.rtexture` textures, or a `--linear` image's `-linear.rtexture`. The
+  field is absent when nothing was cooked. Reimport recooks the files and
+  rewrites the list.
 - `content_hash` spots edits made to the file outside import.
 - `source` is the license record. Keep the `.rmeta` with the asset in
   version control.
@@ -90,7 +111,10 @@ into a material slot:
 
 The other slots are `normal_texture`, `metallic_roughness_texture`,
 `occlusion_texture` and `emissive_texture`; `uv_scale` repeats the
-texture across a face. Run `rusting docs show component/mesh_renderer`
+texture across a face. A plain image (`.png`, `.jpg`) in the normal,
+metallic-roughness or occlusion slot loads as linear data, and one in the
+base color or emissive slot loads as sRGB. A cooked `.rtexture` keeps the
+color space it was cooked with. Run `rusting docs show component/mesh_renderer`
 for every field.
 
 A model goes in as one object with a child for each glTF node:
@@ -103,6 +127,12 @@ rusting scene add-model my_game/scenes/main.rscene my_game/assets/models/barrel.
 It writes the converted meshes (`.rmesh`) and textures (`.rtexture`) next
 to the model; keep them with the project. Run it again with another
 `--name` for each copy, or `spawn_copy` the object in code.
+
+A material whose textures carry a `KHR_texture_transform` (Blender and
+Poly Haven exports set one for tiling bark and ground) has the offset,
+rotation and scale folded into the mesh's UVs on import. A mesh has one
+set of UVs, so the import stops with an error naming the material when
+its textures use different transforms; bake them into `TEXCOORD_0` first.
 
 Sounds are the exception: `rusting.sound_cue.clip` and `play_sound` take a
 path relative to `assets/`, such as `sounds/hit.wav`. See
@@ -119,7 +149,12 @@ path or its ID. The new file comes from `--from`, else from the recorded
 original if it still exists; otherwise reimport only checks the asset in
 place. It takes the same provenance flags and `--max-size` as import, and
 each given flag replaces the recorded value. A glTF also cooks its
-`.rmesh` files again.
+`.rmesh` and `.rtexture` files again, next to the copy in the project.
+
+If the project copy was edited after the last import, reimport without
+`--from` keeps the edited copy instead of copying the recorded original
+over it. It warns `ASSET_EDITED_COPY` and records the copy as the new
+original, so the next reimport keeps it too.
 
 Reimport reports the scenes that use the asset. A running game or the
 editor reloads the file, so the change shows without a restart.
@@ -196,6 +231,42 @@ Only `file` is required. The file then goes through `asset import`, so
 its type, size and metadata are checked like any other file. Output with
 no license, from the hook or its config, is refused. A hook named `sfx`,
 `texture`, `sprite`, `mesh` or `font` replaces the built-in one.
+
+## Bake foliage into cards
+
+Scanned and modelled trees often model every leaf or needle: a free
+fir can have four million triangles. Simplifying such a mesh destroys the
+crown. `asset bake-foliage` replaces the foliage with alpha-tested cards
+instead:
+
+```bash
+rusting asset bake-foliage art/fir_tree_01_2k.gltf --node fir_tree_01_a_LOD0 --cards 1500 --impostor --out assets/trees/fir_a
+```
+
+```json
+{"source_triangles": 4176819, "foliage_triangles": 4066119, "cards": 1500,
+ "card_triangles": 6000, "impostor_triangles": 4, "coverage": 0.52,
+ "files": ["assets/trees/fir_a-cards.glb", "assets/trees/fir_a-impostor.glb"]}
+```
+
+- Foliage is every triangle whose material is `MASK` or `BLEND`. The
+  triangles are grouped into `--cards` clusters, and each cluster's
+  texture is drawn onto two crossed quads, so each card costs 4
+  triangles. Texels the source texture cuts away are left out.
+- The cards share one RGBA atlas (`--atlas`, 2048 px) and a `MASK`,
+  double-sided material. `--tint 3e4b2a` scales the atlas's mean colour
+  to that sRGB colour, to match an art direction.
+- `--impostor` also writes two crossed quads showing the whole tree,
+  bark included, for the farthest level of detail.
+- `--node` bakes one node and its children at that node's origin. Use it
+  for files that place several variants side by side.
+- The bark (the opaque triangles) is not in the cards file. Draw it from
+  a simplified copy of the model, as a second object at the same place.
+- The same model and flags always write the same bytes.
+
+Import the files with `asset import`, then list the cards and the
+impostor as the far levels of a `.rlod` (see
+[Look and feel](look-and-feel.md)).
 
 ## Export the game
 

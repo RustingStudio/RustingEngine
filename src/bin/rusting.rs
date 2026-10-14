@@ -659,6 +659,10 @@ fn run_command(args: &[String]) -> CliResult {
                     options.dry_run = true;
                     continue;
                 }
+                if *flag == "--linear" {
+                    options.linear = true;
+                    continue;
+                }
                 let Some(value) = flags.next().map(|value| (*value).to_owned())
                 else {
                     return usage(format!("`{flag}` needs a value"));
@@ -691,6 +695,60 @@ fn run_command(args: &[String]) -> CliResult {
                 cli::import_asset(Path::new(root), Path::new(target), &options)
             } else {
                 cli::reimport_asset(Path::new(root), target, &options)
+            }
+        }
+        ["asset", "bake-foliage", model, flags @ ..] => {
+            #[cfg(feature = "gltf")]
+            {
+                let mut options =
+                    rusting_engine::foliage_bake::FoliageBakeOptions::default();
+                let mut out = None;
+                let mut flags = flags.iter();
+                while let Some(flag) = flags.next() {
+                    if *flag == "--impostor" {
+                        options.impostor = true;
+                        continue;
+                    }
+                    let Some(value) = flags.next() else {
+                        return usage(format!("`{flag}` needs a value"));
+                    };
+                    match *flag {
+                        "--cards" => match value.parse() {
+                            Ok(cards) => options.cards = cards,
+                            Err(_) => return usage("--cards requires a count"),
+                        },
+                        "--atlas" => match value.parse() {
+                            Ok(atlas) => options.atlas = atlas,
+                            Err(_) => return usage("--atlas requires pixels"),
+                        },
+                        "--tint" => {
+                            let hex = value.trim_start_matches('#');
+                            let channel = |at: usize| {
+                                hex.get(at..at + 2)
+                                    .and_then(|c| u8::from_str_radix(c, 16).ok())
+                            };
+                            match (hex.len(), channel(0), channel(2), channel(4)) {
+                                (6, Some(r), Some(g), Some(b)) => {
+                                    options.tint = Some([r, g, b])
+                                }
+                                _ => return usage("--tint requires an sRGB hex colour such as 3e4b2a"),
+                            }
+                        }
+                        "--out" => out = Some(Path::new(*value)),
+                        "--node" => options.node = Some((*value).to_owned()),
+                        _ => {
+                            return usage(format!(
+                                "unknown asset bake-foliage flag `{flag}`"
+                            ))
+                        }
+                    }
+                }
+                cli::bake_foliage(Path::new(model), out, &options)
+            }
+            #[cfg(not(feature = "gltf"))]
+            {
+                let _ = (model, flags);
+                usage("this build has no glTF support (feature `gltf`)")
             }
         }
         ["asset", "generate", root, hook, prompt, flags @ ..] => {
@@ -1285,6 +1343,24 @@ fn render_human(result: &CliResult) -> String {
                     ""
                 }
             ));
+            for mesh in asset["meshes"].as_array().into_iter().flatten() {
+                let lods = mesh["lods"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|level| level.to_string())
+                    .collect::<Vec<_>>();
+                lines.push(format!(
+                    "Mesh: {} {} triangles{}",
+                    mesh["mesh"].as_str().unwrap_or("?"),
+                    mesh["triangles"],
+                    if lods.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", LODs {}", lods.join("/"))
+                    }
+                ));
+            }
         }
         if let Some(cameras) = data.get("cameras").and_then(|v| v.as_array()) {
             for camera in cameras {

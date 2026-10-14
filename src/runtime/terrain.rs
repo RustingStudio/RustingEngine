@@ -57,6 +57,13 @@ pub struct Terrain {
     /// quarter-detail mesh starts at twice it. 0 keeps full detail.
     pub lod_distance: f32,
     pub cast_shadows: bool,
+    /// Linear color multiplied into every layer, such as a darker tint
+    /// for wet ground. Changing only this and `roughness` updates the
+    /// material without rebuilding the chunks.
+    pub tint: [f32; 3],
+    /// Multiplies every layer's roughness; below 1 makes the ground
+    /// glossier.
+    pub roughness: f32,
 }
 
 impl Default for Terrain {
@@ -68,6 +75,8 @@ impl Default for Terrain {
             chunk_cells: 0,
             lod_distance: 50.0,
             cast_shadows: true,
+            tint: [1.0; 3],
+            roughness: 1.0,
         }
     }
 }
@@ -153,10 +162,13 @@ pub struct TerrainChunks {
     pub normals: Option<Handle<TextureAsset>>,
     pub cast_shadows: bool,
     built: Tick,
+    /// [`shape`] of the terrain these assets were built from.
+    shape: u64,
 }
 
 /// Builds terrain assets for new or changed terrains and frees those of
-/// removed ones. Runs at the start of extraction, so the editor shows
+/// removed ones. A change to only `tint` or `roughness` updates the
+/// material in place. Runs at the start of extraction, so the editor shows
 /// terrain without running game systems.
 // ponytail: any change rebuilds every chunk; rebuild only touched chunks
 // when sculpting large terrains in the editor gets slow. A despawned
@@ -197,21 +209,112 @@ pub(super) fn build_terrains(world: &mut World) {
             })
         })
         .map(|(entity, terrain, field, chunks)| {
+            let shape = shape(&terrain);
+            let reshaped = chunks.is_none_or(|chunks| {
+                chunks.shape != shape
+                    || field
+                        .last_changed()
+                        .is_newer_than(chunks.built, this_run)
+            });
+            let rebuild = reshaped.then(|| {
+                (Terrain::clone(&terrain), Heightfield::clone(&field))
+            });
             (
                 entity,
-                Terrain::clone(&terrain),
-                Heightfield::clone(&field),
+                rebuild,
                 chunks.cloned(),
+                terrain.tint,
+                terrain.roughness,
             )
         })
         .collect::<Vec<_>>();
-    for (entity, terrain, field, old) in stale {
+    for (entity, rebuild, old, tint, roughness) in stale {
         let mut assets = world.resource_mut::<AssetServer>();
+        let Some((terrain, field)) = rebuild else {
+            // Only the look changed: no hitch on a large terrain (F23).
+            let mut chunks = old.expect("look-only changes have chunks");
+            apply_look(tint, roughness, &chunks, &mut assets);
+            chunks.built = this_run;
+            world.entity_mut(entity).insert(chunks);
+            continue;
+        };
         if let Some(old) = old {
             free(&old, &mut assets);
         }
         let chunks = build(&terrain, &field, &mut assets, this_run);
         world.entity_mut(entity).insert(chunks);
+    }
+}
+
+/// Hash of every field a rebuild reads: all but `tint` and `roughness`,
+/// which [`apply_look`] sets on the material alone.
+fn shape(terrain: &Terrain) -> u64 {
+    use std::hash::{Hash, Hasher};
+    // Destructured so a new field must be sorted into shape or look.
+    let Terrain {
+        layers,
+        splat,
+        tiling,
+        chunk_cells,
+        lod_distance,
+        cast_shadows,
+        tint: _,
+        roughness: _,
+    } = terrain;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for layer in layers {
+        let TerrainLayer {
+            texture,
+            color,
+            min_height,
+            normal,
+            roughness,
+            tiling,
+        } = layer;
+        (texture, normal, roughness).hash(&mut hasher);
+        for value in color.iter().chain([min_height, tiling]) {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    (
+        tiling.to_bits(),
+        chunk_cells,
+        lod_distance.to_bits(),
+        cast_shadows,
+    )
+        .hash(&mut hasher);
+    // A large island has millions of splat weights: fold them with a
+    // cheap multiply-rotate rather than SipHash.
+    let mut fold = 0u64;
+    for row in splat {
+        fold = (fold.rotate_left(5) ^ row.len() as u64)
+            .wrapping_mul(0x517c_c1b7_2722_0a95);
+        for weight in row.iter().flatten() {
+            fold = (fold.rotate_left(5) ^ u64::from(weight.to_bits()))
+                .wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    fold.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Sets the terrain-wide `tint` and `roughness` on the built material.
+fn apply_look(
+    tint: [f32; 3],
+    roughness: f32,
+    chunks: &TerrainChunks,
+    assets: &mut AssetServer,
+) {
+    if let Some(material) = assets.materials.get_mut(chunks.material) {
+        let [r, g, b] = tint;
+        material.base_color = [r, g, b, 1.0];
+        // Layer roughness lives in the normal array's alpha.
+        let layers = if chunks.normals.is_some() {
+            1.0
+        } else {
+            PLAIN_ROUGHNESS
+        };
+        material.roughness = layers * roughness;
     }
 }
 
@@ -249,12 +352,6 @@ fn build(
     }
     let material = assets.materials.insert(MaterialAsset {
         name: "terrain".into(),
-        // Layer roughness lives in the normal array's alpha.
-        roughness: if normals.is_some() {
-            1.0
-        } else {
-            PLAIN_ROUGHNESS
-        },
         splat: true,
         splat_scale,
         base_color_texture: Some(colors),
@@ -283,7 +380,7 @@ fn build(
             levels,
         }));
     }
-    TerrainChunks {
+    let chunks = TerrainChunks {
         meshes,
         groups,
         material,
@@ -291,7 +388,10 @@ fn build(
         normals,
         cast_shadows: terrain.cast_shadows,
         built,
-    }
+        shape: shape(terrain),
+    };
+    apply_look(terrain.tint, terrain.roughness, &chunks, assets);
+    chunks
 }
 
 /// Each chunk's meshes in the entity's space, finest first. Every mesh
@@ -415,6 +515,67 @@ fn chunk_mesh(
             .extend([top[0], top[1], bottom[0], top[1], bottom[1], bottom[0]]);
     }
     mesh
+}
+
+/// Height of the drawn ground at `x`, `z` in the heightfield entity's
+/// space, and the terrain's normalized layer weights there (all on the
+/// first layer without a terrain); `None` off the grid. Each cell splits
+/// into the same two triangles as the chunk meshes.
+pub(super) fn ground(
+    field: &Heightfield,
+    terrain: Option<&Terrain>,
+    x: f32,
+    z: f32,
+) -> Option<(f32, [f32; 4])> {
+    let rows = field.heights.len();
+    let columns = field.heights.iter().map(Vec::len).max().unwrap_or(0);
+    if rows < 2 || columns < 2 || field.spacing <= 0.0 {
+        return None;
+    }
+    let u = x / field.spacing + 0.5 * (columns - 1) as f32;
+    let v = z / field.spacing + 0.5 * (rows - 1) as f32;
+    if !(0.0..=(columns - 1) as f32).contains(&u)
+        || !(0.0..=(rows - 1) as f32).contains(&v)
+    {
+        return None;
+    }
+    let column = (u as usize).min(columns - 2);
+    let row = (v as usize).min(rows - 2);
+    let (fx, fz) = (u - column as f32, v - row as f32);
+    let corners = [
+        (row, column),
+        (row, column + 1),
+        (row + 1, column),
+        (row + 1, column + 1),
+    ];
+    let height = |(row, column): (usize, usize)| -> f32 {
+        field.heights[row].get(column).copied().unwrap_or(0.0)
+    };
+    let [a, b, c, d] = corners.map(height);
+    // The diagonal runs from (row, column + 1) to (row + 1, column).
+    let y = if fx + fz <= 1.0 {
+        a + fx * (b - a) + fz * (c - a)
+    } else {
+        d + (1.0 - fx) * (c - d) + (1.0 - fz) * (b - d)
+    };
+    let Some(terrain) = terrain else {
+        return Some((y, [1.0, 0.0, 0.0, 0.0]));
+    };
+    let shares = [
+        (1.0 - fx) * (1.0 - fz),
+        fx * (1.0 - fz),
+        (1.0 - fx) * fz,
+        fx * fz,
+    ];
+    let mut blend = [0.0; MAX_TERRAIN_LAYERS];
+    for (corner, share) in corners.into_iter().zip(shares) {
+        let found = weights(terrain, corner.0, corner.1, height(corner));
+        let sum = found.iter().sum::<f32>().max(1e-6);
+        for (blended, weight) in blend.iter_mut().zip(found) {
+            *blended += share * weight / sum;
+        }
+    }
+    Some((y, blend))
 }
 
 /// Layer weights at one height sample, from `splat` or height bands.
@@ -847,6 +1008,35 @@ mod tests {
         let assets = world.resource::<AssetServer>();
         assert!(assets.meshes.get(chunks.meshes[0]).is_none());
         assert_eq!(assets.meshes.iter().count(), baseline + 6);
+
+        // A wet tint and gloss update the material, not the chunks (F23).
+        {
+            let mut terrain = world.get_mut::<Terrain>(entity).unwrap();
+            terrain.tint = [0.5, 0.4, 0.3];
+            terrain.roughness = 0.5;
+        }
+        build_terrains(&mut world);
+        let wet = world.get::<TerrainChunks>(entity).unwrap().clone();
+        assert_eq!(wet.meshes, rebuilt.meshes);
+        assert_eq!(wet.colors, rebuilt.colors);
+        let material = world
+            .resource::<AssetServer>()
+            .materials
+            .get(wet.material)
+            .unwrap();
+        assert_eq!(material.base_color, [0.5, 0.4, 0.3, 1.0]);
+        assert_eq!(material.roughness, 0.45);
+        build_terrains(&mut world);
+        assert_eq!(world.get::<TerrainChunks>(entity), Some(&wet));
+        // A layer color still rebuilds, and keeps the look.
+        world.get_mut::<Terrain>(entity).unwrap().layers[0].color[1] = 1.0;
+        build_terrains(&mut world);
+        let yellow = world.get::<TerrainChunks>(entity).unwrap().clone();
+        assert_ne!(yellow.meshes, wet.meshes);
+        let assets = world.resource::<AssetServer>();
+        let material = assets.materials.get(yellow.material).unwrap();
+        assert_eq!(material.base_color, [0.5, 0.4, 0.3, 1.0]);
+        let rebuilt = yellow;
 
         world.entity_mut(entity).remove::<Terrain>();
         build_terrains(&mut world);

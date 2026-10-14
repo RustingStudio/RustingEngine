@@ -7,6 +7,10 @@ gradient noise, evenly spread points, and tile maps and 3D grids;
 result on every machine, so a generated level can be saved as its seed,
 shared between players, or checked in a scenario.
 
+`rusting docs show api/procgen` lists every function and type with its
+signature, and `api/<name>` (such as `api/fbm2` or `api/RandomStream`)
+shows one, with its value range.
+
 ## Random streams
 
 A `RandomStream` draws a sequence of values from one seed. Take the seed

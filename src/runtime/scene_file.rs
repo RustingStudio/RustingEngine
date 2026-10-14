@@ -15,7 +15,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::assets::{
-    AlphaMode, AssetServer, Handle, MaterialAsset, MaterialModel,
+    AlphaMode, AssetServer, Handle, MaterialAsset, MaterialModel, MaterialSway,
     PrimitiveShape, TextureAsset,
 };
 use crate::reflect::{
@@ -32,7 +32,7 @@ use super::{
 use crate::runtime::DeterminismMode;
 use crate::runtime::{CullingMode, QualityProfile};
 
-pub const SCENE_FORMAT_VERSION: u32 = 10;
+pub const SCENE_FORMAT_VERSION: u32 = 11;
 const COMPILED_MAGIC: &[u8; 8] = b"RSCENE01";
 
 #[derive(Debug)]
@@ -286,8 +286,9 @@ impl From<LegacySceneDocumentV5> for SceneDocument {
     }
 }
 
-/// Cooked shape of version 8, before material names, and with
-/// [`SceneMaterialDataV9`] the shape of version 9, before flat shading.
+/// Cooked shape of version 8, before material names, with
+/// [`SceneMaterialDataV9`] the shape of version 9, before flat shading, and
+/// with [`SceneMaterialDataV10`] the shape of version 10, before sway.
 #[derive(Serialize, Deserialize)]
 struct LegacySceneDocumentV8<M = SceneMaterialDataV8> {
     format_version: u32,
@@ -361,6 +362,56 @@ struct SceneMaterialDataV9 {
     rest: SceneMaterialDataV8,
 }
 
+/// Cooked material of version 10, before sway: every current field up to
+/// the textures.
+#[derive(Serialize, Deserialize)]
+struct SceneMaterialDataV10 {
+    name: String,
+    model: SceneMaterialModel,
+    alpha_mode: SceneAlphaMode,
+    base_color: [f32; 4],
+    emissive: [f32; 3],
+    metallic: f32,
+    roughness: f32,
+    transmission: f32,
+    ior: f32,
+    thickness: f32,
+    uv_scale: [f32; 2],
+    uv_offset: [f32; 2],
+    flat_shading: bool,
+    base_color_texture: Option<PathBuf>,
+    normal_texture: Option<PathBuf>,
+    metallic_roughness_texture: Option<PathBuf>,
+    occlusion_texture: Option<PathBuf>,
+    emissive_texture: Option<PathBuf>,
+}
+
+impl From<SceneMaterialDataV10> for SceneMaterialData {
+    fn from(material: SceneMaterialDataV10) -> Self {
+        Self {
+            name: material.name,
+            model: material.model,
+            alpha_mode: material.alpha_mode,
+            base_color: material.base_color,
+            emissive: material.emissive,
+            metallic: material.metallic,
+            roughness: material.roughness,
+            transmission: material.transmission,
+            ior: material.ior,
+            thickness: material.thickness,
+            uv_scale: material.uv_scale,
+            uv_offset: material.uv_offset,
+            flat_shading: material.flat_shading,
+            base_color_texture: material.base_color_texture,
+            normal_texture: material.normal_texture,
+            metallic_roughness_texture: material.metallic_roughness_texture,
+            occlusion_texture: material.occlusion_texture,
+            emissive_texture: material.emissive_texture,
+            sway: MaterialSway::default(),
+        }
+    }
+}
+
 impl From<SceneMaterialDataV9> for SceneMaterialData {
     fn from(material: SceneMaterialDataV9) -> Self {
         Self {
@@ -391,6 +442,7 @@ impl From<SceneMaterialDataV8> for SceneMaterialData {
             metallic_roughness_texture: material.metallic_roughness_texture,
             occlusion_texture: material.occlusion_texture,
             emissive_texture: material.emissive_texture,
+            sway: MaterialSway::default(),
         }
     }
 }
@@ -569,6 +621,7 @@ impl From<SceneEntityV7> for SceneEntity {
                                     .metallic_roughness_texture,
                                 occlusion_texture: material.occlusion_texture,
                                 emissive_texture: material.emissive_texture,
+                                sway: MaterialSway::default(),
                             })
                         }
                     },
@@ -743,6 +796,7 @@ impl From<LegacySceneMeshRendererV4> for SceneMeshRenderer {
                             .metallic_roughness_texture,
                         occlusion_texture: material.occlusion_texture,
                         emissive_texture: material.emissive_texture,
+                        sway: MaterialSway::default(),
                     })
                 }
             },
@@ -1006,6 +1060,10 @@ pub struct SceneMaterialData {
     pub metallic_roughness_texture: Option<PathBuf>,
     pub occlusion_texture: Option<PathBuf>,
     pub emissive_texture: Option<PathBuf>,
+    /// Bend in the wind; see [`MaterialSway`]. Cooked version 10 scenes
+    /// end before it.
+    #[serde(default)]
+    pub sway: MaterialSway,
 }
 
 fn default_uv_scale() -> [f32; 2] {
@@ -2956,6 +3014,11 @@ fn decode_scene(bytes: &[u8]) -> Result<SceneDocument, SceneIoError> {
                 compiled,
             )?
             .into()
+        } else if version == 10 {
+            crate::assets::deserialize_bounded::<
+                LegacySceneDocumentV8<SceneMaterialDataV10>,
+            >(compiled)?
+            .into()
         } else if version == 9 {
             crate::assets::deserialize_bounded::<
                 LegacySceneDocumentV8<SceneMaterialDataV9>,
@@ -3049,7 +3112,7 @@ fn migrate_scene_document(
     document: &mut SceneDocument,
 ) -> Result<(), SceneIoError> {
     match document.format_version {
-        0..=9 => {
+        0..=10 => {
             // Versions before programmable GPU watches, render settings, and
             // simulation settings
             // use safe defaults for the fields that were added later.
@@ -3147,6 +3210,7 @@ fn scene_material(
         )?,
         occlusion_texture: texture_path(material.occlusion_texture)?,
         emissive_texture: texture_path(material.emissive_texture)?,
+        sway: material.sway,
     })
 }
 
@@ -3261,22 +3325,29 @@ fn runtime_material(
     material: &SceneMaterialData,
     assets: &mut AssetServer,
 ) -> Result<MaterialAsset, SceneIoError> {
+    /// `linear` slots hold data (normals, roughness, occlusion), so a
+    /// plain image there loads linear.
     fn texture(
         assets: &mut AssetServer,
         path: &Option<PathBuf>,
+        linear: bool,
     ) -> Result<Option<Handle<TextureAsset>>, SceneIoError> {
         path.as_ref()
             .map(|path| {
-                if let Some(handle) = assets.textures.handle_for_path(path) {
-                    Ok(handle)
-                } else {
-                    assets.load_texture(path).map_err(|error| {
-                        SceneIoError::AssetLoad {
-                            path: path.clone(),
-                            message: error.to_string(),
-                        }
-                    })
+                if let (false, Some(handle)) =
+                    (linear, assets.textures.handle_for_path(path))
+                {
+                    return Ok(handle);
                 }
+                if linear {
+                    assets.load_linear_texture(path)
+                } else {
+                    assets.load_texture(path)
+                }
+                .map_err(|error| SceneIoError::AssetLoad {
+                    path: path.clone(),
+                    message: error.to_string(),
+                })
             })
             .transpose()
     }
@@ -3306,14 +3377,22 @@ fn runtime_material(
         // ponytail: scene files do not save surface shaders yet; that
         // needs a cooked format version.
         shader: String::new(),
-        base_color_texture: texture(assets, &material.base_color_texture)?,
-        normal_texture: texture(assets, &material.normal_texture)?,
+        sway: material.sway,
+        // Only `rusting.water` makes water materials, from its component.
+        water: Default::default(),
+        base_color_texture: texture(
+            assets,
+            &material.base_color_texture,
+            false,
+        )?,
+        normal_texture: texture(assets, &material.normal_texture, true)?,
         metallic_roughness_texture: texture(
             assets,
             &material.metallic_roughness_texture,
+            true,
         )?,
-        occlusion_texture: texture(assets, &material.occlusion_texture)?,
-        emissive_texture: texture(assets, &material.emissive_texture)?,
+        occlusion_texture: texture(assets, &material.occlusion_texture, true)?,
+        emissive_texture: texture(assets, &material.emissive_texture, false)?,
     })
 }
 
@@ -4253,6 +4332,57 @@ mod tests {
             panic!("inline material expected");
         };
         material.clone()
+    }
+
+    #[test]
+    fn version_ten_cooked_scenes_load_without_sway_and_sway_round_trips() {
+        let v10 = migrate_legacy(
+            10,
+            SceneMaterialDataV10 {
+                name: "leaves".into(),
+                model: SceneMaterialModel::Pbr,
+                alpha_mode: SceneAlphaMode::Opaque,
+                base_color: [0.2, 0.5, 0.1, 1.0],
+                emissive: [0.0; 3],
+                metallic: 0.0,
+                roughness: 0.8,
+                transmission: 0.0,
+                ior: 1.5,
+                thickness: 0.0,
+                uv_scale: [1.0; 2],
+                uv_offset: [0.0; 2],
+                flat_shading: true,
+                base_color_texture: None,
+                normal_texture: None,
+                metallic_roughness_texture: None,
+                occlusion_texture: None,
+                emissive_texture: Some("glow.png".into()),
+            },
+        );
+        assert_eq!(v10.name, "leaves");
+        assert!(v10.flat_shading);
+        assert_eq!(v10.emissive_texture, Some("glow.png".into()));
+        assert_eq!(v10.sway, MaterialSway::default());
+
+        let mut assets = AssetServer::default();
+        let material = MaterialAsset {
+            sway: MaterialSway {
+                amplitude: 0.02,
+                frequency: 0.5,
+                height: 3.0,
+            },
+            ..MaterialAsset::default()
+        };
+        let data = scene_material(&material, &assets).unwrap();
+        let cooked: SceneMaterialData =
+            bincode::deserialize(&bincode::serialize(&data).unwrap()).unwrap();
+        assert_eq!(cooked.sway, material.sway);
+        assert_eq!(runtime_material(&cooked, &mut assets).unwrap(), material);
+        // Text scenes written before sway still parse.
+        let mut text = serde_json::to_value(&data).unwrap();
+        text.as_object_mut().unwrap().remove("sway");
+        let parsed: SceneMaterialData = serde_json::from_value(text).unwrap();
+        assert_eq!(parsed.sway, MaterialSway::default());
     }
 
     #[test]

@@ -1026,6 +1026,31 @@ fn draw_material(
     widgets::checkbox(ui, "Flat Shading", &mut material.flat_shading);
     widgets::drag(
         ui,
+        "Sway",
+        DragValue::new(&mut material.sway.amplitude)
+            .range(0.0..=1.0)
+            .speed(0.001),
+    );
+    if material.sway.amplitude > 0.0 {
+        widgets::drag(
+            ui,
+            "Sway Gusts",
+            DragValue::new(&mut material.sway.frequency)
+                .range(0.0..=10.0)
+                .speed(0.01)
+                .suffix(" Hz"),
+        );
+        widgets::drag(
+            ui,
+            "Sway Height",
+            DragValue::new(&mut material.sway.height)
+                .range(0.0..=100.0)
+                .speed(0.05)
+                .suffix(" m"),
+        );
+    }
+    widgets::drag(
+        ui,
         "Transmission",
         DragValue::new(&mut material.transmission)
             .range(0.0..=1.0)

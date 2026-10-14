@@ -37,6 +37,12 @@ pub const CODES: &[CodeInfo] = &[
         "rusting fix",
     ),
     code(
+        "ASSET_BAKE_FAILED",
+        "`rusting asset bake-foliage` could not bake the model: it has no MASK or BLEND foliage, the named node is missing, or the options do not fit the atlas.",
+        "Check that the leaves use an alpha-tested (MASK) or blended material, pass a node name the error lists, or lower --cards / raise --atlas.",
+        "rusting asset bake-foliage art/fir.gltf --node fir_a --cards 1200 --impostor",
+    ),
+    code(
         "ASSET_CHANGED",
         "An imported file no longer matches the content hash in its .rmeta.",
         "Record the new content with `rusting asset reimport`, or restore the original file.",
@@ -53,6 +59,12 @@ pub const CODES: &[CodeInfo] = &[
         "Two .rmeta files carry the same asset ID, usually because an asset folder was copied by hand.",
         "Delete the copied .rmeta and import the copy again so it gets its own ID.",
         "rm assets/crate_copy.png.rmeta && rusting asset import . assets/crate_copy.png",
+    ),
+    code(
+        "ASSET_EDITED_COPY",
+        "Reimport found the project copy of an asset edited since its last import. The edit is kept and recorded as the new original.",
+        "Nothing to do if the edit was meant. To take the outside file instead, delete the project copy and import it again.",
+        "rusting asset reimport . assets/models/tree.gltf --from ~/art/tree.gltf",
     ),
     code(
         "ASSET_EXISTS",
@@ -691,7 +703,8 @@ mod tests {
             .any(|prefix| {
                 literal.starts_with(prefix) && literal != "RUST_BUILD_ERROR"
             })
-            || ["GRID_PASS", "OVERSIZED_PASS", "D32_SFLOAT"].contains(&literal)
+            || ["GRID_PASS", "OVERSIZED_PASS", "D32_SFLOAT", "TEXCOORD_0"]
+                .contains(&literal)
     }
 
     fn scan(folder: &Path, found: &mut BTreeSet<String>) {

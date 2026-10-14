@@ -186,7 +186,12 @@ fn glb(name: &str, parts: &[Part]) -> Vec<u8> {
         "materials": materials, "accessors": accessors,
         "bufferViews": views, "buffers": [{"byteLength": bin.len()}],
     });
-    let mut json = serde_json::to_vec(&json).unwrap_or_default();
+    glb_container(&json, bin)
+}
+
+/// Wraps a glTF JSON document and its binary buffer in a GLB file.
+pub(crate) fn glb_container(json: &serde_json::Value, bin: Vec<u8>) -> Vec<u8> {
+    let mut json = serde_json::to_vec(json).unwrap_or_default();
     // Chunks are 4-byte aligned: JSON pads with spaces, BIN with zeros.
     json.resize(json.len().next_multiple_of(4), b' ');
     let total = 12 + 8 + json.len() + 8 + bin.len();

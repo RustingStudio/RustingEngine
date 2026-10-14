@@ -5,10 +5,15 @@ its clients over TCP, and unreliable ones over UDP. It uses only the
 standard library. Every client talks
 to the host, and the host forwards what other clients need (a star).
 
-- The host has id `HOST` (0). Clients get ids from 1 in join order.
+- The host has id `HOST` (0). Clients get ids from 1 in join order. A
+  `PeerId` is a `u32`.
 - A message is a byte string. It arrives whole and in order. Put JSON
   (`serde_json::to_vec`) or bincode in it.
 - `poll()` never blocks. Call it once per frame or tick.
+- `rusting docs show api/net` lists every type and function with its
+  signature; `api/net::predict`, `api/net::input` and
+  `api/net::interpolate` list the helpers below, and `api/<name>` (such as
+  `api/NetSession` or `api/Smoothing::correct`) shows one.
 
 ## Host and join by address
 
@@ -86,6 +91,29 @@ Codes ignore case and leave out the look-alikes I, O, 0 and 1. The room
 closes when its host leaves. Game code is the same as for direct
 sessions; only the constructor differs.
 
+## Sharing the world seed
+
+A procedural world must use the same seed on every peer. The host puts its
+seed in the session, and each joining client receives it in the join
+handshake, direct or through a relay:
+
+```rust
+// Host, right after NetSession::host or host_room.
+session.set_seed(scene.seed())?;
+
+// Client, right after NetSession::join or join_room.
+if let Some(seed) = session.seed() {
+    scene.set_seed(seed);
+}
+```
+
+- `seed()` is `None` when the host set no seed, or when the client joined
+  before the host called `set_seed`. Call it before telling players the
+  address or room code.
+- A client cannot call `set_seed`; it returns an error.
+- A dedicated server takes its seed from `rusting run --server --seed N`,
+  or 0 without one, so clients no longer need `--seed` too.
+
 ## Listen servers and dedicated servers
 
 A listen server is a player's game that also hosts: call
@@ -98,7 +126,9 @@ RUSTING_SERVER=1 ./my_game              # an exported game
 ```
 
 - It ticks once per fixed step of real time, renders nothing, and runs
-  until game code calls `scene.quit()` (or `--timeout` stops it).
+  until game code calls `scene.quit()` (or `--timeout` stops it). Ctrl+C
+  and SIGTERM stop it too; either way game code gets one last update with
+  `scene.exiting()` true to save in.
 - Game code sees the `net::DedicatedServer` resource there. Host instead
   of showing a menu:
 
@@ -555,6 +585,28 @@ smooth.present(world, client_time);
   `present` never moves it; the game sets its `Transform` from the
   prediction.
 
+A game that sends its own snapshots, with no replica, keeps one
+`net::interpolate::Track` per remote object and pushes plain
+`(tick, position)` samples into it:
+
+```rust
+use rusting_engine::net::interpolate::Track;
+use std::collections::BTreeMap;
+
+let mut tracks: BTreeMap<PeerId, Track> = BTreeMap::new();
+// For each snapshot received:
+tracks.entry(peer).or_default().push(tick, position);
+// Every frame, draw each peer two and a half ticks behind its newest:
+for track in tracks.values() {
+    let tick = track.newest().unwrap() as f64 - 2.5;
+    let position = track.at(tick).unwrap();
+}
+```
+
+Samples may arrive in any order; a repeated tick replaces the old one, and
+a track keeps the newest 64 ticks. `at` takes a fractional tick, holds the
+oldest sample before it and the newest after it.
+
 ## Predicting the player's own object
 
 Waiting a round trip for the host makes a player's own raft feel slow.
@@ -591,8 +643,9 @@ position = prediction.reconcile(acked_tick, host_position, steer);
   use rusting_engine::net::predict::Smoothing;
 
   let mut smoothing = Smoothing::new(Duration::from_millis(100), 2.0);
-  // On the host's reply:
-  let before = drawn;
+  // On the host's reply. `before` is where the prediction is drawn now,
+  // not last frame's `drawn`, which is a step behind while moving.
+  let before = smoothing.shown(position, Duration::ZERO);
   position = prediction.reconcile(acked_tick, host_position, steer);
   smoothing.correct(before, position);
   // Every frame:
@@ -604,6 +657,24 @@ position = prediction.reconcile(acked_tick, host_position, steer);
   lags, halving its error every half-life (100 ms here). A correction
   longer than the snap distance (2 m here: a teleport or respawn) shows
   at once. Never feed `drawn` back into `steer` or the host.
+- A walking player needs no hand-written `steer`.
+  `PlayerController::step` runs one tick of the same movement as
+  `rusting.player_controller` from a `PlayerInput` instead of the local
+  keyboard. The host steps each peer's body with that peer's input, and
+  the client replays its pending inputs through it:
+
+  ```rust
+  use rusting_engine::{PlayerController, PlayerInput};
+
+  let input = PlayerInput { forward: 1.0, jump: pressed, jump_held: held, ..Default::default() };
+  let shove = controller.step(physics, body, shape, &mut position, input, None, |_| None, dt);
+  ```
+
+  Set `controller.yaw` from the input first. `water` is
+  `Some((surface_y, current))` when water lies over the body, and
+  `floor_pose` returns the position and rotation of a floor entity so
+  a moving platform carries the player. Keep the `PlayerController` itself in the predicted state:
+  it holds the velocity, the jump buffer and the dash cooldown.
 - Predict only the local hero. Mark it with
   `net::predict::predict_only(world, hero)`, which removes `Predicted`
   from any other object, and use an `interpolated()` replica so the
@@ -637,6 +708,10 @@ session.simulate(NetConditions {
   as on real TCP.
 - The same seed gives the same delays. `NetConditions::default()` turns
   it off.
+- In a `"realtime": true` scenario the delays count from each tick's
+  planned time, not the wall clock, so a slow `capture` frame does not
+  change the tick a message arrives on. A copy of the scenario without
+  its captures sees the same arrivals.
 
 `stats()` returns `NetStats`: messages and wire bytes sent and received
 (payload plus a 9-byte frame header each), and `held`, the events the

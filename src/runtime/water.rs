@@ -11,6 +11,7 @@
 use super::{ColliderShape, FrameTime, RigidBodyKind};
 use crate::assets::{
     AlphaMode, AssetServer, Handle, MaterialAsset, MeshAsset, MeshVertex,
+    WaterShading,
 };
 use bevy_ecs::prelude::{
     Commands, Component, Entity, Query, Res, ResMut, Without,
@@ -53,6 +54,20 @@ pub struct WaterBody {
     /// Lights each wave triangle with its own face normal, for a faceted
     /// low-poly sea.
     pub flat_shading: bool,
+    /// Linear RGBA the water takes where the view crosses `depth_fade`
+    /// metres of it, read from the ground behind the surface. `None` keeps
+    /// one `color` everywhere.
+    pub deep_color: Option<[f32; 4]>,
+    /// Metres of water before the color is `deep_color`.
+    pub depth_fade: f32,
+    /// Width of the white foam band along the shore, in metres of water
+    /// depth. 0 draws no foam.
+    pub shore_foam: f32,
+    /// Strength of the small scrolling waves drawn on top of the mesh,
+    /// 0 to 1. 0 draws none.
+    pub ripples: f32,
+    /// Distance between those small waves in metres.
+    pub ripple_length: f32,
 }
 
 impl Default for WaterBody {
@@ -67,6 +82,11 @@ impl Default for WaterBody {
             flow_speed: 0.0,
             color: [0.1, 0.4, 0.7, 0.7],
             flat_shading: false,
+            deep_color: None,
+            depth_fade: 4.0,
+            shore_foam: 0.0,
+            ripples: 0.0,
+            ripple_length: 1.0,
         }
     }
 }
@@ -137,6 +157,17 @@ fn water_material(water: &WaterBody) -> MaterialAsset {
         base_color: water.color,
         roughness: 0.05,
         flat_shading: water.flat_shading,
+        water: WaterShading {
+            deep_color: water.deep_color.unwrap_or(water.color),
+            depth_fade: if water.deep_color.is_some() {
+                water.depth_fade.max(0.01)
+            } else {
+                0.0
+            },
+            shore_foam: water.shore_foam.max(0.0),
+            ripples: water.ripples.clamp(0.0, 1.0),
+            ripple_length: water.ripple_length.max(0.01),
+        },
         ..MaterialAsset::default()
     }
 }
@@ -428,6 +459,25 @@ pub(super) fn float_in_water(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn water_options_default_to_a_plain_surface_and_map_to_the_material() {
+        let plain: WaterBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(plain, WaterBody::default());
+        assert!(!water_material(&plain).water.is_water());
+
+        let lake: WaterBody = serde_json::from_str(
+            r#"{"deep_color": [0, 0.1, 0.2, 0.95], "depth_fade": 3,
+                "shore_foam": 0.4, "ripples": 2}"#,
+        )
+        .unwrap();
+        let shading = water_material(&lake).water;
+        assert_eq!(shading.deep_color, [0.0, 0.1, 0.2, 0.95]);
+        assert_eq!(shading.depth_fade, 3.0);
+        assert_eq!(shading.shore_foam, 0.4);
+        assert_eq!(shading.ripples, 1.0);
+        assert!(shading.is_water() && shading.reads_depth());
+    }
 
     /// Impulses one tick of still water sends a 10 kg GPU ball whose
     /// read-back state is `age` ticks old, at `position` moving at

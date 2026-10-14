@@ -90,6 +90,10 @@ pub struct ImportSettings {
     /// Images only: the longest edge is scaled down to this many pixels on
     /// import, keeping the aspect ratio.
     pub max_size: Option<u32>,
+    /// Images only: also cook `<name>-linear.rtexture` beside the image, a
+    /// linear texture for normal, roughness and other data maps.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub linear: bool,
 }
 
 /// Sidecar metadata written next to each imported asset.
@@ -108,6 +112,33 @@ pub struct AssetMeta {
     pub content_hash: String,
     #[serde(default)]
     pub source: AssetProvenance,
+    /// Files import cooked beside the asset, relative to its folder: a
+    /// glTF's `.rmesh`, `.lodN.rmesh`, `.rlod`, `.rtexture`, `.rskin` and
+    /// `.rmorph` files. A game rebuilds a missing one from the asset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cooked: Vec<PathBuf>,
+}
+
+/// Triangle counts of one cooked glTF mesh, for checking budgets.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CookedMesh {
+    /// The `.rmesh` file, relative to the asset's folder.
+    pub mesh: PathBuf,
+    pub triangles: usize,
+    /// Triangles of each generated level (`.lod1.rmesh` onward), coarsest
+    /// last; empty when the mesh is too small for levels.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lods: Vec<usize>,
+}
+
+/// What [`copy_in`] produced.
+struct CopiedIn {
+    kind: ImportedKind,
+    dependencies: Vec<PathBuf>,
+    size: [u32; 2],
+    content_hash: String,
+    cooked: Vec<PathBuf>,
+    meshes: Vec<CookedMesh>,
 }
 
 #[derive(Debug)]
@@ -263,6 +294,13 @@ pub struct ImportReport {
     /// Project scenes that reference the asset.
     pub referenced_by: Vec<String>,
     pub warnings: Vec<String>,
+    /// Files cooked beside the asset; see [`AssetMeta::cooked`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cooked: Vec<PathBuf>,
+    /// A glTF's meshes with their triangle counts, after an import or
+    /// reimport.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub meshes: Vec<CookedMesh>,
 }
 
 #[must_use]
@@ -470,6 +508,99 @@ fn apply_settings(
         .map_err(invalid)
 }
 
+/// Cooks what the game loads besides the file itself: a glTF's `.rmesh`
+/// and `.rtexture` files beside the copy, so a reimport never leaves them
+/// stale, and an image's linear `.rtexture` when `settings.linear` is set.
+/// Returns the cooked files, relative to the asset's folder, and a glTF's
+/// meshes with their triangle counts.
+fn cook(
+    kind: ImportedKind,
+    destination: &Path,
+    settings: &ImportSettings,
+) -> Result<(Vec<PathBuf>, Vec<CookedMesh>), AssetImportError> {
+    let invalid =
+        |error: crate::assets::AssetError| AssetImportError::Invalid {
+            path: destination.to_owned(),
+            message: error.to_string(),
+        };
+    match kind {
+        ImportedKind::Image if settings.linear => {
+            crate::assets::cook_linear_texture(
+                destination,
+                &linear_texture_path(destination),
+            )
+            .map_err(invalid)?;
+            let cooked = linear_texture_path(destination);
+            Ok((
+                cooked.file_name().into_iter().map(PathBuf::from).collect(),
+                Vec::new(),
+            ))
+        }
+        #[cfg(feature = "gltf")]
+        ImportedKind::Gltf => {
+            let mut server = crate::assets::AssetServer::default();
+            server.import_gltf(destination).map_err(invalid)?;
+            Ok(cooked_gltf(&server))
+        }
+        _ => Ok((Vec::new(), Vec::new())),
+    }
+}
+
+/// The files `import_gltf` cooked into `server`, by file name, and each
+/// mesh's triangles with those of its generated levels.
+#[cfg(feature = "gltf")]
+fn cooked_gltf(
+    server: &crate::assets::AssetServer,
+) -> (Vec<PathBuf>, Vec<CookedMesh>) {
+    let name =
+        |path: &Path| PathBuf::from(path.file_name().unwrap_or_default());
+    let level = |path: &Path| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.rsplit_once(".lod"))
+            .is_some_and(|(_, step)| step.parse::<u32>().is_ok())
+    };
+    let triangles = |path: &Path| {
+        let handle = server.meshes.handle_for_path(path)?;
+        Some(server.meshes.get(handle)?.indices.len() / 3)
+    };
+    let mut cooked = BTreeSet::new();
+    let mut meshes = Vec::new();
+    for (_, path) in server.meshes.paths() {
+        cooked.insert(name(path));
+        for extra in ["rskin", "rmorph"] {
+            let extra = path.with_extension(extra);
+            if extra.is_file() {
+                cooked.insert(name(&extra));
+            }
+        }
+        if level(path) {
+            continue;
+        }
+        meshes.push(CookedMesh {
+            mesh: name(path),
+            triangles: triangles(path).unwrap_or(0),
+            lods: (1..)
+                .map_while(|step| {
+                    triangles(&path.with_extension(format!("lod{step}.rmesh")))
+                })
+                .collect(),
+        });
+    }
+    cooked.extend(server.textures.paths().map(|(_, path)| name(path)));
+    cooked.extend(server.lod_groups.paths().map(|(_, path)| name(path)));
+    meshes.sort_by(|a, b| a.mesh.cmp(&b.mesh));
+    (cooked.into_iter().collect(), meshes)
+}
+
+/// Where `--linear` cooks an image: `crate.png` gives
+/// `crate-linear.rtexture` in the same folder.
+#[must_use]
+pub fn linear_texture_path(image: &Path) -> PathBuf {
+    let stem = image.file_stem().unwrap_or_default().to_string_lossy();
+    image.with_file_name(format!("{stem}-linear.rtexture"))
+}
+
 fn write_meta(asset: &Path, meta: &AssetMeta) -> Result<(), AssetImportError> {
     let path = meta_path(asset);
     let mut bytes =
@@ -492,7 +623,7 @@ fn copy_in(
     source: &Path,
     destination: &Path,
     settings: &ImportSettings,
-) -> Result<(ImportedKind, Vec<PathBuf>, [u32; 2], String), AssetImportError> {
+) -> Result<CopiedIn, AssetImportError> {
     if !source.is_file() {
         return Err(AssetImportError::SourceMissing(source.to_owned()));
     }
@@ -527,13 +658,21 @@ fn copy_in(
         std::fs::copy(&file.0, &file.1).map_err(io(&file.0))?;
     }
     apply_settings(kind, destination, settings)?;
+    let (cooked, meshes) = cook(kind, destination, settings)?;
     let size = if settings.max_size.is_some() {
         validate(kind, destination)?
     } else {
         size
     };
     let bytes = std::fs::read(destination).map_err(io(destination))?;
-    Ok((kind, dependencies, size, scene_revision(&bytes)))
+    Ok(CopiedIn {
+        kind,
+        dependencies,
+        size,
+        content_hash: scene_revision(&bytes),
+        cooked,
+        meshes,
+    })
 }
 
 fn report(
@@ -544,6 +683,12 @@ fn report(
     dry_run: bool,
 ) -> ImportReport {
     let relative = asset.strip_prefix(project_root).unwrap_or(asset);
+    // A linear image is used through its cooked texture.
+    let loaded = if meta.kind == ImportedKind::Image && meta.settings.linear {
+        linear_texture_path(relative)
+    } else {
+        relative.to_owned()
+    };
     let mut warnings = Vec::new();
     if meta.source.license.is_none() {
         warnings.push(
@@ -555,8 +700,10 @@ fn report(
         id: meta.id,
         kind: meta.kind,
         path: slash(relative),
-        reference: format!("../{}", slash(relative)),
+        reference: format!("../{}", slash(&loaded)),
         dependencies: meta.dependencies,
+        cooked: meta.cooked,
+        meshes: Vec::new(),
         size,
         channels: wav_channels(asset),
         dry_run,
@@ -598,7 +745,7 @@ fn copy_in_or_preview(
     destination: &Path,
     settings: &ImportSettings,
     dry_run: bool,
-) -> Result<(ImportedKind, Vec<PathBuf>, [u32; 2], String), AssetImportError> {
+) -> Result<CopiedIn, AssetImportError> {
     if !dry_run {
         return copy_in(source, destination, settings);
     }
@@ -639,8 +786,7 @@ pub fn import_asset(
             return Err(AssetImportError::Exists(path));
         }
     }
-    let (kind, dependencies, size, content_hash) =
-        copy_in_or_preview(source, &destination, settings, dry_run)?;
+    let copied = copy_in_or_preview(source, &destination, settings, dry_run)?;
     let mut recorded = AssetProvenance {
         original: source.display().to_string(),
         ..AssetProvenance::default()
@@ -649,16 +795,19 @@ pub fn import_asset(
     let meta = AssetMeta {
         format_version: META_FORMAT_VERSION,
         id: Uuid::new_v4(),
-        kind,
+        kind: copied.kind,
         settings: settings.clone(),
-        dependencies,
-        content_hash,
+        dependencies: copied.dependencies,
+        content_hash: copied.content_hash,
         source: recorded,
+        cooked: copied.cooked,
     };
     if !dry_run {
         write_meta(&destination, &meta)?;
     }
-    let mut report = report(project_root, &destination, meta, size, dry_run);
+    let mut report =
+        report(project_root, &destination, meta, copied.size, dry_run);
+    report.meshes = copied.meshes;
     if dry_run {
         report.channels = wav_channels(source);
     }
@@ -690,9 +839,15 @@ pub fn reimport_asset(
         meta.settings = settings.clone();
     }
     let original = PathBuf::from(&meta.source.original);
+    // A copy edited since import is newer work than the original: keep it
+    // rather than silently copy the original over it (WILDROOT F24).
+    let edited = from.is_none()
+        && original.is_file()
+        && std::fs::read(&path)
+            .is_ok_and(|bytes| scene_revision(&bytes) != meta.content_hash);
     let source = match from {
         Some(from) => from.to_owned(),
-        None if original.is_file() => original,
+        None if original.is_file() && !edited => original.clone(),
         None => path.clone(),
     };
     if ImportedKind::from_path(&source) != Some(meta.kind) {
@@ -704,23 +859,38 @@ pub fn reimport_asset(
             ),
         });
     }
-    let (_, dependencies, size, content_hash) =
-        copy_in_or_preview(&source, &path, &meta.settings, dry_run)?;
-    if from.is_some() {
+    let copied = copy_in_or_preview(&source, &path, &meta.settings, dry_run)?;
+    // An edited copy becomes its own original, so the next reimport does
+    // not bring the old file back either.
+    if from.is_some() || edited {
         meta.source.original = source.display().to_string();
     }
     meta.source.merge(provenance);
-    meta.dependencies = dependencies;
-    meta.content_hash = content_hash;
+    meta.dependencies = copied.dependencies;
+    meta.content_hash = copied.content_hash;
+    meta.cooked = copied.cooked;
     if !dry_run {
         write_meta(&path, &meta)?;
     }
-    let mut report = report(project_root, &path, meta, size, dry_run);
+    let mut report = report(project_root, &path, meta, copied.size, dry_run);
+    report.meshes = copied.meshes;
     if dry_run {
         report.channels = wav_channels(&source);
     }
+    if edited {
+        report.warnings.push(format!(
+            "{EDITED_COPY} since import, so reimport kept it, recooked from \
+             it and records it as its own original instead of copying {} \
+             over it; pass --from {} to replace it",
+            original.display(),
+            original.display()
+        ));
+    }
     Ok(report)
 }
+
+/// Starts the warning [`reimport_asset`] gives for an asset edited in place.
+pub const EDITED_COPY: &str = "the asset was edited";
 
 /// A project command, listed under `generators` in `project.json`, that
 /// turns a prompt into an asset file. The engine does not know or need any
@@ -1224,6 +1394,7 @@ fn unregistered_asset(
             dependencies: Vec::new(),
             content_hash: String::new(),
             source: AssetProvenance::default(),
+            cooked: Vec::new(),
         },
     ))
 }
@@ -1468,7 +1639,10 @@ mod tests {
             author: Some("Ada".into()),
             ..AssetProvenance::default()
         };
-        let settings = ImportSettings { max_size: Some(16) };
+        let settings = ImportSettings {
+            max_size: Some(16),
+            ..ImportSettings::default()
+        };
 
         let imported = import_asset(
             &root,
@@ -1603,6 +1777,87 @@ mod tests {
             "ASSET_INVALID"
         );
         assert!(!root.join("assets/broken.png").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// WILDROOT F24: data maps load linear, and reimport keeps an edited
+    /// copy instead of copying the old original over it.
+    #[test]
+    fn linear_images_cook_a_linear_texture_and_edited_copies_survive() {
+        use crate::assets::{AssetServer, TextureColorSpace};
+        let root = project();
+        let source = root.join("rough.png");
+        png(&source, 4, 4, 10);
+        let settings = ImportSettings {
+            linear: true,
+            ..ImportSettings::default()
+        };
+        let imported = import_asset(
+            &root,
+            &source,
+            Path::new("maps"),
+            &AssetProvenance::default(),
+            &settings,
+            false,
+        )
+        .unwrap();
+        assert_eq!(imported.reference, "../assets/maps/rough-linear.rtexture");
+        let cooked = root.join("assets/maps/rough-linear.rtexture");
+        let red = |server: &mut AssetServer| {
+            let handle = server.load_texture(&cooked).unwrap();
+            let texture = server.textures.get(handle).unwrap();
+            (texture.color_space, texture.rgba8[0])
+        };
+        assert_eq!(
+            red(&mut AssetServer::default()),
+            (TextureColorSpace::Linear, 10)
+        );
+        // A plain image in a data slot loads linear too.
+        let mut server = AssetServer::default();
+        let plain = server
+            .load_linear_texture(root.join("assets/maps/rough.png"))
+            .unwrap();
+        let plain = server.textures.get(plain).unwrap();
+        assert_eq!(plain.color_space, TextureColorSpace::Linear);
+
+        // The copy is edited by hand; the original is still there.
+        png(&root.join("assets/maps/rough.png"), 4, 4, 99);
+        let kept = reimport_asset(
+            &root,
+            "maps/rough.png",
+            None,
+            &AssetProvenance::default(),
+            None,
+            false,
+        )
+        .unwrap();
+        let pixel = image::open(root.join(&kept.path)).unwrap().to_rgba8();
+        assert_eq!(pixel.get_pixel(0, 0)[0], 99, "the edit survives");
+        assert!(
+            kept.warnings
+                .iter()
+                .any(|warning| warning.starts_with(EDITED_COPY)),
+            "{:?}",
+            kept.warnings
+        );
+        assert_eq!(
+            red(&mut AssetServer::default()),
+            (TextureColorSpace::Linear, 99),
+            "recooked from the edit"
+        );
+        // The edit is now the original: reimport keeps it, quietly.
+        let again = reimport_asset(
+            &root,
+            "maps/rough.png",
+            None,
+            &AssetProvenance::default(),
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(again.warnings.iter().all(|w| !w.starts_with(EDITED_COPY)));
+        let pixel = image::open(root.join(&again.path)).unwrap().to_rgba8();
+        assert_eq!(pixel.get_pixel(0, 0)[0], 99, "the copy is the newest");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1886,7 +2141,10 @@ mod tests {
                 fixture.display().to_string(),
             ],
             license: license.map(Into::into),
-            settings: ImportSettings { max_size: Some(16) },
+            settings: ImportSettings {
+            max_size: Some(16),
+            ..ImportSettings::default()
+        },
         }
         };
         let hooks = BTreeMap::from([
@@ -2095,6 +2353,28 @@ mod tests {
         );
         assert!(root.join("assets/models/textures/pixel.png").is_file());
         assert!(list_assets(&root).issues.is_empty());
+        // The textures are cooked beside the copy, and a reimport recooks
+        // them from new art (WILDROOT F24).
+        let cooked = root.join(
+            "assets/models/tri.gltf-image-0-sampler-default-srgb.rtexture",
+        );
+        let red = || {
+            let mut server = crate::assets::AssetServer::default();
+            let handle = server.load_texture(&cooked).unwrap();
+            server.textures.get(handle).unwrap().rgba8[0]
+        };
+        assert_eq!(red(), 5);
+        png(&incoming.join("textures/pixel.png"), 1, 1, 77);
+        reimport_asset(
+            &root,
+            "assets/models/tri.gltf",
+            None,
+            &AssetProvenance::default(),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(red(), 77);
 
         std::fs::remove_file(root.join("assets/models/tri.bin")).unwrap();
         let codes: Vec<_> = list_assets(&root)
@@ -2115,6 +2395,60 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(escaped.code(), "ASSET_INVALID", "{escaped}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "gltf")]
+    #[test]
+    fn gltf_import_records_cooked_meshes_and_lods() {
+        // WILDROOT F1: import cooks a dense model's mesh and LOD chain,
+        // lists the cooked files in the `.rmeta`, and reports the triangle
+        // count of every level.
+        let root = project();
+        let ring: Vec<[f32; 2]> = (0..32)
+            .map(|step| {
+                let angle = step as f32 / 32.0 * std::f32::consts::TAU;
+                [angle.cos(), angle.sin()]
+            })
+            .collect();
+        let path: Vec<[f32; 3]> =
+            (0..24).map(|step| [0.0, step as f32 * 0.25, 0.0]).collect();
+        let tube = crate::meshgen::extrude(&ring, &path);
+        let source = root.join("tube.glb");
+        std::fs::write(&source, tube.glb("tube", [0.5, 0.5, 0.5])).unwrap();
+
+        let imported = import_asset(
+            &root,
+            &source,
+            Path::new("models"),
+            &AssetProvenance {
+                license: Some("CC0-1.0".into()),
+                ..AssetProvenance::default()
+            },
+            &ImportSettings::default(),
+            false,
+        )
+        .unwrap();
+
+        let [mesh] = imported.meshes.as_slice() else {
+            panic!("{:?}", imported.meshes);
+        };
+        assert_eq!(mesh.mesh, Path::new("tube.mesh-0-0.rmesh"));
+        assert!(mesh.triangles >= 512, "{}", mesh.triangles);
+        assert!(!mesh.lods.is_empty());
+        assert!(mesh.lods[0] < mesh.triangles, "{:?}", mesh.lods);
+        for name in ["tube.mesh-0-0.rmesh", "tube.mesh-0-0.rlod"] {
+            assert!(imported.cooked.contains(&PathBuf::from(name)), "{name}");
+            assert!(root.join("assets/models").join(name).is_file(), "{name}");
+        }
+        let meta =
+            std::fs::read_to_string(root.join("assets/models/tube.glb.rmeta"))
+                .unwrap();
+        assert!(meta.contains("tube.mesh-0-0.rlod"), "{meta}");
+        // A listing reads the cooked files back from the `.rmeta`.
+        let listed = list_assets(&root);
+        assert!(listed.issues.is_empty(), "{:?}", listed.issues);
+        assert_eq!(listed.assets[0].cooked, imported.cooked);
         std::fs::remove_dir_all(root).unwrap();
     }
 

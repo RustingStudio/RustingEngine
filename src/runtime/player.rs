@@ -86,6 +86,11 @@ pub const DEFAULT_PLAYER_SHAPE: ColliderShape = ColliderShape::Capsule {
 /// Walk, jump, and mouse-look settings plus the controller's live state.
 /// Speeds are in metres per second, `gravity` in metres per second squared,
 /// and `look_sensitivity` in radians per pixel of mouse motion.
+///
+/// The `rusting.player_controller` system reads the `player.*` actions.
+/// A networked host or a client predicting its own player steps a body from
+/// a [`PlayerInput`] with [`PlayerController::step`] instead, which runs the
+/// same movement code without touching the global actions.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayerController {
@@ -253,6 +258,255 @@ impl Default for PlayerController {
 }
 
 const MAX_PITCH: f32 = 89.0_f32.to_radians();
+
+/// One player's movement input for one fixed tick of
+/// [`PlayerController::step`]. `rusting.player_controller` fills it from the
+/// `player.*` actions; a networked host fills it from each peer's input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlayerInput {
+    /// 1 walks forward, -1 back. Any non-zero direction walks at full
+    /// speed.
+    pub forward: f32,
+    /// 1 walks right, -1 left.
+    pub right: f32,
+    /// Starts a jump this tick: true on the tick jump was pressed, not
+    /// while it is held.
+    pub jump: bool,
+    /// Jump is held: a swimmer rises.
+    pub jump_held: bool,
+    pub sprint: bool,
+    /// Crouches on land (with `crouch_height`) and dives in water.
+    pub crouch: bool,
+}
+
+/// A dynamic body [`PlayerController::step`] walked into, for the caller to
+/// shove along `normal` by `motion`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerShove {
+    pub body: Entity,
+    /// Contact normal, pointing from the body toward the player.
+    pub normal: [f32; 3],
+    /// The player's motion this tick, in metres.
+    pub motion: [f32; 3],
+}
+
+impl PlayerController {
+    /// Moves a kinematic player one fixed tick of `dt` seconds: crouching,
+    /// walking, jumping, gravity, swimming, dashing, riding its floor,
+    /// collide and slide, step-up, slope limit and ground snap. It reads no
+    /// global input and no clock, so the same state, position and inputs
+    /// give the same result: a host steps every peer's body with it and a
+    /// client replays its own inputs for prediction.
+    ///
+    /// `body` is the player's own entity, which the casts skip, and
+    /// `shape` its standing collider. Set `yaw` from the input first.
+    /// `water` is the surface height and current over the body (see
+    /// [`WaterBody::wave`]); `floor_pose` gives a floor entity's world
+    /// position and rotation, so a moving platform carries the player.
+    /// Returns the dynamic body it walked into when `push_bodies` is on;
+    /// `rusting.player_controller` then pushes it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step(
+        &mut self,
+        physics: &PhysicsWorld,
+        body: Entity,
+        shape: ColliderShape,
+        position: &mut [f32; 3],
+        input: PlayerInput,
+        water: Option<(f32, [f32; 3])>,
+        floor_pose: impl Fn(Entity) -> Option<([f32; 3], [f32; 4])>,
+        dt: f32,
+    ) -> Option<PlayerShove> {
+        let water = self.swim_water(water, *position);
+        self.swimming = water.is_some();
+        let mut shape = shape;
+        match (self.crouch_height > 0.0 && !self.swimming)
+            .then(|| crouch_shape(shape, self.crouch_height))
+            .flatten()
+        {
+            Some((low, drop)) => {
+                if input.crouch && !self.crouched {
+                    self.crouched = true;
+                    position[1] -= drop;
+                } else if !input.crouch && self.crouched {
+                    // Stand only when the full shape fits above.
+                    let blocked = physics
+                        .shape_cast(
+                            low,
+                            *position,
+                            [0.0, 1.0, 0.0],
+                            2.0 * drop,
+                            self.collision_mask,
+                            Some(body),
+                        )
+                        .is_some();
+                    if !blocked {
+                        self.crouched = false;
+                        position[1] += drop;
+                    }
+                }
+                if self.crouched {
+                    shape = low;
+                }
+                self.crouch_drop = if self.crouched { drop } else { 0.0 };
+            }
+            None => {
+                self.crouched = false;
+                self.crouch_drop = 0.0;
+            }
+        }
+        let (mut motion, speed) = self.walk_motion(input, dt);
+        if let Some((surface, current)) = water {
+            // Float toward the rest depth unless rising or diving; a jump
+            // only leaves the water from the surface.
+            let rest = surface - self.float_depth;
+            let y = position[1];
+            self.vertical_speed = if input.jump && y >= rest - 0.1 {
+                self.jump_speed
+            } else if input.crouch {
+                -speed
+            } else if input.jump_held && y < rest {
+                speed
+            } else {
+                (2.0 * (rest - y)).clamp(-speed, speed)
+            };
+            for axis in [0, 2] {
+                motion[axis] += current[axis] * dt;
+            }
+        } else {
+            if input.jump && !self.crouched {
+                if self.grounded {
+                    self.vertical_speed = self.jump_speed;
+                } else if self.air_jumps_used < self.air_jumps {
+                    self.air_jumps_used += 1;
+                    self.vertical_speed = self.jump_speed;
+                }
+            }
+            self.vertical_speed -= self.gravity * dt;
+        }
+        self.jump_requested = false;
+        motion[1] = self.vertical_speed * dt;
+        if self.dash_left > 0.0 {
+            motion = self.dash_velocity.map(|value| value * dt);
+            self.vertical_speed = 0.0;
+            self.dash_left = (self.dash_left - dt).max(0.0);
+        }
+        let (start, turn) = CharacterMove::ride(
+            physics,
+            shape,
+            *position,
+            self.floor
+                .map(|(floor, at)| (floor, at, self.floor_rotation)),
+            self.collision_mask,
+            body,
+            &floor_pose,
+        );
+        self.yaw += turn;
+
+        let mut moved = physics.move_character_on_foot(
+            shape,
+            start,
+            motion,
+            self.collision_mask,
+            Some(body),
+            self.max_slope,
+            self.max_step_height,
+        );
+        // Ground snapping: a walker on the ground that is not rising stays
+        // on it down ramps and steps no taller than `max_step_height`.
+        if self.grounded
+            && !moved.grounded
+            && self.vertical_speed <= 0.0
+            && water.is_none()
+        {
+            if let Some((at, floor)) = physics.snap_to_floor(
+                shape,
+                moved.position,
+                self.max_step_height,
+                self.collision_mask,
+                Some(body),
+                self.max_slope,
+            ) {
+                moved.position = at;
+                moved.grounded = true;
+                moved.floor = Some(floor);
+            }
+        }
+        self.grounded = moved.grounded;
+        if moved.grounded {
+            self.air_jumps_used = 0;
+        }
+        if (moved.grounded && self.vertical_speed < 0.0)
+            || (moved.ceiling && self.vertical_speed > 0.0)
+        {
+            self.vertical_speed = 0.0;
+        }
+        let floor = moved
+            .floor
+            .and_then(|floor| Some((floor, floor_pose(floor)?)));
+        self.floor = floor.map(|(floor, (at, _))| (floor, at));
+        self.floor_rotation = floor.map_or(NO_ROTATION, |(_, (_, turn))| turn);
+        self.wall = moved.wall.map(|(wall, _)| wall);
+        if dt > 0.0 {
+            self.velocity = std::array::from_fn(|axis| {
+                (moved.position[axis] - position[axis]) / dt
+            });
+        }
+        *position = moved.position;
+        moved
+            .wall
+            .filter(|_| self.push_bodies)
+            .map(|(body, normal)| PlayerShove {
+                body,
+                normal,
+                motion,
+            })
+    }
+
+    /// The water the body swims in: `water` when swimming is on and the
+    /// body center is under its surface.
+    fn swim_water(
+        &self,
+        water: Option<(f32, [f32; 3])>,
+        position: [f32; 3],
+    ) -> Option<(f32, [f32; 3])> {
+        water.filter(|(surface, _)| {
+            self.swim_speed > 0.0 && position[1] < *surface
+        })
+    }
+
+    /// This tick's horizontal walk in metres, turned by `yaw`, and the
+    /// speed it was taken at.
+    fn walk_motion(&self, input: PlayerInput, dt: f32) -> ([f32; 3], f32) {
+        let (sin, cos) = sim_math::sin_cos(self.yaw);
+        let (forward, right) = (input.forward, input.right);
+        // Forward is -Z turned by yaw; right is +X turned by yaw.
+        let mut motion = [
+            -sin * forward + cos * right,
+            0.0,
+            -cos * forward - sin * right,
+        ];
+        let length = motion[0].hypot(motion[2]);
+        let base = if self.swimming {
+            self.swim_speed
+        } else {
+            self.walk_speed
+        };
+        let speed = base
+            * if self.crouched {
+                self.crouch_multiplier
+            } else if input.sprint {
+                self.sprint_multiplier
+            } else {
+                1.0
+            };
+        if length > 0.0 {
+            motion = motion.map(|value| value / length * speed * dt);
+        }
+        (motion, speed)
+    }
+}
 
 pub(super) fn bind_default_actions(map: &mut ActionMap) {
     let bindings: [(&str, &[KeyCode]); 7] = [
@@ -549,73 +803,45 @@ pub(super) fn player_move(
         let dynamic = rigid
             .as_ref()
             .is_some_and(|rigid| rigid.kind == RigidBodyKind::Dynamic);
-        let mut shape =
+        let shape =
             collider.map_or(DEFAULT_PLAYER_SHAPE, |collider| collider.shape);
         let water = (player.swim_speed > 0.0)
             .then(|| water_at(&waters, transform.position, seconds))
-            .flatten()
-            .filter(|(surface, _)| transform.position[1] < *surface);
-        player.swimming = water.is_some();
-        match (player.crouch_height > 0.0 && !player.swimming && !dynamic)
-            .then(|| crouch_shape(shape, player.crouch_height))
-            .flatten()
-        {
-            Some((low, drop)) => {
-                if crouch && !player.crouched {
-                    player.crouched = true;
-                    transform.position[1] -= drop;
-                } else if !crouch && player.crouched {
-                    // Stand only when the full shape fits above.
-                    let blocked = physics
-                        .shape_cast(
-                            low,
-                            transform.position,
-                            [0.0, 1.0, 0.0],
-                            2.0 * drop,
-                            player.collision_mask,
-                            Some(entity),
-                        )
-                        .is_some();
-                    if !blocked {
-                        player.crouched = false;
-                        transform.position[1] += drop;
-                    }
-                }
-                if player.crouched {
-                    shape = low;
-                }
-                player.crouch_drop = if player.crouched { drop } else { 0.0 };
-            }
-            None => {
-                player.crouched = false;
-                player.crouch_drop = 0.0;
-            }
-        }
-        let (sin, cos) = sim_math::sin_cos(player.yaw);
-        // Forward is -Z turned by yaw; right is +X turned by yaw.
-        let mut motion = [
-            -sin * forward + cos * right,
-            0.0,
-            -cos * forward - sin * right,
-        ];
-        let length = motion[0].hypot(motion[2]);
-        let base = if player.swimming {
-            player.swim_speed
-        } else {
-            player.walk_speed
+            .flatten();
+        let input = PlayerInput {
+            forward,
+            right,
+            jump: player.jump_requested,
+            jump_held: rise,
+            sprint,
+            crouch,
         };
-        let speed = base
-            * if player.crouched {
-                player.crouch_multiplier
-            } else if sprint {
-                player.sprint_multiplier
-            } else {
-                1.0
-            };
-        if length > 0.0 {
-            motion = motion.map(|value| value / length * speed * dt);
+        if !dynamic {
+            let yaw = player.yaw;
+            let shove = player.step(
+                &physics,
+                entity,
+                shape,
+                &mut transform.position,
+                input,
+                water,
+                pose_of,
+                dt,
+            );
+            if player.yaw != yaw {
+                transform.rotation = [0.0, player.yaw, 0.0];
+            }
+            if let Some(shove) = shove {
+                push(&mut pushed, shove.body, shove.normal, shove.motion, dt);
+            }
+            continue;
         }
-        if let Some(rigid) = rigid.as_mut().filter(|_| dynamic) {
+        player.swimming =
+            player.swim_water(water, transform.position).is_some();
+        player.crouched = false;
+        player.crouch_drop = 0.0;
+        let (motion, _) = player.walk_motion(input, dt);
+        if let Some(rigid) = rigid.as_mut() {
             // The solver moves a dynamic player: walking sets its
             // horizontal velocity, a jump its vertical one, and gravity,
             // contacts, and shoves come from the physics step.
@@ -657,112 +883,6 @@ pub(super) fn player_move(
             player.velocity = rigid.linear_velocity;
             continue;
         }
-        if let Some((surface, current)) = water {
-            // Float toward the rest depth unless rising or diving; a jump
-            // only leaves the water from the surface.
-            let rest = surface - player.float_depth;
-            let y = transform.position[1];
-            player.vertical_speed = if player.jump_requested && y >= rest - 0.1
-            {
-                player.jump_speed
-            } else if crouch {
-                -speed
-            } else if rise && y < rest {
-                speed
-            } else {
-                (2.0 * (rest - y)).clamp(-speed, speed)
-            };
-            for axis in [0, 2] {
-                motion[axis] += current[axis] * dt;
-            }
-        } else {
-            if player.jump_requested && !player.crouched {
-                if player.grounded {
-                    player.vertical_speed = player.jump_speed;
-                } else if player.air_jumps_used < player.air_jumps {
-                    player.air_jumps_used += 1;
-                    player.vertical_speed = player.jump_speed;
-                }
-            }
-            player.vertical_speed -= player.gravity * dt;
-        }
-        player.jump_requested = false;
-        motion[1] = player.vertical_speed * dt;
-        if player.dash_left > 0.0 {
-            motion = player.dash_velocity.map(|value| value * dt);
-            player.vertical_speed = 0.0;
-            player.dash_left = (player.dash_left - dt).max(0.0);
-        }
-        let (start, turn) = CharacterMove::ride(
-            &physics,
-            shape,
-            transform.position,
-            player
-                .floor
-                .map(|(floor, at)| (floor, at, player.floor_rotation)),
-            player.collision_mask,
-            entity,
-            pose_of,
-        );
-        if turn != 0.0 {
-            player.yaw += turn;
-            transform.rotation = [0.0, player.yaw, 0.0];
-        }
-
-        let mut moved = physics.move_character_on_foot(
-            shape,
-            start,
-            motion,
-            player.collision_mask,
-            Some(entity),
-            player.max_slope,
-            player.max_step_height,
-        );
-        // Ground snapping: a walker on the ground that is not rising stays
-        // on it down ramps and steps no taller than `max_step_height`.
-        if player.grounded
-            && !moved.grounded
-            && player.vertical_speed <= 0.0
-            && water.is_none()
-        {
-            if let Some((position, floor)) = physics.snap_to_floor(
-                shape,
-                moved.position,
-                player.max_step_height,
-                player.collision_mask,
-                Some(entity),
-                player.max_slope,
-            ) {
-                moved.position = position;
-                moved.grounded = true;
-                moved.floor = Some(floor);
-            }
-        }
-        if let Some((wall, normal)) = moved.wall.filter(|_| player.push_bodies)
-        {
-            push(&mut pushed, wall, normal, motion, dt);
-        }
-        player.grounded = moved.grounded;
-        if moved.grounded {
-            player.air_jumps_used = 0;
-        }
-        if (moved.grounded && player.vertical_speed < 0.0)
-            || (moved.ceiling && player.vertical_speed > 0.0)
-        {
-            player.vertical_speed = 0.0;
-        }
-        let floor =
-            moved.floor.and_then(|floor| Some((floor, pose_of(floor)?)));
-        player.floor = floor.map(|(floor, (at, _))| (floor, at));
-        player.floor_rotation =
-            floor.map_or(NO_ROTATION, |(_, (_, turn))| turn);
-        player.wall = moved.wall.map(|(wall, _)| wall);
-        if dt > 0.0 {
-            player.velocity = std::array::from_fn(|axis| {
-                (moved.position[axis] - transform.position[axis]) / dt
-            });
-        }
-        transform.position = moved.position;
     }
 }
 

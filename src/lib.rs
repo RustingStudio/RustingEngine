@@ -21,6 +21,8 @@ pub mod cli;
 #[cfg(feature = "editor")]
 pub mod editor;
 pub mod engine;
+#[cfg(feature = "gltf")]
+pub mod foliage_bake;
 pub mod fontgen;
 pub mod geometry;
 pub mod input;
@@ -51,9 +53,9 @@ pub mod text_texture;
 pub use assets::{
     spawn_gltf_nodes, spawn_gltf_nodes_in_world, AlphaMode, AssetPlugin,
     AssetServer, DataAsset, Handle, ImportedGltfLight, ImportedGltfNode,
-    ImportedGltfPrimitive, MaterialAsset, MaterialModel, MeshAsset,
-    PrimitiveShape, SceneAsset, TextureAsset, TextureColorSpace, TextureFilter,
-    TextureSampler, TextureWrap,
+    ImportedGltfPrimitive, MaterialAsset, MaterialModel, MaterialSway,
+    MeshAsset, PrimitiveShape, SceneAsset, TextureAsset, TextureColorSpace,
+    TextureFilter, TextureSampler, TextureWrap, WaterShading,
 };
 /// For game code that saves settings or state as JSON.
 pub use bevy_ecs;
@@ -90,11 +92,11 @@ pub mod prelude {
         GpuPhysicsEventsLost, GpuPhysicsRule, GpuPhysicsWatch, GpuStateField,
         HudAnchor, HudElement, Name, ObjectClasses, ParticleCommand,
         PhysicsSolver, PhysicsSyncMode, PhysicsWorld, PlayerController,
-        RigidBody, RigidBodyKind, Sound, SoundId, Stick, TweenProperty,
-        WaypointGraph,
+        PlayerInput, PlayerShove, RigidBody, RigidBodyKind, Sound, SoundId,
+        Stick, TweenProperty, WaypointGraph,
     };
     pub use crate::rusting_game;
-    pub use crate::{AlphaMode, MaterialAsset, MaterialModel};
+    pub use crate::{AlphaMode, MaterialAsset, MaterialModel, MaterialSway};
     pub use crate::{AssetServer, Transform};
     pub use crate::{TextureAsset, TextureColorSpace, TextureSampler};
     pub use bevy_ecs::entity::Entity;

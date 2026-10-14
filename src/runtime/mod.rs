@@ -209,6 +209,8 @@ pub trait Plugin: Send + Sync + 'static {
 #[derive(Resource, Clone, Default)]
 pub(crate) struct ExitState {
     pub(crate) requested: bool,
+    /// True during the last update, run by [`App::run_exit_update`].
+    pub(crate) exiting: bool,
 }
 
 /// Owns the canonical ECS world and all engine schedules.
@@ -603,6 +605,22 @@ impl App {
         self.world.resource::<ExitState>().requested
     }
 
+    /// Runs one last update of no time, in which `GameScene::exiting` is
+    /// true, so game code can save before the process ends. Runs once;
+    /// later calls do nothing.
+    ///
+    /// # Errors
+    /// Returns the update's error.
+    pub fn run_exit_update(&mut self) -> Result<(), AppError> {
+        let mut state = self.world.resource_mut::<ExitState>();
+        if state.exiting {
+            return Ok(());
+        }
+        state.requested = true;
+        state.exiting = true;
+        self.update_exact(Duration::ZERO).map(|_| ())
+    }
+
     pub fn set_parent(
         &mut self,
         child: Entity,
@@ -753,16 +771,23 @@ impl App {
         let start = Instant::now();
         // `advance` counts the frame's steps at once; each step sees the
         // ticks completed before it, so tick-indexed values differ per tick.
-        let end_tick = self.world.resource::<FrameTime>().fixed_tick;
+        // Inside a step `delta` is the step's length, so tick code that
+        // scales by `delta_seconds()` moves at the same speed whatever the
+        // frame rate.
+        let frame_time = *self.world.resource::<FrameTime>();
+        let end_tick = frame_time.fixed_tick;
         let first_tick = end_tick.saturating_sub(u64::from(fixed_steps));
         for step in 0..u64::from(fixed_steps) {
-            self.world.resource_mut::<FrameTime>().fixed_tick =
-                first_tick + step;
+            let mut time = self.world.resource_mut::<FrameTime>();
+            time.fixed_tick = first_tick + step;
+            time.delta = time.fixed_delta;
             self.fixed_update.run(&mut self.world);
             hybrid_physics::stamp_gpu_commands(&mut self.world);
             state_hash::record_state_hash(&mut self.world);
         }
-        self.world.resource_mut::<FrameTime>().fixed_tick = end_tick;
+        let mut time = self.world.resource_mut::<FrameTime>();
+        time.fixed_tick = end_tick;
+        time.delta = frame_time.delta;
         if let Some(recorder) = &mut self.replay_recorder {
             recorder.frame_hashes(&self.world, fixed_steps);
         }

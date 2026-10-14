@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use bevy_ecs::entity::Entity;
 
 use super::TypeRegistry;
-use crate::assets::{AlphaMode, MaterialAsset, MaterialModel};
+use crate::assets::{
+    AlphaMode, MaterialAsset, MaterialModel, MaterialSway, WaterShading,
+};
 use crate::runtime::Camera2d;
 use crate::runtime::ClothSheet;
 use crate::runtime::ConvexDecomposition;
@@ -804,6 +806,11 @@ crate::reflect! {
         flat_shading: bool {
             doc: "Light each wave triangle with its own face normal for a faceted sea.",
         },
+        deep_color: Option<[f32; 4]> { doc: "RGBA where the view crosses depth_fade metres of water; null keeps one color" },
+        depth_fade: f32 { unit: "m", min: 0.01, doc: "metres of water before the color is deep_color" },
+        shore_foam: f32 { unit: "m", min: 0.0, doc: "foam band width along the shore in metres of depth; 0 is none" },
+        ripples: f32 { min: 0.0, max: 1.0, doc: "strength of small scrolling waves on top of the mesh; 0 is none" },
+        ripple_length: f32 { unit: "m", min: 0.01, doc: "distance between small waves" },
     }
 }
 
@@ -1248,6 +1255,11 @@ crate::reflect! {
             doc: "chunks past it draw at half detail, past twice it at quarter detail; 0 keeps full detail",
         },
         cast_shadows: bool,
+        tint: [f32; 3] {
+            unit: "linear RGB", min: 0.0, color: true,
+            doc: "multiplied into every layer; changing only tint and roughness skips the chunk rebuild",
+        },
+        roughness: f32 { unit: "factor", min: 0.0, doc: "multiplies every layer's roughness; below 1 is glossier" },
     }
 }
 
@@ -1278,6 +1290,10 @@ crate::reflect! {
         sway: f32 {
             unit: "m per m/s²", min: 0.0,
             doc: "lean per m/s² of force field push, per metre of height",
+        },
+        conform: bool { doc: "sets each copy on the heightfield below it" },
+        layers: Vec<u32> {
+            doc: "terrain layer indices copies may stand on; empty allows all",
         },
     }
 }
@@ -1751,6 +1767,24 @@ crate::reflect! {
 }
 
 crate::reflect! {
+    struct MaterialSway {
+        amplitude: f32 { unit: "m per m/s²", min: 0.0, doc: "lean per m/s² of force field push, per metre of height; 0 is still" },
+        frequency: f32 { unit: "Hz", min: 0.0, doc: "gusts per second, phased by position; 0 is a steady lean" },
+        height: f32 { unit: "m", min: 0.0, doc: "height over which the bend grows from a rooted base; 0 is a straight lean" },
+    }
+}
+
+crate::reflect! {
+    struct WaterShading {
+        deep_color: [f32; 4] { unit: "linear RGBA", min: 0.0, max: 1.0, color: true, doc: "color where the view crosses depth_fade metres of water" },
+        depth_fade: f32 { unit: "m", min: 0.0, doc: "metres of water before the color is deep_color; 0 is one color" },
+        shore_foam: f32 { unit: "m", min: 0.0, doc: "foam band width in metres of water depth; 0 is none" },
+        ripples: f32 { min: 0.0, max: 1.0, doc: "strength of the small scrolling waves; 0 is none" },
+        ripple_length: f32 { unit: "m", min: 0.01, doc: "distance between small waves" },
+    }
+}
+
+crate::reflect! {
     struct MaterialAsset {
         name: String,
         model: MaterialModel,
@@ -1777,6 +1811,12 @@ crate::reflect! {
         },
         shader: String {
             doc: "Surface shader GLSL starting with `#rusting surface 1`; empty for the built-in surface.",
+        },
+        sway: MaterialSway {
+            doc: "Bend in the force-field wind around the origin, on the GPU; amplitude 0 keeps the mesh still.",
+        },
+        water: WaterShading {
+            doc: "Water look set by rusting.water: depth color, shore foam and ripples; all zero is a plain surface.",
         },
         base_color_texture: Option<crate::assets::Handle<crate::assets::TextureAsset>>,
         normal_texture: Option<crate::assets::Handle<crate::assets::TextureAsset>>,

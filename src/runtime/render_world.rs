@@ -276,7 +276,7 @@ pub struct RenderWorld {
     pub(crate) foliage: Vec<(usize, f32)>,
     renderables_signature: Option<u64>,
     /// Tick and component counts seen by the last signature hash.
-    renderables_fingerprint: Option<(Tick, [usize; 8])>,
+    renderables_fingerprint: Option<(Tick, [usize; 9])>,
 }
 
 impl RenderWorld {
@@ -716,13 +716,10 @@ pub fn extract_render_world(world: &mut World) {
             {
                 (physics.gpu_colliders(), physics.gpu_force_fields(world))
             }
-            // Foliage leans by the fields in the vertex shader.
-            Some(physics)
-                if !world.resource::<RenderWorld>().foliage.is_empty() =>
-            {
-                (Vec::new(), physics.gpu_force_fields(world))
-            }
-            _ => Default::default(),
+            // Foliage and swaying materials lean by the fields in the
+            // vertex shader. A scene without field sensors sends none.
+            Some(physics) => (Vec::new(), physics.gpu_force_fields(world)),
+            None => Default::default(),
         };
     let gpu_lod = world.get_resource::<super::GpuSimulationLod>().copied();
     let gpu_observers = if gpu_lod.is_some() {
@@ -1020,7 +1017,7 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
     let newer = |tick: Tick| {
         last_run.is_none_or(|last_run| tick.is_newer_than(last_run, this_run))
     };
-    let mut counts = [0; 8];
+    let mut counts = [0; 9];
     let mut changed = false;
     let mut moved = Vec::new();
     let mut query = world.query_filtered::<(
@@ -1033,12 +1030,14 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
         Option<Ref<super::SkinnedMesh>>,
         Option<Ref<super::Foliage>>,
         Option<Ref<super::TerrainChunks>>,
+        Option<Ref<super::Heightfield>>,
     ), Or<(
         With<MeshRenderer>,
         With<Visibility>,
         With<super::Parent>,
         With<RenderBounds>,
         With<super::TerrainChunks>,
+        With<super::Heightfield>,
     )>>();
     for (
         entity,
@@ -1050,9 +1049,12 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
         skinned,
         foliage,
         chunks,
+        field,
     ) in query.iter(world)
     {
-        let scattered = foliage.is_some() || chunks.is_some();
+        // A heightfield moving or changing moves the foliage set on it.
+        let scattered =
+            foliage.is_some() || chunks.is_some() || field.is_some();
         let ticks = [
             transform.map(|value| value.last_changed()),
             renderer.map(|value| value.last_changed()),
@@ -1062,6 +1064,7 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
             skinned.map(|value| value.last_changed()),
             foliage.map(|value| value.last_changed()),
             chunks.map(|value| value.last_changed()),
+            field.map(|value| value.last_changed()),
         ];
         for (slot, (count, tick)) in counts.iter_mut().zip(ticks).enumerate() {
             if let Some(tick) = tick {
@@ -1214,6 +1217,61 @@ fn collect_foliage(
         .collect()
 }
 
+/// A heightfield's world matrix, its inverse, and the terrain drawing it.
+type Ground<'a> = (
+    nalgebra::Matrix4<f32>,
+    nalgebra::Matrix4<f32>,
+    &'a super::Heightfield,
+    Option<&'a super::Terrain>,
+);
+
+/// Applies [`super::Foliage::conform`] and [`super::Foliage::layers`] to one
+/// copy's world matrix; `None` drops the copy.
+fn settle(
+    foliage: &super::Foliage,
+    matrix: nalgebra::Matrix4<f32>,
+    grounds: &[Ground],
+) -> Option<nalgebra::Matrix4<f32>> {
+    if !foliage.conform && foliage.layers.is_empty() {
+        return Some(matrix);
+    }
+    let at =
+        nalgebra::Point3::from(matrix.fixed_view::<3, 1>(0, 3).into_owned());
+    let found =
+        grounds
+            .iter()
+            .find_map(|(to_world, to_local, field, terrain)| {
+                let local = to_local.transform_point(&at);
+                let (height, weights) =
+                    super::terrain::ground(field, *terrain, local.x, local.z)?;
+                let surface = to_world.transform_point(&nalgebra::Point3::new(
+                    local.x, height, local.z,
+                ));
+                Some((surface.y, terrain.map(|_| weights)))
+            });
+    if !foliage.layers.is_empty() {
+        let weights = found.and_then(|(_, weights)| weights)?;
+        let chosen = foliage
+            .layers
+            .iter()
+            .filter_map(|&layer| weights.get(layer as usize))
+            .sum::<f32>();
+        if chosen < 0.5 {
+            return None;
+        }
+    }
+    match found {
+        Some((y, _)) if foliage.conform => Some(
+            nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
+                0.0,
+                y - at.y,
+                0.0,
+            )) * matrix,
+        ),
+        _ => Some(matrix),
+    }
+}
+
 fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
     let mut query = world.query::<(
         Entity,
@@ -1223,7 +1281,19 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
         Option<&super::SkinnedMesh>,
         Option<&super::Foliage>,
     )>();
+    let mut fields = world.query::<(
+        &GlobalTransform,
+        &super::Heightfield,
+        Option<&super::Terrain>,
+    )>();
     let world_ref = &*world;
+    let grounds = fields
+        .iter(world_ref)
+        .filter_map(|(transform, field, terrain)| {
+            let matrix = nalgebra::Matrix4::from(transform.matrix);
+            Some((matrix, matrix.try_inverse()?, field, terrain))
+        })
+        .collect::<Vec<_>>();
     let mut renderables = query
         .iter(world_ref)
         .filter(|(entity, ..)| visible_in_hierarchy(world_ref, *entity))
@@ -1244,9 +1314,10 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
             foliage
                 .placements()
                 .into_iter()
-                .map(|local| ExtractedRenderable {
+                .filter_map(|local| settle(foliage, model * local, &grounds))
+                .map(|matrix| ExtractedRenderable {
                     transform: GlobalTransform {
-                        matrix: (model * local).into(),
+                        matrix: matrix.into(),
                     },
                     ..renderable
                 })
@@ -1555,6 +1626,89 @@ mod tests {
     }
 
     #[test]
+    fn conforming_foliage_sits_on_the_ground_of_its_chosen_layers() {
+        use crate::runtime::{Foliage, Heightfield, Terrain, TerrainLayer};
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let server = AssetServer::default();
+        let renderer = renderer(&server);
+        app.insert_resource(server);
+        // Rises 0.5 m per metre along +X; layer 1 covers x >= 0.
+        let slope = |lift: f32| Heightfield {
+            heights: (0..11)
+                .map(|_| (0..11).map(|c| c as f32 * 0.5 + lift).collect())
+                .collect(),
+            spacing: 1.0,
+            ..Heightfield::default()
+        };
+        let terrain = Terrain {
+            layers: vec![TerrainLayer::default(), TerrainLayer::default()],
+            splat: (0..11)
+                .map(|_| {
+                    (0..11)
+                        .map(|c| {
+                            if c >= 5 {
+                                [0.0, 1.0, 0.0, 0.0]
+                            } else {
+                                [1.0, 0.0, 0.0, 0.0]
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+            ..Terrain::default()
+        };
+        let ground =
+            app.spawn((Transform::new([0.0, 2.0, 0.0]), slope(0.0), terrain));
+        let grass = Foliage {
+            count: 200,
+            radius: 4.0,
+            conform: true,
+            layers: vec![1],
+            ..Foliage::default()
+        };
+        let owner =
+            app.spawn((Transform::new([0.0, 10.0, 0.0]), renderer, grass));
+        let adrift = Foliage {
+            count: 20,
+            conform: true,
+            ..Foliage::default()
+        };
+        let far =
+            app.spawn((Transform::new([100.0, 0.0, 0.0]), renderer, adrift));
+        let copies = |app: &mut App, entity| {
+            app.update(Duration::from_secs_f64(1.0 / 60.0)).unwrap();
+            app.world()
+                .resource::<RenderWorld>()
+                .renderables
+                .iter()
+                .filter(|renderable| renderable.entity == entity)
+                .map(|renderable| renderable.transform.matrix[3])
+                .collect::<Vec<_>>()
+        };
+        for lift in [0.0, 1.0] {
+            if lift > 0.0 {
+                app.world_mut().entity_mut(ground).insert(slope(lift));
+            }
+            let placed = copies(&mut app, owner);
+            assert!(
+                (40..160).contains(&placed.len()),
+                "about half stand on layer 1: {}",
+                placed.len()
+            );
+            for [x, y, _, _] in placed {
+                assert!(x >= -0.5 - 1e-4, "a copy on layer 0 at x {x}");
+                let surface = 2.0 + lift + 0.5 * (x + 5.0);
+                assert!((y - surface).abs() < 1e-3, "{y} vs {surface}");
+            }
+        }
+        // Off every heightfield, conforming copies keep the disc height.
+        let placed = copies(&mut app, far);
+        assert_eq!(placed.len(), 20);
+        assert!(placed.iter().all(|at| at[1] == 0.0));
+    }
+
+    #[test]
     fn foliage_copies_carry_their_sway_and_the_wind_to_the_renderer() {
         use crate::runtime::{
             Collider, ColliderShape, FieldKind, Foliage, ForceField,
@@ -1570,8 +1724,11 @@ mod tests {
             radius: 2.0,
             ..Foliage::default()
         };
-        let owner =
-            app.spawn((Transform::new([10.0, 0.0, 0.0]), renderer, foliage));
+        let owner = app.spawn((
+            Transform::new([10.0, 0.0, 0.0]),
+            renderer,
+            foliage.clone(),
+        ));
         app.spawn((Transform::default(), renderer));
         let wind = app.spawn((
             Transform::new([10.0, 0.0, 0.0]),

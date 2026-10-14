@@ -345,7 +345,9 @@ Systems run in stages: `Startup`, `FixedUpdate` (once per tick), `Update`
 (once per frame), `PostUpdate`, and `RenderExtract`. Physics and anything
 that must replay identically runs in `FixedUpdate` and reads
 `FrameTime::fixed_delta`. Visual effects and per-frame input handling run in
-`Update` and read `FrameTime::delta`.
+`Update` and read `FrameTime::delta`. Inside a tick `FrameTime::delta` equals
+`fixed_delta`, so tick code that scales by `delta_seconds()` steps by the
+fixed step.
 
 `scene.pressed` in a plain `update` is true for one frame. A frame can
 run no tick or several, so game code that steps state per tick inside

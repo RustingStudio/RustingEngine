@@ -1375,9 +1375,9 @@ impl Default for Lightmap {
 /// `seed`, in place of the single object. Copies share the object's
 /// material, so they draw as one instanced batch. Wind and other force
 /// fields lean each copy away from its base by `sway` per m/s² of push.
-// ponytail: the lean is computed on the CPU per copy and frame; move it
-// into the vertex shader if scattered counts reach the 100k range.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// `conform` sets each copy on the heightfield below it, and `layers` keeps
+/// only the copies standing on chosen terrain layers.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Foliage {
     /// Copies drawn, at most [`MAX_FOLIAGE_COPIES`].
@@ -1391,6 +1391,16 @@ pub struct Foliage {
     pub scale_max: f32,
     /// Lean per m/s² of force field push, in metres per metre of height.
     pub sway: f32,
+    /// Moves each copy up or down onto the [`crate::runtime::Heightfield`]
+    /// straight below or above it, so the scatter follows hills instead of
+    /// the object's flat disc. Copies off every heightfield stay where the
+    /// disc puts them. Placed again when the object or ground changes.
+    pub conform: bool,
+    /// Indices into the [`crate::runtime::Terrain`] layers under the copies:
+    /// a copy is drawn only where these layers make up at least half of
+    /// the ground's blend, such as grass but not sand. Empty draws every
+    /// copy; copies off every terrain are dropped.
+    pub layers: Vec<u32>,
 }
 
 /// Most copies one [`Foliage`] draws.
@@ -1405,6 +1415,8 @@ impl Default for Foliage {
             scale_min: 0.8,
             scale_max: 1.2,
             sway: 0.03,
+            conform: false,
+            layers: Vec::new(),
         }
     }
 }

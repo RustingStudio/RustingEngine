@@ -435,10 +435,12 @@ pub fn items() -> Vec<DocItem> {
         });
     }
     items.extend(api);
-    items.push(struct_item(
-        "PlayerController",
-        include_str!("runtime/player.rs"),
-    ));
+    for (module, source) in API_MODULES {
+        items.extend(module_items(module, source));
+    }
+    for name in ["PlayerController", "PlayerInput", "PlayerShove"] {
+        items.push(struct_item(name, include_str!("runtime/player.rs")));
+    }
     items.push(struct_item(
         "GpuStateField",
         include_str!("runtime/hybrid_physics.rs"),
@@ -489,9 +491,16 @@ pub fn items() -> Vec<DocItem> {
 /// `api/{name}`: the struct's doc comment and every public field with its
 /// type and doc, or the enum's and every variant, read from `source`.
 fn struct_item(name: &str, source: &str) -> DocItem {
-    let enum_start = source.find(&format!("pub enum {name} {{"));
+    // The name may be followed by generics, a body, `;` or a tuple.
+    let declared = |keyword: &str| {
+        let head = format!("pub {keyword} {name}");
+        source.match_indices(&head).map(|(at, _)| at).find(|&at| {
+            source[at + head.len()..].starts_with([' ', '<', ';', '('])
+        })
+    };
+    let enum_start = declared("enum");
     let start = enum_start
-        .or_else(|| source.find(&format!("pub struct {name} {{")))
+        .or_else(|| declared("struct"))
         .expect("type is in its source file");
     let head = &source[..start];
     let doc: Vec<&str> = head
@@ -515,9 +524,16 @@ fn struct_item(name: &str, source: &str) -> DocItem {
     } else {
         "Fields"
     };
-    let mut text = format!("# {name}\n\n{}\n\n{list}:\n\n", doc.join(" "));
+    let mut text = format!("# {name}\n\n{}\n", doc.join(" "));
+    let mut entries = String::new();
     let mut field_doc: Vec<&str> = Vec::new();
-    for line in source[start..].lines().skip(1).map(str::trim) {
+    // A unit or tuple struct has no body to list.
+    let has_body = source[start..]
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim_end().ends_with('{'));
+    let mut lines = source[start..].lines().skip(1).map(str::trim);
+    while let Some(line) = lines.next().filter(|_| has_body) {
         if line == "}" {
             break;
         }
@@ -527,14 +543,32 @@ fn struct_item(name: &str, source: &str) -> DocItem {
             .map(|_| line)
             .filter(|line| !line.starts_with('#')))
         {
-            let field = field.trim_end_matches(',');
-            text += &format!("- `{field}`");
-            if !field_doc.is_empty() {
-                text += &format!(": {}", field_doc.join(" "));
+            // A variant with named fields spans lines up to its `}`.
+            let mut field = field.to_owned();
+            if enum_start.is_some() && field.ends_with('{') {
+                for inner in lines.by_ref() {
+                    if inner.starts_with("///") {
+                        continue;
+                    }
+                    field.push(' ');
+                    field.push_str(inner);
+                    if inner.starts_with('}') {
+                        break;
+                    }
+                }
+                field = field.replace(", }", " }");
             }
-            text.push('\n');
+            let field = field.trim_end_matches(',');
+            entries += &format!("- `{field}`");
+            if !field_doc.is_empty() {
+                entries += &format!(": {}", field_doc.join(" "));
+            }
+            entries.push('\n');
             field_doc.clear();
         }
+    }
+    if !entries.is_empty() {
+        text += &format!("\n{list}:\n\n{entries}");
     }
     DocItem {
         id: format!("api/{name}"),
@@ -565,11 +599,154 @@ const API_SOURCE: &str = concat!(
     include_str!("runtime/waypoints.rs")
 );
 
-/// One item per public method of [`API_TYPES`], read from the doc comments
-/// and signatures in their source files, so the index cannot drift from the
-/// code.
+/// Modules whose public items get `api/` pages: `api/<module>` lists them,
+/// each type gets a page with its fields and methods, and each free
+/// function, constant and type alias a page of its own.
+const API_MODULES: [(&str, &str); 5] = [
+    ("net", include_str!("net.rs")),
+    ("net::predict", include_str!("net/predict.rs")),
+    ("net::input", include_str!("net/input.rs")),
+    ("net::interpolate", include_str!("net/interpolate.rs")),
+    ("procgen", include_str!("procgen.rs")),
+];
+
+/// The `api/` pages of one of [`API_MODULES`]: the module page, read from
+/// its `//!` doc, then a page per public item at the top of `source`.
+fn module_items(module: &str, source: &str) -> Vec<DocItem> {
+    let source = source.split("\n#[cfg(test)]").next().unwrap_or(source);
+    let see = format!(
+        "\nPart of `rusting_engine::{module}`; \
+         `rusting docs show api/{module}` has the module's notes.\n"
+    );
+    let mut items = Vec::new();
+    let mut types = Vec::new();
+    let mut docs: Vec<&str> = Vec::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        if let Some(doc) = line.strip_prefix("///") {
+            docs.push(doc.strip_prefix(' ').unwrap_or(doc));
+            continue;
+        }
+        // Attributes and plain comments sit between a doc and its item.
+        if line.starts_with("#[") || line.starts_with("//") {
+            continue;
+        }
+        let keyword = ["fn", "type", "const", "struct", "enum"]
+            .into_iter()
+            .find(|keyword| line.starts_with(&format!("pub {keyword} ")));
+        match keyword {
+            Some("struct" | "enum") => {
+                let name = line.split_whitespace().nth(2).unwrap_or_default();
+                types.push(name.split(['<', '(', ';', '{']).next().unwrap());
+            }
+            Some(_) => {
+                let mut signature = line.trim().to_owned();
+                while !signature.ends_with(['{', ';']) {
+                    let Some(next) = lines.next() else { break };
+                    signature.push(' ');
+                    signature.push_str(next.trim());
+                }
+                let signature = signature
+                    .trim_end_matches(['{', ';'])
+                    .trim()
+                    .replace("( ", "(")
+                    .replace(", )", ")");
+                let name = signature.split_whitespace().nth(2).unwrap_or("");
+                let name = name.split(['(', '<', ':']).next().unwrap();
+                let text = docs.join("\n");
+                items.push(DocItem {
+                    id: format!("api/{name}"),
+                    kind: "api",
+                    title: name.to_owned(),
+                    summary: first_sentence(text.trim()),
+                    text: format!("{signature}\n\n{}\n{see}", text.trim()),
+                });
+            }
+            None => {}
+        }
+        docs.clear();
+    }
+    let methods = methods_of(&types, source);
+    for name in &types {
+        let mut item = struct_item(name, source);
+        let own: Vec<&DocItem> = methods
+            .iter()
+            .filter(|item| item.title.split("::").next() == Some(name))
+            .collect();
+        if !own.is_empty() {
+            item.text += "\nMethods:\n\n";
+            for method in own {
+                item.text +=
+                    &format!("- {}: {}\n", method.title, method.summary);
+            }
+        }
+        item.text += &see;
+        items.push(item);
+    }
+    items.extend(methods.into_iter().map(|mut method| {
+        method.text += &see;
+        method
+    }));
+    let doc: Vec<&str> = source
+        .lines()
+        .map_while(|line| line.strip_prefix("//!"))
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
+        .collect();
+    let mut text = format!(
+        "# {module}\n\n{}\n\nPublic items; `rusting docs show \
+         api/<name>` prints one.\n\n",
+        doc.join("\n").trim()
+    );
+    for item in items.iter().filter(|item| !item.title.contains("::")) {
+        text += &format!("- `{}`: {}\n", item.title, item.summary);
+    }
+    items.insert(
+        0,
+        DocItem {
+            id: format!("api/{module}"),
+            kind: "api",
+            title: module.to_owned(),
+            summary: first_sentence(&doc.join(" ")),
+            text,
+        },
+    );
+    items
+}
+
+/// The type an `impl` line implements, if it is one of `types`: `impl
+/// Name`, `impl Name<'_>` or `impl<T> Name<T>`, but not a trait impl.
+fn impl_owner<'a>(line: &str, types: &[&'a str]) -> Option<&'a str> {
+    let rest = line.strip_prefix("impl")?;
+    let rest = match rest.strip_prefix('<') {
+        Some(generics) => {
+            let mut depth = 1;
+            let end = generics.find(|c| {
+                depth += match c {
+                    '<' => 1,
+                    '>' => -1,
+                    _ => 0,
+                };
+                depth == 0
+            })?;
+            &generics[end + 1..]
+        }
+        None => rest,
+    };
+    let rest = rest.strip_prefix(' ')?;
+    types.iter().copied().find(|name| {
+        rest.strip_prefix(name)
+            .is_some_and(|r| r.starts_with(['<', ' ']))
+    })
+}
+
+/// One item per public method of [`API_TYPES`].
 fn api_items() -> Vec<DocItem> {
-    let source = API_SOURCE;
+    methods_of(&API_TYPES, API_SOURCE)
+}
+
+/// One item per public method of `types`, read from the doc comments and
+/// signatures in `source`, so the index cannot drift from the code.
+fn methods_of(types: &[&str], source: &str) -> Vec<DocItem> {
     let mut items = Vec::new();
     let mut owner = None;
     let mut docs: Vec<&str> = Vec::new();
@@ -578,11 +755,8 @@ fn api_items() -> Vec<DocItem> {
         if let Some(sig) = signature.as_mut() {
             sig.push(' ');
             sig.push_str(line.trim());
-        } else if let Some(rest) = line.strip_prefix("impl ") {
-            owner = API_TYPES.iter().copied().find(|name| {
-                rest.strip_prefix(name)
-                    .is_some_and(|r| r.starts_with(['<', ' ']))
-            });
+        } else if line.starts_with("impl") {
+            owner = impl_owner(line, types);
             docs.clear();
             continue;
         } else if line == "}" {
@@ -957,6 +1131,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "set_reflections",
             "set_exposure",
             "set_hard_shadows",
+            "set_terrain_look",
             "create_texture",
             "edit_texture",
         ],
@@ -1001,6 +1176,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "restore",
             "state_hash",
             "seed",
+            "set_seed",
             "random",
             "roll_loot",
             "roll_loot_table",
@@ -1017,6 +1193,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "set_time_scale",
             "time_scale",
             "quit",
+            "exiting",
             "save_data",
             "load_data",
             "delete_data",
@@ -1216,6 +1393,8 @@ mod tests {
             "{}",
             player.summary
         );
+        assert!(player.text.contains("PlayerController::step"));
+        assert!(super::find("api/PlayerInput").is_some());
         assert!(
             player.text.contains("- `wall: Option<Entity>`: The body"),
             "{}",
@@ -1235,6 +1414,38 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn net_and_procgen_items_have_api_pages() {
+        let page = |id: &str| super::find(id).expect(id).text;
+        for (id, holds) in [
+            ("api/PeerId", "pub type PeerId = u32"),
+            (
+                "api/fbm2",
+                "pub fn fbm2(seed: u64, point: [f32; 2], octaves",
+            ),
+            ("api/noise2", "between -1 and 1"),
+            ("api/procgen", "the same level on every machine"),
+            ("api/procgen", "- `poisson_disk`: Points spread"),
+            (
+                "api/RandomStream",
+                "- RandomStream::unit: The next value in",
+            ),
+            ("api/NetSession", "- NetSession::join: Joins a host"),
+            ("api/NetEvent", "`Message { from: PeerId, bytes: Vec<u8> }`"),
+            ("api/net", "- `run_relay`: Runs a relay"),
+            (
+                "api/Prediction",
+                "- Prediction::reconcile: Takes the host's",
+            ),
+            ("api/Predicted", "Marks the one object"),
+            ("api/Smoothing::correct", "Duration::ZERO"),
+            ("api/InputBuffer::take", "pub fn take(&mut self)"),
+            ("api/Interpolation", "- Interpolation::present:"),
+        ] {
+            assert!(page(id).contains(holds), "{id} lacks {holds:?}");
+        }
+    }
 
     #[test]
     fn every_item_has_a_unique_id_a_title_and_a_summary() {

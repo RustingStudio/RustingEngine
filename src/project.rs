@@ -542,7 +542,7 @@ fn write_zip(
         #[cfg(unix)]
         let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions());
         #[cfg(not(unix))]
-        let mode = 0o100_644;
+        let mode = 0o100_644u32;
         let size = u32::try_from(meta.len()).map_err(|_| too_big())?;
         let mut crc = !0u32;
         let mut reader = std::fs::File::open(file)?;
@@ -1251,6 +1251,7 @@ fn default_scene(name: &str) -> SceneDocument {
                         metallic_roughness_texture: None,
                         occlusion_texture: None,
                         emissive_texture: None,
+                        sway: Default::default(),
                     }),
                     cast_shadows: true,
                     receive_shadows: true,

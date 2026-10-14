@@ -5,6 +5,9 @@
 //! received with the time each one is from, and shows every object where
 //! it was `delay` ago, blending between the two updates around that time.
 //! A delay of a bit more than two update intervals hides one lost update.
+//!
+//! A game that sends its own snapshots keeps a [`Track`] of `(tick,
+//! position)` samples per remote object instead, with no replica.
 
 use super::predict::Predicted;
 use super::replicate::NetTransform;
@@ -34,6 +37,7 @@ impl Interpolation {
         }
     }
 
+    /// How far behind the newest update objects are shown.
     pub fn delay(&self) -> Duration {
         self.delay
     }
@@ -95,6 +99,63 @@ impl Interpolation {
                 entity.insert(transform);
             }
         }
+    }
+}
+
+/// Positions of one remote object at host ticks, for a game that sends its
+/// own snapshots instead of using a [`Replica`](super::replicate::Replica).
+/// Push each `(tick, position)` as it arrives, in any order, and draw the
+/// object at [`Track::at`] a delay behind the newest tick.
+#[derive(Clone, Debug, Default)]
+pub struct Track {
+    samples: VecDeque<(u64, [f32; 3])>,
+}
+
+impl Track {
+    /// A track with no samples.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records `position` at host `tick`. A late sample goes in tick
+    /// order, and one for a tick already held replaces it. The newest 64
+    /// ticks are kept.
+    pub fn push(&mut self, tick: u64, position: [f32; 3]) {
+        match self.samples.binary_search_by_key(&tick, |(tick, _)| *tick) {
+            Ok(index) => self.samples[index].1 = position,
+            Err(0) if self.samples.len() == MAX_SAMPLES => {}
+            Err(index) => {
+                self.samples.insert(index, (tick, position));
+                if self.samples.len() > MAX_SAMPLES {
+                    self.samples.pop_front();
+                }
+            }
+        }
+    }
+
+    /// The newest tick pushed, or `None` before the first sample.
+    pub fn newest(&self) -> Option<u64> {
+        self.samples.back().map(|(tick, _)| *tick)
+    }
+
+    /// The position at `tick`, which may fall between whole ticks (such as
+    /// the newest tick less 2.5): blended between the samples around it.
+    /// Before the oldest sample it holds the oldest; past the newest, it
+    /// holds the newest rather than guessing ahead. `None` when empty.
+    pub fn at(&self, tick: f64) -> Option<[f32; 3]> {
+        let after = self.samples.partition_point(|(at, _)| *at as f64 <= tick);
+        let Some(&(to_tick, to)) = self.samples.get(after) else {
+            return self.samples.back().map(|(_, position)| *position);
+        };
+        let Some(&(from_tick, from)) = after
+            .checked_sub(1)
+            .and_then(|before| self.samples.get(before))
+        else {
+            return Some(to);
+        };
+        let t =
+            ((tick - from_tick as f64) / (to_tick - from_tick) as f64) as f32;
+        Some(std::array::from_fn(|i| from[i] + (to[i] - from[i]) * t))
     }
 }
 
@@ -176,6 +237,28 @@ mod tests {
         smooth.present(&mut client, ms(500));
         assert_eq!(smooth.delay(), ms(475));
         assert_eq!(shown(&mut client).position[0], 3.0, "never goes back");
+    }
+
+    #[test]
+    fn a_track_blends_plain_tick_samples_that_arrive_out_of_order() {
+        let mut track = Track::new();
+        assert_eq!(track.at(5.0), None);
+        track.push(20, [2.0, 0.0, 0.0]);
+        track.push(10, [1.0, 0.0, 0.0]); // late over UDP
+        track.push(30, [9.0, 0.0, 0.0]);
+        track.push(30, [3.0, 0.0, 6.0]); // the same tick again
+        assert_eq!(track.newest(), Some(30));
+        assert_eq!(track.at(5.0), Some([1.0, 0.0, 0.0]), "holds the oldest");
+        assert_eq!(track.at(15.0), Some([1.5, 0.0, 0.0]));
+        assert_eq!(track.at(27.5), Some([2.75, 0.0, 4.5]));
+        assert_eq!(track.at(99.0), Some([3.0, 0.0, 6.0]), "no guessing");
+
+        for tick in 31..200 {
+            track.push(tick, [0.0; 3]);
+        }
+        assert_eq!(track.samples.len(), MAX_SAMPLES);
+        track.push(5, [7.0; 3]);
+        assert_eq!(track.samples.front().unwrap().0, 200 - 64, "too old");
     }
 
     #[test]

@@ -29,6 +29,7 @@
 //! game but do not hide traffic from someone on the path.
 
 use bevy_ecs::prelude::Resource;
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{
@@ -56,7 +57,7 @@ pub type PeerId = u32;
 /// The host's id.
 pub const HOST: PeerId = 0;
 /// Wire protocol version. A host or relay refuses other versions.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 /// Largest message, in bytes. Larger frames close the connection.
 pub const MAX_MESSAGE: usize = 16 << 20;
 /// Largest unreliable message, in bytes, so a datagram fits one packet.
@@ -72,6 +73,8 @@ const ROOM: u8 = 4;
 const JOIN: u8 = 5;
 const WELCOME: u8 = 6;
 const REJECT: u8 = 7;
+/// Host to relay: the room's world seed, a u64, for later WELCOMEs.
+const SEED: u8 = 8;
 /// Longest a whole handshake may take, however slowly its bytes arrive.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Largest handshake frame. A JOIN holds a version, a room code and a
@@ -135,6 +138,19 @@ const FRAME_HEADER: u64 = 9;
 /// Bytes a datagram adds to its payload: the receiver's token and the
 /// sender's id.
 const DATAGRAM_HEADER: usize = 12;
+
+thread_local! {
+    /// The time [`NetSession::poll`] reads instead of the wall clock.
+    static PINNED_NOW: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Makes [`NetSession::poll`] on this thread take `now` as the current time
+/// when it times [`NetSession::simulate`] delays; `None` returns to the wall
+/// clock. A realtime scenario pins each tick's planned time, so a slow
+/// capture frame does not change which tick a held message arrives on.
+pub(crate) fn pin_clock(now: Option<Instant>) {
+    PINNED_NOW.with(|pinned| pinned.set(now));
+}
 
 /// Simulated conditions, the events they hold back, and the counters.
 #[derive(Default)]
@@ -272,6 +288,9 @@ pub struct NetSession {
     datagrams: Option<Datagrams>,
     /// A direct host's listening address and its stop flag.
     listener: Option<(SocketAddr, Arc<AtomicBool>)>,
+    /// The host's world seed: set on the host, received in WELCOME on a
+    /// client. A direct host's join threads read it.
+    seed: Arc<Mutex<Option<u64>>>,
 }
 
 /// A UDP socket beside a direct session's TCP streams. A datagram is the
@@ -400,6 +419,8 @@ impl NetSession {
         let password: Arc<str> = password.into();
         let next = Arc::new(AtomicU32::new(HOST + 1));
         let pending = Arc::new(AtomicUsize::new(0));
+        let seed = Arc::new(Mutex::new(None));
+        let shared_seed = Arc::clone(&seed);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 // Dropping the session sets `stop` and connects once to
@@ -412,12 +433,13 @@ impl NetSession {
                     continue;
                 }
                 pending.fetch_add(1, Ordering::Relaxed);
-                let (peers, tokens, next, pending, password, sender) = (
+                let (peers, tokens, next, pending, password, seed, sender) = (
                     Arc::clone(&accepted),
                     tokens.clone(),
                     Arc::clone(&next),
                     Arc::clone(&pending),
                     Arc::clone(&password),
+                    Arc::clone(&shared_seed),
                     sender.clone(),
                 );
                 // Each join shakes hands on its own thread, so a silent
@@ -429,6 +451,7 @@ impl NetSession {
                         tokens.as_deref(),
                         &next,
                         &password,
+                        &seed,
                         &sender,
                     );
                     pending.fetch_sub(1, Ordering::Relaxed);
@@ -459,6 +482,7 @@ impl NetSession {
             lab: Mutex::default(),
             datagrams,
             listener: Some((address, closed)),
+            seed,
         })
     }
 
@@ -469,11 +493,10 @@ impl NetSession {
         password: &str,
     ) -> io::Result<Self> {
         let stream = TcpStream::connect(address)?;
-        let (me, welcome) = request_join(&stream, "", password)?;
+        let (me, token, seed) = request_join(&stream, "", password)?;
         let host = stream.peer_addr()?;
-        let datagrams = match welcome.try_into() {
-            Ok(token) => {
-                let token = u64::from_le_bytes(token);
+        let datagrams = match token {
+            Some(token) => {
                 let any: SocketAddr = if host.is_ipv4() {
                     ([0, 0, 0, 0], 0).into()
                 } else {
@@ -490,7 +513,7 @@ impl NetSession {
                 }
                 Some(datagrams)
             }
-            Err(_) => None,
+            None => None,
         };
         let (sender, events) = channel();
         let reader = stream.try_clone()?;
@@ -508,6 +531,7 @@ impl NetSession {
             lab: Mutex::default(),
             datagrams,
             listener: None,
+            seed: Arc::new(Mutex::new(seed)),
         })
     }
 
@@ -551,6 +575,7 @@ impl NetSession {
             lab: Mutex::default(),
             datagrams: None,
             listener: None,
+            seed: Arc::default(),
         })
     }
 
@@ -563,7 +588,7 @@ impl NetSession {
     ) -> io::Result<Self> {
         let stream = TcpStream::connect(relay)?;
         let code = code.trim().to_ascii_uppercase();
-        let (me, _) = request_join(&stream, &code, token)?;
+        let (me, _, seed) = request_join(&stream, &code, token)?;
         let (sender, events) = channel();
         let reader = stream.try_clone()?;
         std::thread::spawn(move || {
@@ -578,6 +603,7 @@ impl NetSession {
             lab: Mutex::default(),
             datagrams: None,
             listener: None,
+            seed: Arc::new(Mutex::new(seed)),
         })
     }
 
@@ -589,6 +615,9 @@ impl NetSession {
     #[must_use]
     pub fn loopback(clients: usize) -> (Self, Vec<Self>) {
         let group = Arc::new(Mutex::new(BTreeMap::new()));
+        // Every member shares the host's seed, as if each joined after the
+        // host set it.
+        let seed = Arc::new(Mutex::new(None));
         let member = |me: PeerId| {
             let (sender, events) = channel();
             group.lock().unwrap().insert(me, sender);
@@ -600,6 +629,7 @@ impl NetSession {
                 lab: Mutex::default(),
                 datagrams: None,
                 listener: None,
+                seed: Arc::clone(&seed),
             }
         };
         let host = member(HOST);
@@ -624,6 +654,30 @@ impl NetSession {
     #[must_use]
     pub fn room_code(&self) -> Option<&str> {
         self.room.as_deref()
+    }
+
+    /// Sets the world seed that clients receive when they join (host
+    /// only), usually `scene.seed()`. Call it right after hosting: a
+    /// client that joined before gets no seed.
+    pub fn set_seed(&self, seed: u64) -> io::Result<()> {
+        if self.me != HOST {
+            return Err(invalid("only the host sets the seed"));
+        }
+        if let Route::Relay(stream) = &self.route {
+            let bytes = seed.to_le_bytes();
+            write_frame(&mut *stream.lock().unwrap(), SEED, HOST, &bytes)?;
+        }
+        *self.seed.lock().unwrap() = Some(seed);
+        Ok(())
+    }
+
+    /// The host's world seed: on the host, the one given to
+    /// [`NetSession::set_seed`]; on a client, the one the host had set
+    /// when this client joined. `None` when the host set none. Give it to
+    /// `scene.set_seed` so the client builds the same world.
+    #[must_use]
+    pub fn seed(&self) -> Option<u64> {
+        *self.seed.lock().unwrap()
     }
 
     /// Clients connected now, in id order (host only; empty on a client).
@@ -753,7 +807,7 @@ impl NetSession {
     /// Events since the last call, in arrival order. Never blocks. Under
     /// [`NetSession::simulate`], events come back once their delay passes.
     pub fn poll(&self) -> Vec<NetEvent> {
-        let now = Instant::now();
+        let now = PINNED_NOW.with(Cell::get).unwrap_or_else(Instant::now);
         let arrived = self.events.lock().unwrap().try_iter().collect();
         let mut lab = self.lab.lock().unwrap();
         let mut events = lab.deliver(arrived, now);
@@ -1003,6 +1057,8 @@ struct RelayRoom {
     host: TcpStream,
     clients: BTreeMap<PeerId, TcpStream>,
     next: PeerId,
+    /// The host's world seed, sent in each WELCOME.
+    seed: Option<u64>,
 }
 
 type Rooms = Mutex<HashMap<String, RelayRoom>>;
@@ -1072,6 +1128,7 @@ fn relay_host(mut stream: TcpStream, rooms: &Rooms, mut throttle: Throttle) {
                 host: writer,
                 clients: BTreeMap::new(),
                 next: HOST + 1,
+                seed: None,
             },
         );
         code
@@ -1079,13 +1136,17 @@ fn relay_host(mut stream: TcpStream, rooms: &Rooms, mut throttle: Throttle) {
     if write_frame(&mut stream, ROOM, HOST, code.as_bytes()).is_ok() {
         while let Ok((kind, to, bytes)) = read_frame(&mut stream, MAX_MESSAGE) {
             throttle.spend(9 + bytes.len());
-            if kind != DATA {
+            if kind != DATA && kind != SEED {
                 continue;
             }
             let mut rooms = rooms.lock().unwrap();
             let Some(room) = rooms.get_mut(&code) else {
                 break;
             };
+            if kind == SEED {
+                room.seed = bytes.try_into().ok().map(u64::from_le_bytes);
+                continue;
+            }
             for (&peer, client) in &mut room.clients {
                 if to == EVERYONE || to == peer {
                     forward(client, DATA, HOST, &bytes);
@@ -1120,7 +1181,8 @@ fn relay_client(
         };
         let peer = room.next;
         room.next += 1;
-        if write_frame(&mut stream, WELCOME, peer, &[]).is_err() {
+        let welcome = welcome_payload(None, room.seed);
+        if write_frame(&mut stream, WELCOME, peer, &welcome).is_err() {
             return;
         }
         forward(&mut room.host, JOINED, peer, &[]);
@@ -1162,6 +1224,7 @@ fn admit_client(
     tokens: Option<&Mutex<UdpPeers>>,
     next: &AtomicU32,
     password: &str,
+    seed: &Mutex<Option<u64>>,
     sender: &Sender<NetEvent>,
 ) -> Option<PeerId> {
     let mut stream = stream;
@@ -1188,7 +1251,8 @@ fn admit_client(
     let peer = next.fetch_add(1, Ordering::Relaxed);
     // With no token in WELCOME the client sends everything reliably.
     let token = tokens.map(|tokens| (tokens, token()));
-    let welcome = token.map_or(Vec::new(), |(_, t)| t.to_le_bytes().to_vec());
+    let seed = *seed.lock().unwrap();
+    let welcome = welcome_payload(token.map(|(_, token)| token), seed);
     write_frame(&mut stream, WELCOME, peer, &welcome).ok()?;
     if let Some((tokens, token)) = token {
         tokens.lock().unwrap().insert(peer, (token, ip, None));
@@ -1202,15 +1266,15 @@ fn admit_client(
     Some(peer)
 }
 
-/// Client side of a join; returns the id the host or relay assigned and
-/// the WELCOME payload: a direct host's datagram token, empty from a relay.
-/// A JOIN carries the version, the room code's length as one byte, the
-/// code and then the password or relay token.
+/// Client side of a join; returns the id the host or relay assigned, a
+/// direct host's datagram token and the host's world seed (see
+/// [`welcome_payload`]). A JOIN carries the version, the room code's
+/// length as one byte, the code and then the password or relay token.
 fn request_join(
     stream: &TcpStream,
     code: &str,
     secret: &str,
-) -> io::Result<(PeerId, Vec<u8>)> {
+) -> io::Result<(PeerId, Option<u64>, Option<u64>)> {
     let mut stream = stream;
     stream.set_nodelay(true)?;
     let length =
@@ -1221,10 +1285,42 @@ fn request_join(
     payload.extend(secret.as_bytes());
     write_frame(&mut stream, JOIN, HOST, &payload)?;
     match read_handshake(stream)? {
-        (WELCOME, me, payload) => Ok((me, payload)),
+        (WELCOME, me, payload) => {
+            let (token, seed) = parse_welcome(&payload)
+                .ok_or_else(|| invalid("malformed welcome"))?;
+            Ok((me, token, seed))
+        }
         (REJECT, _, reason) => Err(rejected(&reason)),
         _ => Err(invalid("the host did not answer the join")),
     }
+}
+
+/// A WELCOME payload: a flags byte (1: a datagram token follows, 2: a
+/// world seed follows), then each present value as a little-endian u64.
+/// With no token the client sends everything reliably.
+fn welcome_payload(token: Option<u64>, seed: Option<u64>) -> Vec<u8> {
+    let flags = u8::from(token.is_some()) | u8::from(seed.is_some()) << 1;
+    let mut payload = vec![flags];
+    for value in [token, seed].into_iter().flatten() {
+        payload.extend(value.to_le_bytes());
+    }
+    payload
+}
+
+/// The token and seed of a [`welcome_payload`], or `None` if malformed.
+fn parse_welcome(payload: &[u8]) -> Option<(Option<u64>, Option<u64>)> {
+    let (&flags, mut rest) = payload.split_first()?;
+    let mut take = |bit: u8| -> Option<Option<u64>> {
+        if flags & bit == 0 {
+            return Some(None);
+        }
+        let (value, tail) = rest.split_first_chunk::<8>()?;
+        rest = tail;
+        Some(Some(u64::from_le_bytes(*value)))
+    };
+    let token = take(1)?;
+    let seed = take(2)?;
+    rest.is_empty().then_some((token, seed))
 }
 
 fn check_version(payload: &[u8]) -> Result<(), String> {
@@ -1535,6 +1631,35 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_clock_times_simulated_delays() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = NetSession::host_on(listener, "").unwrap();
+        let client = NetSession::join(address, "").unwrap();
+        assert_eq!(wait(&host, 1), [NetEvent::Connected(1)]);
+        host.simulate(NetConditions {
+            latency: Duration::from_millis(1000),
+            ..NetConditions::default()
+        });
+
+        let start = Instant::now();
+        pin_clock(Some(start));
+        client.send(HOST, b"late").unwrap();
+        while host.stats().held == 0 && start.elapsed() < Duration::from_secs(2)
+        {
+            assert!(host.poll().is_empty());
+        }
+        pin_clock(Some(start + Duration::from_millis(500)));
+        assert!(host.poll().is_empty());
+        // Only the pinned clock moved past the delay, not the wall clock.
+        pin_clock(Some(start + Duration::from_millis(1500)));
+        let due = host.poll();
+        pin_clock(None);
+        assert!(start.elapsed() < Duration::from_secs(1), "too slow");
+        assert_eq!(due, [message(1, "late")]);
+    }
+
+    #[test]
     fn a_session_counts_traffic_and_holds_messages_under_latency() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1643,6 +1768,48 @@ mod tests {
 
         drop(client);
         assert_eq!(wait(&host, 1), [NetEvent::Disconnected(1)]);
+    }
+
+    #[test]
+    fn a_joining_client_receives_the_hosts_world_seed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = NetSession::host_on(listener, "").unwrap();
+        let early = NetSession::join(address, "").unwrap();
+        assert_eq!(early.seed(), None, "joined before the host set one");
+        host.set_seed(0xDEAD_BEEF_0042).unwrap();
+        let client = NetSession::join(address, "").unwrap();
+        assert_eq!(client.seed(), Some(0xDEAD_BEEF_0042));
+        assert!(client.datagrams.is_some(), "the token still arrives");
+        assert!(client.set_seed(1).is_err(), "only the host sets it");
+        assert_eq!(host.seed(), Some(0xDEAD_BEEF_0042));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = listener.local_addr().unwrap();
+        std::thread::spawn(move || run_relay(listener, ""));
+        let host = NetSession::host_room(relay, "").unwrap();
+        host.set_seed(7).unwrap();
+        // The relay reads the seed on the host's thread; joins race it.
+        let start = Instant::now();
+        let client = loop {
+            let code = host.room_code().unwrap();
+            let client = NetSession::join_room(relay, code, "").unwrap();
+            if client.seed().is_some() || start.elapsed().as_secs() > 2 {
+                break client;
+            }
+        };
+        assert_eq!(client.seed(), Some(7));
+
+        let (host, clients) = NetSession::loopback(1);
+        host.set_seed(9).unwrap();
+        assert_eq!(clients[0].seed(), Some(9));
+
+        for (token, seed) in [(None, None), (Some(3), None), (None, Some(4))] {
+            let payload = welcome_payload(token, seed);
+            assert_eq!(parse_welcome(&payload), Some((token, seed)));
+        }
+        assert_eq!(parse_welcome(&[2, 1, 2, 3]), None, "short seed");
+        assert_eq!(parse_welcome(&[]), None);
     }
 
     #[test]

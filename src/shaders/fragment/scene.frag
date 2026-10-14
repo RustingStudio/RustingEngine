@@ -10,6 +10,11 @@ layout(location = 7) flat in vec4 v_surface;
 layout(location = 8) flat in vec4 v_transmission;
 // Repeats of each terrain layer per unit of v_uv.
 layout(location = 9) flat in vec4 v_splat_scale;
+// Terrain: the material color, multiplied into the blended layers.
+layout(location = 10) flat in vec3 v_tint;
+// Water: x depth fade, y shore foam width, z ripple strength, w ripple
+// length; v_splat_scale holds the deep color.
+layout(location = 11) flat in vec4 v_water;
 layout(location = 0) out vec4 f_color;
 layout(set = 1, binding = 0) uniform sampler2D base_color_texture;
 layout(set = 1, binding = 1) uniform sampler2D normal_texture;
@@ -427,7 +432,9 @@ void main() {
     vec4 base_color = v_color * texture(base_color_texture, v_uv);
     // Terrain normal (rgb) and roughness (alpha), blended like the colors.
     vec4 terrain_bump = vec4(0.5, 0.5, 1.0, 1.0);
-    if (v_transmission.w > 0.5) {
+    // transmission.w is 1 for a terrain splat material, 2 for water.
+    bool terrain = abs(v_transmission.w - 1.0) < 0.5;
+    if (terrain) {
         // Terrain: blend the layer arrays by the vertex color's weights.
         // Each layer repeats with the sampler's wrap, so mips and
         // anisotropic filtering stay seamless; gradients are taken here,
@@ -453,7 +460,7 @@ void main() {
                     * textureGrad(terrain_normals, at, dx * scale, dy * scale);
             }
         }
-        base_color.a = 1.0;
+        base_color = vec4(base_color.rgb * v_tint, 1.0);
     }
     // Flat shading's face normal, taken before any discard or branch:
     // derivatives are undefined once a pixel of the 2x2 quad has left, and
@@ -472,13 +479,67 @@ void main() {
             v_tangent.xyz - normal * dot(normal, v_tangent.xyz)
         );
         vec3 bitangent = cross(normal, tangent) * v_tangent.w;
-        vec3 sampled = (v_transmission.w > 0.5
+        vec3 sampled = (terrain
             ? terrain_bump.xyz : texture(normal_texture, v_uv).xyz) * 2.0 - 1.0;
         normal = normalize(mat3(tangent, bitangent, normal) * sampled);
     }
     vec3 view_dir = camera.eye.w > 0.5
         ? normalize(camera.eye.xyz - v_world_position)
         : normalize(camera.eye.xyz);
+    // Water: small scrolling waves on the normal, then color and shore foam
+    // by the water between the surface and the opaque scene behind it.
+    if (v_transmission.w > 1.5) {
+        float time = camera.ambient.w;
+        if (v_water.z > 0.0) {
+            // Three crossing waves at the deep-water speed sqrt(g / k). They
+            // fade out once a pixel spans half a wave, before they alias.
+            float k = 6.2831853 / max(v_water.w, 0.01);
+            vec2 slope = vec2(0.0);
+            for (int i = 0; i < 3; ++i) {
+                float angle = 0.4 + 2.1 * float(i);
+                vec2 dir = vec2(cos(angle), sin(angle));
+                float wave_k = k * (1.0 + 0.37 * float(i));
+                float phase = wave_k * dot(dir, v_world_position.xz)
+                    - sqrt(9.81 * wave_k) * time;
+                slope += dir * cos(phase);
+            }
+            vec2 footprint = fwidth(v_world_position.xz);
+            float fade = clamp(
+                1.0 - 2.0 * max(footprint.x, footprint.y) / max(v_water.w, 0.01),
+                0.0, 1.0);
+            slope *= 0.15 * v_water.z * fade;
+            normal = normalize(normal - vec3(slope.x, 0.0, slope.y));
+        }
+        // The opaque depth is copied before blended draws when some water
+        // reads it; scene_color.w says it was.
+        if (PASS == 1u && shadow.scene_color.w > 0.5
+            && (v_water.x > 0.0 || v_water.y > 0.0)) {
+            vec4 clip = camera.view_projection * vec4(v_world_position, 1.0);
+            vec2 ndc = clip.xy / clip.w;
+            vec4 behind = shadow.inverse_view_projection
+                * vec4(ndc, scene_depth_at(ndc), 1.0);
+            behind.xyz /= behind.w;
+            if (v_water.x > 0.0) {
+                // Light crosses more water the longer the view runs under
+                // the surface; open water over the far plane is deep.
+                float through = length(behind.xyz - v_world_position);
+                base_color = mix(base_color, v_splat_scale,
+                    clamp(through / v_water.x, 0.0, 1.0));
+            }
+            if (v_water.y > 0.0) {
+                // Foam fills the band where the ground is close under the
+                // surface and breaks up toward its edge in a slow pattern.
+                float depth = max(v_world_position.y - behind.y, 0.0);
+                vec2 p = v_world_position.xz * 3.0;
+                float pattern = 0.25 * (sin(p.x + time * 0.7)
+                    * sin(p.y * 1.3 - time * 0.5)
+                    + sin((p.x + p.y) * 1.7 + time));
+                float edge = 1.0 - depth / v_water.y;
+                float foam = smoothstep(0.3, 0.6, edge + 0.4 * pattern);
+                base_color = mix(base_color, vec4(1.0), foam);
+            }
+        }
+    }
     // glTF packs roughness in green and metallic in blue.
     vec4 packed = texture(metallic_roughness_texture, v_uv);
     Surface s = Surface(base_color, normal, v_surface.x * packed.b,

@@ -455,3 +455,19 @@ record mode and the rest-pose preview. Later:
 
 - Patch more fields in place (components, lights, mesh renderers); other
   edits still reload the open scene.
+- Join across the internet without router setup. Today a Direct session
+  needs a forwarded port, and a Relay session needs a relay on a public
+  machine, so two people behind home routers cannot connect by default.
+  Plan, in order:
+  1. Default relay: the editor ships with a relay address, so Host shows a
+     room code and Join needs only that code and the session key. Address,
+     port and token move under "Advanced". Direct stays for LAN.
+  2. Hole punching: each peer learns its public UDP address from a public
+     STUN server, the relay swaps the addresses under the room code, and
+     both peers send to each other at once. The session then runs peer to
+     peer over UDP with a reliable layer, and falls back to the relay when
+     the punch fails (CGNAT, symmetric NAT). Needs a reliable UDP transport
+     behind the `NetSession` API: write one, or add a QUIC crate with the
+     owner's approval.
+  3. Steam networking: a `NetSession` backend on Steam Datagram Relay once
+     the engine ships on Steam, so Steam users need no relay of ours.

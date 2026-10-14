@@ -502,12 +502,16 @@ struct RenderInstanceUpload {
     /// receives shadows, bits 8 and up hold the lightmap slot plus one.
     physics: [u32; 4],
     /// x: transmission; y: index of refraction; z: thickness; w: 1 for a
-    /// terrain splat material.
+    /// terrain splat material, 2 for water.
     transmission: [f32; 4],
     /// xy: texture repeats per face; zw: texture offset.
     uv_transform: [f32; 4],
-    /// Repeats of each terrain layer per unit of texture coordinates.
+    /// Repeats of each terrain layer per unit of texture coordinates; for
+    /// water, the deep color.
     splat_scale: [f32; 4],
+    /// Water only: x depth fade (0 off), y shore foam width, z ripple
+    /// strength, w ripple length.
+    water: [f32; 4],
 }
 
 /// Rougher surfaces keep the environment reflection only; the shader fades
@@ -1147,6 +1151,8 @@ struct PreparedRenderInstances {
     /// Whether any blended instance transmits light, so the frame copies the
     /// opaque scene color for it to sample.
     refractive: bool,
+    /// Some blended instance is water that reads the opaque depth.
+    water_depth: bool,
     /// Batches smooth enough for screen-space reflections, drawn again over
     /// the opaque copy.
     glossy_batches: Vec<usize>,
@@ -1191,9 +1197,12 @@ impl PreparedRenderInstances {
                 continue;
             }
             instance.model = matrix;
-            let sway = instance.normal[0][3];
+            // The w components carry the sway, not the transform.
+            let sway = instance.normal.map(|column| column[3]);
             instance.normal = normal_columns(Matrix4::from(matrix));
-            instance.normal[0][3] = sway;
+            for (column, sway) in instance.normal.iter_mut().zip(sway) {
+                column[3] = sway;
+            }
             if let Some(local) = self.local_bounds[index] {
                 self.bounds[index] = Some(local.transformed(&matrix));
             }
@@ -3371,15 +3380,22 @@ impl SceneRenderer {
         let reflections = options.debug_view == SceneDebugView::Lit
             && !render_world.reflections_disabled
             && quality != QualityProfile::Eco;
-        let (refraction, glossy) = self.prepared_instances.as_ref().map_or(
-            (false, false),
-            |prepared| {
-                (prepared.refractive, !prepared.glossy_batches.is_empty())
-            },
-        );
+        let (refraction, glossy, water_depth) = self
+            .prepared_instances
+            .as_ref()
+            .map_or((false, false, false), |prepared| {
+                (
+                    prepared.refractive,
+                    !prepared.glossy_batches.is_empty(),
+                    prepared.water_depth,
+                )
+            });
         let lit = options.debug_view == SceneDebugView::Lit;
         // ponytail: refraction still needs the copy even with reflections off.
-        let mut split = lit && (refraction || (reflections && glossy));
+        let mut split =
+            lit && (refraction || water_depth || (reflections && glossy));
+        // Water reads the opaque depth even when reflections are off.
+        let depth_copy = reflections || water_depth;
         // Atmosphere belongs to the lit look; debug views show raw shading.
         let effects = options.effects;
         let fog = render_world
@@ -3549,7 +3565,7 @@ impl SceneRenderer {
                         1.0,
                         last_mip as f32,
                         f32::from(u8::from(reflections)),
-                        0.0,
+                        f32::from(u8::from(depth_copy)),
                     ]
                 } else {
                     [0.0; 4]
@@ -3738,7 +3754,7 @@ impl SceneRenderer {
                     WriteDescriptorSet::image_view_sampler(3, view, sampler)
                 },
                 {
-                    let (view, sampler) = if split && reflections {
+                    let (view, sampler) = if split && depth_copy {
                         (
                             self.depth_pyramid.view.clone(),
                             self.depth_pyramid.sampler.clone(),
@@ -5107,8 +5123,9 @@ impl SceneRenderer {
                 ))
                 .map_err(|error| SceneRenderError(error.to_string()))?;
             record_mip_chain(&mut commands, self.scene_color.image())?;
-            if reflections {
-                // Mip 0 of the pyramid is the depth the reflection march reads.
+            if depth_copy {
+                // Mip 0 of the pyramid is the depth the reflection march and
+                // water read.
                 let (set, size) = &self.depth_pyramid.mips[0];
                 let pipeline = &self.depth_pyramid_copy_pipeline;
                 commands
@@ -7547,9 +7564,18 @@ impl SceneRenderer {
             let renderable = renderables[index];
             let mut normal =
                 normal_columns(Matrix4::from(renderable.transform.matrix));
-            normal[0][3] =
-                sways.get(&expanded_sources[index]).copied().unwrap_or(0.0);
             let material = assets.materials.get(renderable.material);
+            // Sway rides in the w components: lean per unit of wind (a
+            // foliage copy's own, else the material's), gust frequency and
+            // bend height.
+            let sway =
+                material.map(|material| material.sway).unwrap_or_default();
+            normal[0][3] = sways
+                .get(&expanded_sources[index])
+                .copied()
+                .unwrap_or(sway.amplitude);
+            normal[1][3] = sway.frequency;
+            normal[2][3] = sway.height;
             let mut color = material
                 .map_or([1.0, 0.0, 1.0, 1.0], |material| material.base_color);
             let (mut emissive, mut surface) =
@@ -7632,16 +7658,37 @@ impl SceneRenderer {
                         | lightmap_slot(render_world, renderable.entity) << 8,
                 ],
                 transmission: material.map_or([0.0; 4], |material| {
+                    let kind = if material.splat {
+                        1.0
+                    } else if material.water.is_water() {
+                        2.0
+                    } else {
+                        0.0
+                    };
                     [
                         material.transmission,
                         material.ior,
                         material.thickness,
-                        f32::from(u8::from(material.splat)),
+                        kind,
                     ]
                 }),
                 uv_transform,
-                splat_scale: material
-                    .map_or([1.0; 4], |material| material.splat_scale),
+                splat_scale: material.map_or([1.0; 4], |material| {
+                    if material.splat {
+                        material.splat_scale
+                    } else {
+                        material.water.deep_color
+                    }
+                }),
+                water: material.map_or([0.0; 4], |material| {
+                    let water = &material.water;
+                    [
+                        water.depth_fade,
+                        water.shore_foam,
+                        water.ripples,
+                        water.ripple_length,
+                    ]
+                }),
             });
         }
         // ponytail: GPU-physics bodies sort by their last CPU transform;
@@ -7662,7 +7709,12 @@ impl SceneRenderer {
                 let local = renderable
                     .bounds
                     .or_else(|| mesh.and_then(|mesh| mesh.bounds));
-                let local = match sways.contains_key(&expanded_sources[index]) {
+                let swaying = sways.contains_key(&expanded_sources[index])
+                    || assets
+                        .materials
+                        .get(renderable.material)
+                        .is_some_and(|material| material.sway.amplitude > 0.0);
+                let local = match swaying {
                     true => local.map(lean_room),
                     false => local,
                 };
@@ -7766,6 +7818,10 @@ impl SceneRenderer {
         let refractive = instances[blended_start..]
             .iter()
             .any(|instance| instance.transmission[0] > 0.0);
+        let water_depth = instances[blended_start..].iter().any(|instance| {
+            instance.transmission[3] > 1.5
+                && (instance.water[0] > 0.0 || instance.water[1] > 0.0)
+        });
         let glossy_batches = batches
             .iter()
             .enumerate()
@@ -7796,6 +7852,7 @@ impl SceneRenderer {
             physics_revision: render_world.gpu_physics_revision,
             material_revisions,
             refractive,
+            water_depth,
             glossy_batches,
             instances,
             batches,
@@ -12204,6 +12261,7 @@ struct RenderInstance {
     vec4 transmission;
     vec4 uv_transform;
     vec4 splat_scale;
+    vec4 water;
 };
 layout(set = 0, binding = 1) readonly buffer RenderInstances {
     RenderInstance data[];
@@ -12217,20 +12275,37 @@ layout(location = 6) flat out vec4 v_emissive;
 layout(location = 7) flat out vec4 v_surface;
 layout(location = 8) flat out vec4 v_transmission;
 layout(location = 9) flat out vec4 v_splat_scale;
+layout(location = 10) flat out vec3 v_tint;
+layout(location = 11) flat out vec4 v_water;
 // Index into render_instances from the per-frame visible list.
 layout(location = 4) in uint instance_index;
-// Foliage lean: `Foliage` copies carry their sway in normal[0].w and bend
-// by the force fields at their base, as `lean_matrix` on the CPU did.
+// Wind sway: `Foliage` copies and swaying materials carry their lean per
+// unit of wind in normal[0].w, a gust frequency in normal[1].w and a bend
+// height in normal[2].w, and bend by the force fields at their base, as
+// `lean_matrix` on the CPU did.
 #define NO_BODY_SHAPES
 #include <physics_shapes.glsl>
 #include <physics_fields.glsl>
-vec2 foliage_lean(float sway, vec3 base, float seconds) {
+vec2 foliage_lean(float sway, float frequency, vec3 base, float seconds) {
     if (sway <= 0.0) return vec2(0.0);
     vec3 push = field_push(base, 0.001, uint(force_fields.data.length()), seconds);
     vec2 lean = push.xz * sway;
+    if (frequency > 0.0) {
+        // Gusts, phased by position so neighbours do not move together.
+        float phase = dot(base.xz, vec2(0.37, 0.61));
+        lean *= 1.0 + 0.5 * sin(6.2831853 * frequency * seconds + phase);
+    }
     // Past 45 degrees a copy would stretch more than it leans.
     float size = length(lean);
     return size > 1.0 ? lean / size : lean;
+}
+// Sideways reach per unit of lean at `y` above the base, and its slope.
+// With a bend height the base stays rooted: y^2 / 2h curves up to slope 1
+// at h, then runs straight. Without one the whole mesh shears.
+vec2 sway_bend(float y, float height) {
+    if (height <= 0.0) return vec2(y, 1.0);
+    if (y <= 0.0) return vec2(0.0);
+    return y < height ? vec2(y * y / (2.0 * height), y / height) : vec2(y - 0.5 * height, 1.0);
 }
 void main() {
     RenderInstance instance = render_instances.data[instance_index];
@@ -12238,8 +12313,11 @@ void main() {
         ? instance.model
         : physics_states.data[instance.physics.x].model;
     vec4 world_position = model * vec4(position, 1.0);
-    vec2 lean = foliage_lean(instance.normal[0].w, model[3].xyz, camera.ambient.w);
-    world_position.xz += lean * (world_position.y - model[3].y);
+    vec2 lean = foliage_lean(instance.normal[0].w, instance.normal[1].w, model[3].xyz, camera.ambient.w);
+    vec2 bend = sway_bend(world_position.y - model[3].y, instance.normal[2].w);
+    world_position.xz += lean * bend.x;
+    // Normals and tangents follow the local shear, the lean times the slope.
+    lean *= bend.y;
     gl_Position = camera.view_projection * world_position;
     mat3 normal_matrix;
     if (instance.physics.x == 0xffffffffu) {
@@ -12256,7 +12334,11 @@ void main() {
     v_normal = normal_matrix * normal;
     // The lean is a shear; normals take its inverse transpose.
     v_normal.y -= lean.x * v_normal.x + lean.y * v_normal.z;
-    v_color = instance.color * color;
+    // Terrain vertex colors are splat weights, normalized per pixel: the
+    // material color tints the blended layers instead of the weights.
+    bool splat = abs(instance.transmission.w - 1.0) < 0.5;
+    v_color = splat ? color : instance.color * color;
+    v_tint = splat ? instance.color.rgb : vec3(1.0);
     v_world_position = world_position.xyz;
     v_alpha = instance.physics.yzw;
     v_uv = uv * instance.uv_transform.xy + instance.uv_transform.zw;
@@ -12267,6 +12349,7 @@ void main() {
     v_surface = instance.surface;
     v_transmission = instance.transmission;
     v_splat_scale = instance.splat_scale;
+    v_water = instance.water;
 }
 "
                         }
@@ -12317,22 +12400,38 @@ struct RenderInstance {
     vec4 transmission;
     vec4 uv_transform;
     vec4 splat_scale;
+    vec4 water;
 };
 layout(set = 0, binding = 1) readonly buffer RenderInstances {
     RenderInstance data[];
 } render_instances;
-// Foliage lean: `Foliage` copies carry their sway in normal[0].w and bend
-// by the force fields at their base, as `lean_matrix` on the CPU did.
+// Wind sway: `Foliage` copies and swaying materials carry their lean per
+// unit of wind in normal[0].w, a gust frequency in normal[1].w and a bend
+// height in normal[2].w, and bend by the force fields at their base, as
+// `lean_matrix` on the CPU did.
 #define NO_BODY_SHAPES
 #include <physics_shapes.glsl>
 #include <physics_fields.glsl>
-vec2 foliage_lean(float sway, vec3 base, float seconds) {
+vec2 foliage_lean(float sway, float frequency, vec3 base, float seconds) {
     if (sway <= 0.0) return vec2(0.0);
     vec3 push = field_push(base, 0.001, uint(force_fields.data.length()), seconds);
     vec2 lean = push.xz * sway;
+    if (frequency > 0.0) {
+        // Gusts, phased by position so neighbours do not move together.
+        float phase = dot(base.xz, vec2(0.37, 0.61));
+        lean *= 1.0 + 0.5 * sin(6.2831853 * frequency * seconds + phase);
+    }
     // Past 45 degrees a copy would stretch more than it leans.
     float size = length(lean);
     return size > 1.0 ? lean / size : lean;
+}
+// Sideways reach per unit of lean at `y` above the base, and its slope.
+// With a bend height the base stays rooted: y^2 / 2h curves up to slope 1
+// at h, then runs straight. Without one the whole mesh shears.
+vec2 sway_bend(float y, float height) {
+    if (height <= 0.0) return vec2(y, 1.0);
+    if (y <= 0.0) return vec2(0.0);
+    return y < height ? vec2(y * y / (2.0 * height), y / height) : vec2(y - 0.5 * height, 1.0);
 }
 void main() {
     RenderInstance instance = render_instances.data[gl_InstanceIndex];
@@ -12345,8 +12444,8 @@ void main() {
         ? instance.model
         : physics_states.data[instance.physics.x].model;
     vec4 world_position = model * vec4(position, 1.0);
-    vec2 lean = foliage_lean(instance.normal[0].w, model[3].xyz, camera.ambient.w);
-    world_position.xz += lean * (world_position.y - model[3].y);
+    vec2 lean = foliage_lean(instance.normal[0].w, instance.normal[1].w, model[3].xyz, camera.ambient.w);
+    world_position.xz += lean * sway_bend(world_position.y - model[3].y, instance.normal[2].w).x;
     gl_Position = camera.view_projection * world_position;
 }
 "
@@ -12795,6 +12894,7 @@ struct RenderInstance {
     vec4 transmission;
     vec4 uv_transform;
     vec4 splat_scale;
+    vec4 water;
 };
 layout(set = 0, binding = 1) readonly buffer RenderInstances {
     RenderInstance data[];
@@ -22215,6 +22315,86 @@ mod tests {
         not(feature = "gpu-tests"),
         ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
     )]
+    fn water_takes_its_deep_color_and_shore_foam_from_the_scene_depth() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // An unlit white floor whose top is `floor` metres under the top of
+        // a nearly black unlit water slab, seen from straight above.
+        fn water_over(
+            floor: f32,
+            water: crate::assets::WaterShading,
+        ) -> [u8; 3] {
+            let mut scene = SlabScene::new(&[
+                (
+                    -floor,
+                    MaterialAsset {
+                        model: crate::assets::MaterialModel::Unlit,
+                        base_color: [1.0; 4],
+                        ..MaterialAsset::default()
+                    },
+                ),
+                (
+                    0.0,
+                    MaterialAsset {
+                        model: crate::assets::MaterialModel::Unlit,
+                        alpha_mode: AlphaMode::Blend,
+                        base_color: [0.0, 0.0, 0.0, 0.8],
+                        water,
+                        ..MaterialAsset::default()
+                    },
+                ),
+            ]);
+            // Lay the slabs flat at their heights and look down on them.
+            for renderable in &mut scene.render_world.renderables {
+                let height = renderable.transform.matrix[3][2];
+                renderable.transform.matrix = (Matrix4::new_translation(
+                    &nalgebra::Vector3::new(0.0, height, 0.0),
+                )
+                    * Matrix4::new_nonuniform_scaling(
+                        &nalgebra::Vector3::new(4.0, 0.1, 4.0),
+                    ))
+                .into();
+            }
+            let camera = scene.render_world.active_camera.as_mut().unwrap();
+            camera.transform.matrix = (Matrix4::new_translation(
+                &nalgebra::Vector3::new(0.0, 5.0, 0.0),
+            ) * Matrix4::from_axis_angle(
+                &nalgebra::Vector3::x_axis(),
+                -std::f32::consts::FRAC_PI_2,
+            ))
+            .into();
+            render_pixel(&mut scene, [4, 4])
+        }
+        let lake = crate::assets::WaterShading {
+            deep_color: [1.0, 0.0, 0.0, 1.0],
+            depth_fade: 0.5,
+            ..Default::default()
+        };
+        let shore = crate::assets::WaterShading {
+            shore_foam: 0.5,
+            ..Default::default()
+        };
+        // A metre down: the floor shows dimly through, no foam.
+        let [r, g, b] = water_over(1.0, shore);
+        assert!(
+            r < 170 && r.abs_diff(g) < 8 && r.abs_diff(b) < 8,
+            "{r} {g} {b}"
+        );
+        // Past depth_fade the water is all deep color.
+        let [r, g, b] = water_over(1.0, lake);
+        assert!(r > 200 && g < 40 && b < 40, "deep: {r} {g} {b}");
+        // A few centimetres down the shore foam covers it in white.
+        let [r, g, b] = water_over(0.08, shore);
+        assert!(r > 200 && g > 200 && b > 200, "foam: {r} {g} {b}");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
     fn transmissive_glass_tints_the_refracted_backdrop() {
         if vulkano::VulkanLibrary::new().is_err() {
             eprintln!("skipping: no Vulkan driver present");
@@ -23599,6 +23779,102 @@ mod tests {
         load(&mut scene, true);
         assert!(lit(render_pixel(&mut scene, leaned)), "wind leans the top");
         assert!(!lit(render_pixel(&mut scene, upright)));
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn swaying_materials_bend_plain_meshes_in_wind_fields() {
+        use crate::assets::MaterialSway;
+        use crate::runtime::{
+            Collider, ColliderShape, FieldKind, ForceField, MeshRenderer,
+            PhysicsBody, RenderExtractPlugin, RigidBody, RigidBodyKind,
+        };
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let mut scene = SlabScene::with_extent(&[], [32, 32]);
+        // A plain 0.2 x 1.6 m pillar at the origin, no foliage, in a wind
+        // extracted through a real app from the CPU physics fields.
+        let mut load = |sway: MaterialSway| {
+            let material = scene.assets.materials.insert(MaterialAsset {
+                sway,
+                ..MaterialAsset::default()
+            });
+            let mut app = crate::App::new();
+            app.add_plugin(RenderExtractPlugin).unwrap();
+            let server = AssetServer::default();
+            let renderer = MeshRenderer {
+                mesh: server.fallback_mesh,
+                material,
+                cast_shadows: false,
+                receive_shadows: false,
+            };
+            app.insert_resource(server);
+            app.spawn((
+                crate::Transform {
+                    scale: [0.2, 1.6, 0.2],
+                    ..crate::Transform::default()
+                },
+                renderer,
+            ));
+            app.spawn((
+                crate::Transform::default(),
+                PhysicsBody::default(),
+                RigidBody {
+                    kind: RigidBodyKind::Fixed,
+                    ..RigidBody::default()
+                },
+                Collider {
+                    shape: ColliderShape::Box {
+                        half_extents: [3.0; 3],
+                    },
+                    sensor: true,
+                    ..Collider::default()
+                },
+                ForceField {
+                    kind: FieldKind::Wind,
+                    strength: 10.0,
+                    direction: [1.0, 0.0, 0.0],
+                    ..ForceField::default()
+                },
+            ));
+            for _ in 0..3 {
+                app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+                    .unwrap();
+            }
+            let extracted = app.world().resource::<RenderWorld>();
+            let world = &mut scene.render_world;
+            world.renderables = extracted.renderables.clone();
+            world.gpu_force_fields = extracted.gpu_force_fields.clone();
+            world.renderables_revision += 1;
+            [[16, 4], [21, 4], [16, 28], [11, 28]].map(|pixel| {
+                render_pixel(&mut scene, pixel)
+                    .iter()
+                    .any(|&channel| channel > 40)
+            })
+        };
+        // Pixels are 1/16 m; rows 4 and 28 are 0.72 m above and below the
+        // origin, and a 0.5 m lean per metre moves them 0.36 m.
+        let [top, top_leaned, bottom, bottom_leaned] =
+            load(MaterialSway::default());
+        assert!(top && !top_leaned && bottom && !bottom_leaned, "still");
+        let [top, top_leaned, bottom, bottom_leaned] = load(MaterialSway {
+            amplitude: 0.05,
+            ..MaterialSway::default()
+        });
+        assert!(!top && top_leaned, "wind leans the top right");
+        assert!(!bottom && bottom_leaned, "a straight shear swings the base");
+        let [top, top_leaned, bottom, bottom_leaned] = load(MaterialSway {
+            amplitude: 0.05,
+            height: 0.1,
+            ..MaterialSway::default()
+        });
+        assert!(!top && top_leaned, "the bent top still leans");
+        assert!(bottom && !bottom_leaned, "below the origin stays rooted");
     }
 
     #[test]
@@ -25226,7 +25502,7 @@ mod tests {
         // A flat 2 x 2 m terrain of one chunk, turned to face the camera.
         // Every sample paints the blue layer except column 1 (x = -0.5 m),
         // which paints the orange one; coarse LOD levels skip that column.
-        let extract = |lod_distance: f32| {
+        let extract = |lod_distance: f32, tint: [f32; 3]| {
             let mut app = crate::App::new();
             app.add_plugin(RenderExtractPlugin).unwrap();
             app.insert_resource(AssetServer::default());
@@ -25266,6 +25542,7 @@ mod tests {
                     chunk_cells: 4,
                     lod_distance,
                     cast_shadows: false,
+                    tint,
                     ..Terrain::default()
                 },
             ));
@@ -25281,15 +25558,27 @@ mod tests {
         let orange = |[r, g, b]: [u8; 3]| r > 40 && r > g && r > b;
         let blue = |[r, g, b]: [u8; 3]| b > 40 && b > r && b > g;
         // The camera is 5 m away; no LOD distance keeps full detail.
-        (scene.render_world.renderables, scene.assets) = extract(0.0);
+        (scene.render_world.renderables, scene.assets) = extract(0.0, [1.0; 3]);
         assert_eq!(scene.render_world.renderables.len(), 1);
         let painted = render_pixel(&mut scene, [8, 16]);
         assert!(orange(painted), "column 1 paints orange: {painted:?}");
+        let bright = painted;
         let painted = render_pixel(&mut scene, [24, 16]);
         assert!(blue(painted), "column 3 paints blue: {painted:?}");
+        // WILDROOT F23: a terrain tint darkens the blended layers rather
+        // than scaling the splat weights, which normalize it away.
+        (scene.render_world.renderables, scene.assets) =
+            extract(0.0, [0.25; 3]);
+        scene.render_world.renderables_revision += 1;
+        let painted = render_pixel(&mut scene, [8, 16]);
+        assert!(
+            orange(painted)
+                && u32::from(painted[0]) * 4 < u32::from(bright[0]) * 3,
+            "a quarter tint darkens orange {bright:?}: {painted:?}"
+        );
         // Past 2 m the chunk draws its quarter-detail mesh, which only
         // samples columns 0 and 4.
-        (scene.render_world.renderables, scene.assets) = extract(1.0);
+        (scene.render_world.renderables, scene.assets) = extract(1.0, [1.0; 3]);
         scene.render_world.renderables_revision += 1;
         let painted = render_pixel(&mut scene, [8, 16]);
         assert!(blue(painted), "coarse level skips column 1: {painted:?}");

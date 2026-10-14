@@ -59,6 +59,10 @@ fn update(scene: &mut GameScene<'_>, _time: &FrameTime) {
   so the pause menu still draws and reads input.
 - `scene.quit()` closes the window after the frame. A headless run stops,
   and a scenario ends its run.
+- `scene.exiting()` is true in one last update, run with no tick when the
+  window closes, after `scene.quit()`, and when a dedicated server gets
+  Ctrl+C or SIGTERM. Write the save there:
+  `if scene.exiting() { save(scene); return; }`.
 - The keyboard works with no extra code. Tab and Shift+Tab move the focus
   between widgets, and Enter or Space clicks the focused one.
 - A gamepad works too. The d-pad or left stick focuses the first widget,
@@ -91,7 +95,8 @@ fn update(scene: &mut GameScene<'_>, _time: &FrameTime) {
 
 - `scene.save_data(key, text)` writes a file to the game's user data folder,
   and `scene.load_data(key)` reads it back. The key is a relative path, such
-  as `settings.json` or `saves/1.json`.
+  as `settings.json` or `saves/1.json`. The write goes to a temporary file
+  that is then renamed, so a crash mid-write keeps the old save.
 - The folder is `~/.local/share/<game>` on Linux,
   `~/Library/Application Support/<game>` on macOS and `%APPDATA%\<game>` on
   Windows. The `RUSTING_USER_DATA` variable overrides it, and so do

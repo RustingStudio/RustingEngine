@@ -11,6 +11,7 @@ pub struct FrameTime {
     /// Real time since the previous frame, even while paused.
     pub real_delta: Duration,
     /// Game time since the previous frame after pause and time scale.
+    /// Inside a fixed-schedule execution it is [`Self::fixed_delta`].
     pub delta: Duration,
     /// Total game time, without time spent paused.
     pub elapsed: Duration,
@@ -34,7 +35,9 @@ impl Default for FrameTime {
 }
 
 impl FrameTime {
-    /// Returns the current game-frame time as an easy-to-use `f32` value.
+    /// Returns [`Self::delta`] in seconds: the frame's game time, or the
+    /// fixed step inside a fixed-schedule execution such as a game's
+    /// `tick` function.
     #[must_use]
     pub fn delta_seconds(&self) -> f32 {
         self.delta.as_secs_f32()

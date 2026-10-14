@@ -76,6 +76,7 @@ pub const WRITES_PROJECT: &[&str] = &[
     "asset import",
     "asset reimport",
     "asset generate",
+    "asset bake-foliage",
     "scene generate",
     "mod pack",
     "add scenario",
@@ -435,15 +436,15 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "asset import",
-        usage: "asset import <project-root> <source-file> [--to FOLDER] [--author A] [--license L] [--url U] [--generator G] [--notes N] [--max-size PIXELS] [--dry-run] [--json]",
-        summary: "Copy a png, jpeg, bmp, tga, gltf, glb, wav or ogg file (and a glTF's external buffers and images) into assets/FOLDER (`sounds` and `assets/sounds` both mean assets/sounds) after loading it as the runtime would, and write <file>.rmeta with a new stable ID, settings, dependencies, content hash, and source/license provenance. Scenes reference it by the returned `reference` path (relative to the scene); sound clips (`rusting.sound_cue.clip`, `play_sound`) are relative to assets/ instead, e.g. `sounds/hit.wav`. Warns when no license is given. --dry-run runs every check on a staged copy and writes nothing (`dry_run: true` in the report).",
+        usage: "asset import <project-root> <source-file> [--to FOLDER] [--author A] [--license L] [--url U] [--generator G] [--notes N] [--max-size PIXELS] [--linear] [--dry-run] [--json]",
+        summary: "Copy a png, jpeg, bmp, tga, gltf, glb, wav or ogg file (and a glTF's external buffers and images) into assets/FOLDER (`sounds` and `assets/sounds` both mean assets/sounds) after loading it as the runtime would, and write <file>.rmeta with a new stable ID, settings, dependencies, content hash, and source/license provenance. Scenes reference it by the returned `reference` path (relative to the scene); sound clips (`rusting.sound_cue.clip`, `play_sound`) are relative to assets/ instead, e.g. `sounds/hit.wav`. Warns when no license is given. A glTF is cooked on import: its `.rmesh` meshes, generated `.lodN.rmesh`/`.rlod` levels and `.rtexture` textures land beside it, the `.rmeta` lists them under `cooked`, and the report's `meshes` gives each mesh's triangle count and its LOD triangle counts. --dry-run runs every check on a staged copy and writes nothing (`dry_run: true` in the report).",
         gpu: NO_GPU,
         defaults: &[("--to", "assets/ itself"), ("--max-size", "none (images keep their size)")],
         example: "asset import my_game art/crate.png --to props --license CC0-1.0 --json",
     },
     Operation {
         name: "asset reimport",
-        usage: "asset reimport <project-root> <asset-id-or-path> [--from FILE] [--author A] [--license L] [--url U] [--generator G] [--notes N] [--max-size PIXELS] [--dry-run] [--json]",
+        usage: "asset reimport <project-root> <asset-id-or-path> [--from FILE] [--author A] [--license L] [--url U] [--generator G] [--notes N] [--max-size PIXELS] [--linear] [--dry-run] [--json]",
         summary: "Replace an imported asset and keep its ID: from --from, else the recorded original file if it still exists, else revalidate the asset in place. A file under assets/ with no .rmeta yet, such as a model added by `scene add-model`, is given a new ID and registered; a glTF also re-cooks its .rmesh files. Given provenance flags and settings replace the recorded ones. Reports the scenes that use it; a running game or editor hot-reloads the file. --dry-run previews the replacement without writing.",
         gpu: NO_GPU,
         defaults: &[("--from", "the recorded original, else the asset itself")],
@@ -456,6 +457,14 @@ pub const OPERATIONS: &[Operation] = &[
         gpu: NO_GPU,
         defaults: &[("--to", "assets/ itself"), ("--replace", "none (imports a new asset)")],
         example: "asset generate my_game icons red_crate --to props --dry-run --json",
+    },
+    Operation {
+        name: "asset bake-foliage",
+        usage: "asset bake-foliage <model> [--cards N] [--impostor] [--node NAME] [--tint RRGGBB] [--atlas PIXELS] [--out PATH] [--json]",
+        summary: "Bake a tree whose leaves or needles are modelled one by one (a glTF or GLB with millions of triangles) into alpha-tested cards. --node bakes one node and its children at that node's origin, for files that hold several variants side by side. Every triangle with a MASK or BLEND material is foliage: the triangles are grouped into N clusters, and each cluster's texture is splatted onto two crossed quads in one RGBA atlas, so the crown costs 4 triangles per card. Writes `<out>-cards.glb`, and with --impostor `<out>-impostor.glb`: two crossed quads showing the whole tree, bark included, for the farthest LOD. --tint scales the atlas's mean colour to an sRGB hex colour. Bark (the opaque triangles) is not in the cards file; draw it from a simplified copy of the model. Import the files with `asset import` and list them in a `.rlod`. The same model and flags write the same bytes. Prints the triangle counts.",
+        gpu: NO_GPU,
+        defaults: &[("--cards", "1500"), ("--atlas", "2048"), ("--out", "the model's path without its extension"), ("--tint", "none (the source colours)"), ("--node", "none (the whole scene as placed)")],
+        example: "asset bake-foliage art/fir.gltf --node fir_a --cards 1200 --impostor --out assets/trees/pine --json",
     },
     Operation {
         name: "asset list",
@@ -679,7 +688,8 @@ const ENTITY_SECTIONS: &[Section] = &[
                 "flat_shading": false,
                 "base_color_texture": null, "normal_texture": null,
                 "metallic_roughness_texture": null, "occlusion_texture": null,
-                "emissive_texture": null
+                "emissive_texture": null,
+                "sway": {"amplitude": 0.0, "frequency": 0.0, "height": 0.0}
             }},
             "cast_shadows": true, "receive_shadows": true
         }),
@@ -703,6 +713,9 @@ const ENTITY_SECTIONS: &[Section] = &[
             field("/material/Inline/metallic_roughness_texture", "path relative to the scene file", "", "glTF layout: roughness in G, metallic in B"),
             field("/material/Inline/occlusion_texture", "path relative to the scene file", "", ""),
             field("/material/Inline/emissive_texture", "path relative to the scene file", "", ""),
+            field("/material/Inline/sway/amplitude", "m per m/s²", ">= 0", "optional, default 0 (still); the mesh bends in rusting.force_field winds at its origin, on the GPU, like rusting.foliage sway: lean per m/s² of push, per metre of height above the origin, up to 45 degrees"),
+            field("/material/Inline/sway/frequency", "Hz", ">= 0", "optional, default 0 (steady); gusts per second, the lean pulsing between 0.5 and 1.5 times, phased by position"),
+            field("/material/Inline/sway/height", METRES, ">= 0", "optional, default 0 (one straight lean); height over which the bend grows, so a trunk stays rooted and its crown curves"),
             field("/cast_shadows", "", "", ""),
             field("/receive_shadows", "", "", ""),
         ],
@@ -902,15 +915,15 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.foliage",
-        summary: "On an object with a mesh_renderer: draws count copies of its mesh in place of the object, scattered over a disc of radius metres on its local XZ plane, each turned and scaled between scale_min and scale_max at random by seed. The copies share the material, so they draw as one instanced batch and cull one by one. Force fields (wind gusts most of all) lean every copy away from its base by sway metres per metre of height for each m/s² of push, so grass inside a rusting.force_field of kind Wind ripples with its gusts. The lean runs in the vertex shader, so wind costs no CPU time per copy; fields of kind Custom do not lean foliage. At most 65536 copies.",
+        summary: "On an object with a mesh_renderer: draws count copies of its mesh in place of the object, scattered over a disc of radius metres on its local XZ plane, each turned and scaled between scale_min and scale_max at random by seed. The copies share the material, so they draw as one instanced batch and cull one by one. Force fields (wind gusts most of all) lean every copy away from its base by sway metres per metre of height for each m/s² of push, so grass inside a rusting.force_field of kind Wind ripples with its gusts. The lean runs in the vertex shader, so wind costs no CPU time per copy; fields of kind Custom do not lean foliage. conform (default false) sets each copy on the heightfield straight below or above it, so the scatter follows hills; copies off every heightfield keep the disc height. layers (default [], every copy) lists terrain layer indices: a copy is drawn only where those layers make up at least half of the ground's blend, such as grass but not sand, and copies off every terrain are dropped. Copies are placed again when the object, the heightfield or the terrain changes. At most 65536 copies.",
         gpu: "one instance per copy in the object's batch; the lean is a few vertex-shader instructions per vertex and force field",
-        example: || json!({"count": 100, "radius": 5.0, "seed": 0, "scale_min": 0.8, "scale_max": 1.2, "sway": 0.03}),
+        example: || json!({"count": 100, "radius": 5.0, "seed": 0, "scale_min": 0.8, "scale_max": 1.2, "sway": 0.03, "conform": false, "layers": []}),
     },
     ComponentSection {
         key: "rusting.terrain",
-        summary: "On an object with a rusting.heightfield: draws the heights as terrain in square chunks of chunk_cells cells (0, the default, picks the size from the heightfield so the terrain makes at most about 150 chunks; each chunk is one draw per view and shadow cascade). Each chunk switches to a half-detail mesh past lod_distance metres from the camera and a quarter-detail one past twice it (0 keeps full detail); skirts below chunk borders hide cracks between levels. Up to four layers paint the ground, each an image (texture, relative to the scene file; empty for plain color, kept at full size up to 2048 px with mipmaps and anisotropic filtering) tinted by color and repeating every tiling metres; a layer's own tiling (0 uses the terrain's) changes its repeat. A layer may add a normal map (normal, OpenGL style) and a roughness map (roughness, red channel; 0.9 without one). splat[row][column] gives each height sample's layer weights; without them each layer covers heights from its min_height up, fading in over one metre, so list layers low to high (sand, grass, rock, snow). Add a Heightfield collider for the ground to be solid. Rebuilt when the terrain or heightfield changes.",
+        summary: "On an object with a rusting.heightfield: draws the heights as terrain in square chunks of chunk_cells cells (0, the default, picks the size from the heightfield so the terrain makes at most about 150 chunks; each chunk is one draw per view and shadow cascade). Each chunk switches to a half-detail mesh past lod_distance metres from the camera and a quarter-detail one past twice it (0 keeps full detail); skirts below chunk borders hide cracks between levels. Up to four layers paint the ground, each an image (texture, relative to the scene file; empty for plain color, kept at full size up to 2048 px with mipmaps and anisotropic filtering) tinted by color and repeating every tiling metres; a layer's own tiling (0 uses the terrain's) changes its repeat. A layer may add a normal map (normal, OpenGL style) and a roughness map (roughness, red channel; 0.9 without one). splat[row][column] gives each height sample's layer weights; without them each layer covers heights from its min_height up, fading in over one metre, so list layers low to high (sand, grass, rock, snow). tint (linear rgb, default [1, 1, 1]) multiplies every layer and roughness (default 1) scales every layer's roughness, such as a darker, glossier tint while it rains. Add a Heightfield collider for the ground to be solid. Rebuilt when the terrain or heightfield changes, except that a change to only tint or roughness updates the material without rebuilding the chunks.",
         gpu: "one instanced draw per chunk at its LOD level; one texture-array sample per painted layer per pixel, twice with normal or roughness maps",
-        example: || json!({"layers": [{"texture": "", "color": [0.76, 0.7, 0.5], "min_height": 0.0, "normal": "", "roughness": "", "tiling": 0.0}, {"texture": "", "color": [0.2, 0.5, 0.15], "min_height": 1.0, "normal": "", "roughness": "", "tiling": 0.0}], "splat": [], "tiling": 4.0, "chunk_cells": 0, "lod_distance": 50.0, "cast_shadows": true}),
+        example: || json!({"layers": [{"texture": "", "color": [0.76, 0.7, 0.5], "min_height": 0.0, "normal": "", "roughness": "", "tiling": 0.0}, {"texture": "", "color": [0.2, 0.5, 0.15], "min_height": 1.0, "normal": "", "roughness": "", "tiling": 0.0}], "splat": [], "tiling": 4.0, "chunk_cells": 0, "lod_distance": 50.0, "cast_shadows": true, "tint": [1.0, 1.0, 1.0], "roughness": 1.0}),
     },
     ComponentSection {
         key: "rusting.fog",
@@ -1254,9 +1267,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.water",
-        summary: "Water for seas, lakes and rivers: a size by size rectangle of animated waves centered on the entity (axis aligned, rotation and scale ignored). Dynamic bodies with sphere, box or capsule colliders float in it, and flow_speed carries them along flow_direction, which also turns the waves. Deterministic and cheap; a long thin rectangle with a flow_speed is a river. flat_shading gives faceted low-poly waves. A player_controller with swim_speed swims in it. Put it on an empty object.",
+        summary: "Water for seas, lakes and rivers: a size by size rectangle of animated waves centered on the entity (axis aligned, rotation and scale ignored). Dynamic bodies with sphere, box or capsule colliders float in it, and flow_speed carries them along flow_direction, which also turns the waves. Deterministic and cheap; a long thin rectangle with a flow_speed is a river. flat_shading gives faceted low-poly waves. deep_color (null keeps one color) is reached once the view crosses depth_fade metres of water, shore_foam is the width in metres of depth of a white band where the ground nears the surface, and ripples (0 to 1) adds small scrolling waves ripple_length metres apart; all three read the opaque scene depth. A player_controller with swim_speed swims in it. Put it on an empty object.",
         gpu: "one mesh of about resolution squared vertices, rewritten every fixed tick",
-        example: || json!({"size": [20.0, 20.0], "resolution": 64, "wave_height": 0.25, "wave_length": 4.0, "wave_speed": 1.0, "flow_direction": 0.0, "flow_speed": 0.0, "color": [0.1, 0.4, 0.7, 0.7], "flat_shading": false}),
+        example: || json!({"size": [20.0, 20.0], "resolution": 64, "wave_height": 0.25, "wave_length": 4.0, "wave_speed": 1.0, "flow_direction": 0.0, "flow_speed": 0.0, "color": [0.1, 0.4, 0.7, 0.7], "flat_shading": false, "deep_color": null, "depth_fade": 4.0, "shore_foam": 0.0, "ripples": 0.0, "ripple_length": 1.0}),
     },
     ComponentSection {
         key: "rusting.hud",

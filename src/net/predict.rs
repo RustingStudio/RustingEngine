@@ -54,6 +54,7 @@ impl<I> Default for Prediction<I> {
 }
 
 impl<I> Prediction<I> {
+    /// A prediction with no inputs pending.
     pub fn new() -> Self {
         Self::default()
     }
@@ -120,6 +121,12 @@ impl Smoothing {
 
     /// Records a correction: the position was drawn at `shown`, and the
     /// reconciled simulation now puts it at `corrected`.
+    ///
+    /// Pass as `shown` where the object is drawn now without this
+    /// correction, `smoothing.shown(before, Duration::ZERO)`, with `before`
+    /// the predicted position just before [`Prediction::reconcile`]. Last
+    /// frame's drawn position is one step behind a moving prediction, so it
+    /// leaves the object lagging a step.
     pub fn correct(&mut self, shown: [f32; 3], corrected: [f32; 3]) {
         let offset: [f32; 3] = std::array::from_fn(|i| shown[i] - corrected[i]);
         let length = offset.iter().map(|x| x * x).sum::<f32>().sqrt();

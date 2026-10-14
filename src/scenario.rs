@@ -610,6 +610,8 @@ pub struct Scenario {
     /// Runs one tick per fixed step of real time, as a played game does,
     /// instead of as fast as possible. Use it for a client that talks to a
     /// server running in real time, such as `rusting run --server`.
+    /// [`crate::net::NetSession::simulate`] delays count from each tick's
+    /// planned time, so a slow capture frame does not move them.
     #[serde(default)]
     pub realtime: bool,
 }
@@ -2118,6 +2120,10 @@ pub fn run_scenario(
             std::thread::sleep(
                 due.saturating_duration_since(std::time::Instant::now()),
             );
+            // A capture can make this tick late; simulated net delays still
+            // count from the tick's planned time, so removing a capture does
+            // not move when messages arrive.
+            crate::net::pin_clock(Some(due));
         }
         for (index, step) in scenario.steps.iter().enumerate() {
             if step.tick + 1 == tick {
@@ -2548,6 +2554,7 @@ pub fn run_scenario(
             break;
         }
     }
+    crate::net::pin_clock(None);
     if let (Some(sheet), false) = (&scenario.contact_sheet, frames.is_empty()) {
         let extent = scenario.capture_size;
         let (pixels, size) =
