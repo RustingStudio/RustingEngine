@@ -1674,11 +1674,15 @@ fn mcp_request(line: &str) -> Option<serde_json::Value> {
             let args = params["arguments"]["args"].clone();
             let escapes = args.as_array().is_some_and(|items| {
                 items.iter().filter_map(Value::as_str).any(|arg| {
-                    let path = Path::new(arg);
-                    path.is_absolute()
-                        || path.components().any(|c| {
-                            matches!(c, std::path::Component::ParentDir)
-                        })
+                    // A root, drive prefix, or `..` leaves the project;
+                    // `is_absolute` misses `/etc` and `C:x` on Windows.
+                    Path::new(arg).components().any(|c| {
+                        !matches!(
+                            c,
+                            std::path::Component::Normal(_)
+                                | std::path::Component::CurDir
+                        )
+                    })
                 })
             });
             if escapes {
