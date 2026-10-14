@@ -107,7 +107,7 @@ pub(super) fn lightmap_layout(
         let material = assets.materials.get(renderable.material);
         let albedo = material.map_or([1.0; 4], |material| material.base_color);
         let emissive = material.map_or([0.0; 3], |material| material.emissive);
-        for corners in mesh.indices.chunks_exact(3) {
+        for corners in mesh.indices.as_chunks::<3>().0 {
             for (channel, &index) in corners.iter().enumerate() {
                 let position = mesh
                     .vertices

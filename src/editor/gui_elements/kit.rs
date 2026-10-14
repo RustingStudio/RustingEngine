@@ -650,7 +650,7 @@ pub fn toolbar<R>(
 ) -> R {
     egui::Frame::new()
         .fill(EditorTheme::PANEL_RAISED)
-        .stroke(egui::Stroke::new(1.0, EditorTheme::BORDER_SOFT))
+        .stroke(egui::Stroke::new(1.0_f32, EditorTheme::BORDER_SOFT))
         .corner_radius(radius(EditorTheme::RADIUS))
         .inner_margin(egui::Margin::symmetric(6, 4))
         .show(ui, |ui| ui.horizontal(add).inner)
@@ -711,7 +711,7 @@ pub fn list_well<R>(
     let height = (ui.available_height() - reserve).max(40.0);
     egui::Frame::new()
         .fill(EditorTheme::BACKGROUND)
-        .stroke(egui::Stroke::new(1.0, EditorTheme::BORDER_SOFT))
+        .stroke(egui::Stroke::new(1.0_f32, EditorTheme::BORDER_SOFT))
         .corner_radius(radius(EditorTheme::RADIUS))
         .inner_margin(egui::Margin::same(2))
         .show(ui, |ui| {

@@ -765,7 +765,9 @@ impl MeshData {
             points.iter().sum::<Vector3<f32>>() / points.len().max(1) as f32;
         let mut inner_radius = f32::INFINITY;
         let triangles: Vec<_> = indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .filter(|chunk| chunk.iter().all(|&i| (i as usize) < points.len()))
             .map(|chunk| [0, 1, 2].map(|k| points[chunk[k] as usize]))
             .map(|[a, b, c]| {

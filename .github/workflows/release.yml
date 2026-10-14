@@ -1,18 +1,73 @@
 name: Release
 
+# Publishes a GitHub Release for every new version in Cargo.toml: once CI
+# passes on a main commit whose `v<version>` has no release yet, this builds
+# the Linux and Windows archives, tags that commit, and attaches the archives
+# with the version's CHANGELOG.md entry as the notes. Run it by hand
+# ("Run workflow") to retry a failed publish.
+
 # Keep shaderc-sys source builds working on runners that provide CMake 4.
 env:
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
 
 jobs:
+  version:
+    # A fork pull request from a branch named main also matches the trigger,
+    # so only release CI runs of pushes to this repository's main.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      sha: ${{ steps.check.outputs.sha }}
+      new: ${{ steps.check.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          sha="$(git rev-parse HEAD)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "$tag is already released."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tagged="$(git rev-parse -q --verify "refs/tags/$tag^{commit}" || true)"
+          if [ -n "$tagged" ] && [ "$tagged" != "$sha" ]; then
+            echo "::error::$tag already tags $tagged, not $sha. Raise the version in Cargo.toml, or delete the unreleased tag."
+            exit 1
+          fi
+          echo "new=true" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
+    if: needs.version.outputs.new == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -24,8 +79,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install audio and gamepad headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
       - name: Build release tools
         run: cargo build --release --bin editor --bin user_main --bin cook_scene
       - name: Package Linux archive
@@ -42,14 +103,29 @@ jobs:
           path: dist/${{ matrix.archive }}
 
   publish:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+      - name: Release notes from CHANGELOG.md
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          awk -v v="${TAG#v}" '/^## \[/ { p = index($0, "## [" v "]") == 1; next } p && /^---$/ { exit } p' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "No CHANGELOG.md entry for $TAG." > notes.md
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ needs.version.outputs.sha }}
+          name: RustingEngine ${{ needs.version.outputs.tag }}
+          body_path: notes.md
           files: artifacts/*

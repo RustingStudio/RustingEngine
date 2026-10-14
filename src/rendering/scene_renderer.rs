@@ -21456,7 +21456,7 @@ mod tests {
     ) -> image::RgbaImage {
         let [width, height] = scene.extent;
         let mut rgba = scene.pixels();
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         let image = image::RgbaImage::from_raw(width, height, rgba).unwrap();
@@ -22942,7 +22942,7 @@ mod tests {
                     view_rect.expand(0.5),
                     0.0,
                     egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         egui::Color32::from_rgb(255, 180, 0),
                     ),
                     egui::StrokeKind::Middle,
@@ -23028,7 +23028,7 @@ mod tests {
                 );
             }
         }
-        for pixel in composed.chunks_exact_mut(4) {
+        for pixel in composed.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         let composed =
@@ -23183,7 +23183,7 @@ mod tests {
         };
         let bgra = draw(Format::B8G8R8A8_UNORM);
         let mut rgba = draw(Format::R8G8B8A8_UNORM);
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         assert_eq!(rgba, bgra);
@@ -24766,12 +24766,16 @@ mod tests {
         let whole = draw(vec![sphere]);
         let broken = draw(pieces);
         let covered = whole
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[..3] != whole[..3])
             .count();
         let differ = whole
-            .chunks_exact(4)
-            .zip(broken.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(broken.as_chunks::<4>().0)
             .filter(|(a, b)| (0..3).any(|c| a[c].abs_diff(b[c]) > 8))
             .count();
         eprintln!("covered {covered} differ {differ}");

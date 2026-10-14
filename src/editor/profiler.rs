@@ -128,7 +128,7 @@ fn draw_history(ui: &mut egui::Ui, profiler: &EditorProfiler) {
             egui::pos2(rect.left(), target_y),
             egui::pos2(rect.right(), target_y),
         ],
-        egui::Stroke::new(1.0, EditorTheme::BORDER),
+        egui::Stroke::new(1.0_f32, EditorTheme::BORDER),
     );
     for (color, values) in [
         (
@@ -157,8 +157,10 @@ fn draw_history(ui: &mut egui::Ui, profiler: &EditorProfiler) {
             .filter_map(|(index, value)| value.map(|value| point(index, value)))
             .collect::<Vec<_>>();
         if points.len() > 1 {
-            painter
-                .add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
+            painter.add(egui::Shape::line(
+                points,
+                egui::Stroke::new(1.5_f32, color),
+            ));
         }
     }
     painter.text(

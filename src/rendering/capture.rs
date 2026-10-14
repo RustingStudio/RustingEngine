@@ -474,7 +474,7 @@ impl HeadlessCapture {
             image,
         );
         // The offscreen format is BGRA.
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         pixels

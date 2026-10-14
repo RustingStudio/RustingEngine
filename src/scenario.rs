@@ -1717,7 +1717,12 @@ fn compare_golden(
     }
     let mut sums = [0.0_f64; 3];
     let mut max = 0_u8;
-    for (a, b) in pixels.chunks_exact(4).zip(image.as_raw().chunks_exact(4)) {
+    for (a, b) in pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(image.as_raw().as_chunks::<4>().0)
+    {
         for channel in 0..3 {
             let difference = a[channel].abs_diff(b[channel]);
             sums[channel] += f64::from(difference);

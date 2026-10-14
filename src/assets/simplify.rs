@@ -87,7 +87,7 @@ fn cluster(mesh: &MeshAsset, grid: u32) -> MeshAsset {
         .collect::<Vec<_>>();
     let mut seen = HashSet::new();
     let mut indices = Vec::new();
-    for corners in mesh.indices.chunks_exact(3) {
+    for corners in mesh.indices.as_chunks::<3>().0 {
         let [a, b, c] = [0, 1, 2].map(|corner| {
             remap.get(corners[corner] as usize).copied().unwrap_or(0)
         });
@@ -179,7 +179,7 @@ mod tests {
         let coarse = simplify_mesh(&mesh, 64);
         let triangles = coarse.indices.len() / 3;
         assert!((16..=64).contains(&triangles), "{triangles}");
-        for corners in coarse.indices.chunks_exact(3) {
+        for corners in coarse.indices.as_chunks::<3>().0 {
             assert!(corners[0] != corners[1] && corners[1] != corners[2]);
             assert!(corners
                 .iter()

@@ -997,7 +997,7 @@ pub fn skin_mesh(body: &SoftBody) -> crate::assets::MeshAsset {
         index = end;
     }
     let mut normals = vec![Vector3::zeros(); body.positions.len()];
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let [a, b, c] =
             [0, 1, 2].map(|i| vector(body.positions[triangle[i] as usize]));
         let face = (b - a).cross(&(c - a));
@@ -1036,7 +1036,7 @@ pub fn skin_uv_mesh(
     let high = rest.iter().fold(vector(rest[0]), |m, &p| m.sup(&vector(p)));
     let span = (high - low).map(|x| x.max(1e-12));
     let mut mesh = crate::assets::MeshAsset::default();
-    for triangle in shared.indices.chunks_exact(3) {
+    for triangle in shared.indices.as_chunks::<3>().0 {
         let [a, b, c] = [0, 1, 2].map(|k| vector(rest[triangle[k] as usize]));
         let normal = (b - a).cross(&(c - a));
         let axis = normal.iamax();
@@ -1836,7 +1836,7 @@ mod tests {
             let mesh = skin_mesh(&body);
             assert_eq!(mesh.indices.len(), triangles * 3, "{cells:?}");
             let center = Vector3::repeat(cells[0] as f32 * 0.25);
-            for triangle in mesh.indices.chunks_exact(3) {
+            for triangle in mesh.indices.as_chunks::<3>().0 {
                 let [a, b, c] = [0, 1, 2]
                     .map(|i| vector(body.positions[triangle[i] as usize]));
                 let out = (b - a).cross(&(c - a));
@@ -1871,7 +1871,7 @@ mod tests {
         let check = |mesh: &crate::assets::MeshAsset,
                      positions: &[[f32; 3]]| {
             let mut seen = [0; 6];
-            for triangle in mesh.indices.chunks_exact(3) {
+            for triangle in mesh.indices.as_chunks::<3>().0 {
                 let corners = [0, 1, 2].map(|k| triangle[k] as usize);
                 let at = corners.map(|i| {
                     // Each corner vertex sits on one particle.

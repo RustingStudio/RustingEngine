@@ -764,7 +764,7 @@ pub fn generate_tangents(vertices: &mut [MeshVertex], indices: &[u32]) {
     use nalgebra::Vector3;
     let mut tangents = vec![Vector3::<f32>::zeros(); vertices.len()];
     let mut bitangents = tangents.clone();
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let [a, b, c] = [0, 1, 2].map(|i| triangle[i] as usize);
         if a.max(b).max(c) >= vertices.len() {
             continue;
@@ -918,41 +918,41 @@ fn gltf_image_to_rgba8(image: &gltf::image::Data) -> Vec<u8> {
             }
         }
         Format::R8G8 => {
-            for chunk in image.pixels.chunks_exact(2) {
+            for chunk in image.pixels.as_chunks::<2>().0 {
                 rgba8.extend_from_slice(&[chunk[0], chunk[1], 0, 255]);
             }
         }
         Format::R8G8B8 => {
-            for chunk in image.pixels.chunks_exact(3) {
+            for chunk in image.pixels.as_chunks::<3>().0 {
                 rgba8.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
             }
         }
         Format::R8G8B8A8 => rgba8.extend_from_slice(&image.pixels),
         Format::R16 => {
-            for chunk in image.pixels.chunks_exact(2) {
+            for chunk in image.pixels.as_chunks::<2>().0 {
                 let v = chunk[1];
                 rgba8.extend_from_slice(&[v, v, v, 255]);
             }
         }
         Format::R16G16 => {
-            for chunk in image.pixels.chunks_exact(4) {
+            for chunk in image.pixels.as_chunks::<4>().0 {
                 rgba8.extend_from_slice(&[chunk[1], chunk[3], 0, 255]);
             }
         }
         Format::R16G16B16 => {
-            for chunk in image.pixels.chunks_exact(6) {
+            for chunk in image.pixels.as_chunks::<6>().0 {
                 rgba8.extend_from_slice(&[chunk[1], chunk[3], chunk[5], 255]);
             }
         }
         Format::R16G16B16A16 => {
-            for chunk in image.pixels.chunks_exact(8) {
+            for chunk in image.pixels.as_chunks::<8>().0 {
                 rgba8.extend_from_slice(&[
                     chunk[1], chunk[3], chunk[5], chunk[7],
                 ]);
             }
         }
         Format::R32G32B32FLOAT => {
-            for chunk in image.pixels.chunks_exact(12) {
+            for chunk in image.pixels.as_chunks::<12>().0 {
                 let channel = |bytes: &[u8]| {
                     (f32::from_le_bytes([
                         bytes[0], bytes[1], bytes[2], bytes[3],
@@ -969,7 +969,7 @@ fn gltf_image_to_rgba8(image: &gltf::image::Data) -> Vec<u8> {
             }
         }
         Format::R32G32B32A32FLOAT => {
-            for chunk in image.pixels.chunks_exact(16) {
+            for chunk in image.pixels.as_chunks::<16>().0 {
                 let channel = |bytes: &[u8]| {
                     (f32::from_le_bytes([
                         bytes[0], bytes[1], bytes[2], bytes[3],
@@ -2474,7 +2474,7 @@ fn flat_shaded(
 ) -> (Vec<MeshVertex>, Vec<u32>) {
     use nalgebra::Vector3;
     let mut flat = Vec::with_capacity(indices.len());
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let corners =
             [0, 1, 2].map(|corner| vertices[triangle[corner] as usize]);
         let [a, b, c] = corners.map(|vertex| Vector3::from(vertex.position));

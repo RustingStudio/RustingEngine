@@ -246,7 +246,7 @@ fn read_surface(
                 }
                 None => factor.map(|c| c * 255.0),
             };
-            for triangle in mesh.indices.chunks_exact(3) {
+            for triangle in mesh.indices.as_chunks::<3>().0 {
                 surface.triangles += 1;
                 let vertices = [triangle[0], triangle[1], triangle[2]]
                     .map(|index| mesh.vertices[index as usize]);
@@ -829,9 +829,11 @@ mod tests {
             .get(material.base_color_texture.unwrap())
             .unwrap();
         // Only the texture's opaque, green half was sampled.
-        let covered: Vec<&[u8]> = atlas
+        let covered: Vec<_> = atlas
             .rgba8
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|texel| texel[3] == 255)
             .collect();
         assert!(!covered.is_empty());

@@ -1056,7 +1056,9 @@ pub fn read_wav(path: &Path) -> std::io::Result<Vec<f32>> {
         return Err(std::io::Error::other("not a WAV file from write_wav"));
     }
     Ok(bytes[44..]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             f32::from(i16::from_le_bytes([pair[0], pair[1]]))
                 / f32::from(i16::MAX)
@@ -1070,7 +1072,9 @@ fn builtin_clip(samples: &[f32]) -> kira::sound::static_sound::StaticSoundData {
     kira::sound::static_sound::StaticSoundData {
         sample_rate: MIX_RATE,
         frames: samples
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| kira::Frame::new(pair[0], pair[1]))
             .collect(),
         settings: Default::default(),

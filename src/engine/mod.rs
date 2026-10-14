@@ -856,8 +856,10 @@ mod tests {
         // Pixels are [b, g, r, a]: the cube is red, the sphere green.
         let count = |matches: fn(&[u8]) -> bool| {
             pixels
-                .chunks_exact(4)
-                .filter(|pixel| matches(pixel))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| matches(*pixel))
                 .count()
         };
         let red = count(|p| p[2] > 200 && p[1] < 40 && p[0] < 40);

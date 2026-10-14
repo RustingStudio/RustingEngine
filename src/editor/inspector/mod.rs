@@ -1314,11 +1314,11 @@ fn tile_palette(
                 ui.allocate_exact_size(size, egui::Sense::click());
             let selected = *brush == value;
             let stroke = if selected {
-                egui::Stroke::new(2.0, EditorTheme::ACCENT_HOVER)
+                egui::Stroke::new(2.0_f32, EditorTheme::ACCENT_HOVER)
             } else if response.hovered() {
-                egui::Stroke::new(1.0, EditorTheme::TEXT_MUTED)
+                egui::Stroke::new(1.0_f32, EditorTheme::TEXT_MUTED)
             } else {
-                egui::Stroke::new(1.0, EditorTheme::BORDER)
+                egui::Stroke::new(1.0_f32, EditorTheme::BORDER)
             };
             let painter = ui.painter();
             painter.rect_filled(rect, f32::from(EditorTheme::RADIUS), fill);

@@ -75,7 +75,9 @@ pub fn decompose(
 ) -> Vec<MeshAsset> {
     let triangles: Vec<[V; 3]> = mesh
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter_map(|t| {
             let corner = |k: usize| {
                 mesh.vertices
@@ -183,7 +185,7 @@ impl Grid {
                 hits.sort_by(f32::total_cmp);
                 // A ray through a shared edge hits both triangles.
                 hits.dedup_by(|a, b| (*a - *b).abs() <= eps);
-                for pair in hits.chunks_exact(2) {
+                for pair in hits.as_chunks::<2>().0 {
                     for y in 0..ny {
                         let py = low.y + (y as f32 + 0.5) * size;
                         if py > pair[0] && py < pair[1] {
@@ -346,7 +348,9 @@ fn clip(t: &[V; 3], low: V, high: V) -> Vec<V> {
 /// Signed volume of a closed, outward-wound mesh.
 fn mesh_volume(mesh: &MeshAsset) -> f32 {
     mesh.indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| {
             let [a, b, c] = [0, 1, 2]
                 .map(|k| V::from(mesh.vertices[t[k] as usize].position));

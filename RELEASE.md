@@ -17,7 +17,7 @@ Release notes are the `CHANGELOG.md` entries contributors add under
    `Changed`, `Fixed`, `Performance`, `Known limits`. Merge duplicate lines
    and remove lines for work that was reverted before the release.
 5. End the entry with a `---` line, like the earlier ones.
-6. Paste the entry into the GitHub Release description when publishing.
+6. The release workflow uses the entry as the GitHub Release description.
 
 ## Before tagging
 
@@ -35,16 +35,16 @@ Release notes are the `CHANGELOG.md` entries contributors add under
 
 ## Publish on GitHub
 
-```bash
-git tag -a v1.0.0 -m "RustingEngine v1.0.0"
-git push origin v1.0.0
-```
+Push the release commit to `main`. When CI passes on it, the release
+workflow sees a `Cargo.toml` version without a GitHub Release, builds the
+Linux and Windows archives, tags the commit `v<version>`, and publishes the
+Release with the version's `CHANGELOG.md` entry as its notes. Pushing a tag
+by hand is not needed; a hand-made tag must point at that same commit.
+Use "Run workflow" on the Release workflow to retry a failed publish.
 
-The release workflow builds Linux and Windows archives, creates the GitHub
-Release, and attaches both archives. Generated game projects use the matching
-Git tag when the editor is running without a local engine source checkout.
-Do not move or recreate a published version tag; publish a patch version for
-later fixes.
+Generated game projects use the matching Git tag when the editor is running
+without a local engine source checkout. Do not move or recreate a published
+version tag; publish a patch version for later fixes.
 
 ## After publishing
 

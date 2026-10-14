@@ -1658,7 +1658,6 @@ impl SceneComponentRegistry {
             .map(|registration| &registration.ty.info)
     }
 
-    #[must_use]
     pub fn names(&self) -> impl ExactSizeIterator<Item = &str> {
         self.registrations.keys().map(String::as_str)
     }

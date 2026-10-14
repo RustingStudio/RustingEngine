@@ -84,7 +84,7 @@ impl Default for Terrain {
 impl Terrain {
     /// Height cells along each side of a chunk: `chunk_cells`, or when it
     /// is 0 the smallest side from 32 up that keeps the terrain at most
-    /// [`AUTO_MAX_CHUNKS`] chunks.
+    /// `AUTO_MAX_CHUNKS` chunks.
     pub fn chunk_size(&self, field: &Heightfield) -> usize {
         if self.chunk_cells > 0 {
             return self.chunk_cells as usize;

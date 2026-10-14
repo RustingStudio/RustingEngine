@@ -243,7 +243,7 @@ impl ProcMesh {
     #[must_use]
     pub fn asset(&self) -> crate::assets::MeshAsset {
         let mut vertices = Vec::with_capacity(self.indices.len());
-        for corner in self.indices.chunks_exact(3) {
+        for corner in self.indices.as_chunks::<3>().0 {
             let [a, b, c] = [0, 1, 2]
                 .map(|k| Vector::from(self.positions[corner[k] as usize]));
             let normal = (b - a)
@@ -266,7 +266,9 @@ impl ProcMesh {
     #[must_use]
     pub fn volume(&self) -> f32 {
         self.indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|corner| {
                 let [a, b, c] = [0, 1, 2]
                     .map(|k| Vector::from(self.positions[corner[k] as usize]));
@@ -322,7 +324,9 @@ impl ProcMesh {
 
     fn polygons(&self) -> Vec<Polygon> {
         self.indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .filter_map(|corner| {
                 Polygon::new(
                     corner
@@ -471,7 +475,7 @@ pub fn loft(sections: &[Vec<[f32; 3]>]) -> ProcMesh {
     }
     // Which way the rings turn decides the winding; make it face out.
     if mesh.volume() < 0.0 {
-        for corner in mesh.indices.chunks_exact_mut(3) {
+        for corner in mesh.indices.as_chunks_mut::<3>().0 {
             corner.swap(1, 2);
         }
     }

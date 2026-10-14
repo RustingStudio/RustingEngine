@@ -131,6 +131,11 @@ path = "src/examples/galaxy_collision.rs"
 required-features = ["window"]
 
 [[example]]
+name = "galton_board"
+path = "src/examples/galton_board.rs"
+required-features = ["window"]
+
+[[example]]
 name = "tower_collapse"
 path = "src/examples/tower_collapse.rs"
 required-features = ["window"]

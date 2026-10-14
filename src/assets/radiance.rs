@@ -88,7 +88,7 @@ fn read_scanline<'a>(
         && usize::from(data[2]) << 8 | usize::from(data[3]) == width;
     if !run_length {
         let flat = data.get(..width * 4).ok_or_else(truncated)?;
-        for (texel, bytes) in scanline.iter_mut().zip(flat.chunks_exact(4)) {
+        for (texel, bytes) in scanline.iter_mut().zip(flat.as_chunks::<4>().0) {
             texel.copy_from_slice(bytes);
         }
         return Ok(&data[width * 4..]);

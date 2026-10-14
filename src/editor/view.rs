@@ -3032,7 +3032,7 @@ fn draw_console_area(ui: &mut egui::Ui, console: &mut EditorConsole) {
     }
     egui::Frame::new()
         .fill(EditorTheme::PANEL_RAISED)
-        .stroke(egui::Stroke::new(1.0, EditorTheme::BORDER_SOFT))
+        .stroke(egui::Stroke::new(1.0_f32, EditorTheme::BORDER_SOFT))
         .corner_radius(EditorTheme::RADIUS)
         .inner_margin(egui::Margin::symmetric(6, 4))
         .show(ui, |ui| {
@@ -3074,7 +3074,7 @@ fn draw_console_area(ui: &mut egui::Ui, console: &mut EditorConsole) {
         .collect();
     egui::Frame::new()
         .fill(EditorTheme::BACKGROUND)
-        .stroke(egui::Stroke::new(1.0, EditorTheme::BORDER_SOFT))
+        .stroke(egui::Stroke::new(1.0_f32, EditorTheme::BORDER_SOFT))
         .corner_radius(EditorTheme::RADIUS)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()

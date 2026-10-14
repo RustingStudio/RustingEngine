@@ -602,7 +602,7 @@ fn sheet(
                 egui::pos2(x, ruler.bottom() - 5.0),
                 egui::pos2(x, ruler.bottom()),
             ],
-            egui::Stroke::new(1.0, EditorTheme::BORDER),
+            egui::Stroke::new(1.0_f32, EditorTheme::BORDER),
         );
         painter.text(
             egui::pos2(x + 2.0, ruler.top() + 2.0),
@@ -674,7 +674,7 @@ fn sheet(
                 painter.rect_filled(lane, 0.0, EditorTheme::INPUT);
                 painter.line_segment(
                     [lane.left_bottom(), lane.right_bottom()],
-                    egui::Stroke::new(1.0, EditorTheme::BORDER_SOFT),
+                    egui::Stroke::new(1.0_f32, EditorTheme::BORDER_SOFT),
                 );
                 if let Some(pointer) = response.interact_pointer_pos().filter(|_| response.clicked()) {
                     timeline.time = snap(((pointer.x - lane.left()) / lane_width * span).clamp(0.0, span));
@@ -705,7 +705,7 @@ fn sheet(
                             center + egui::vec2(-r, 0.0),
                         ],
                         if selected { EditorTheme::WARNING } else { EditorTheme::TEXT },
-                        egui::Stroke::new(1.0, EditorTheme::BACKGROUND),
+                        egui::Stroke::new(1.0_f32, EditorTheme::BACKGROUND),
                     ));
                 }
             });
@@ -728,6 +728,6 @@ fn sheet(
             egui::pos2(x, ruler.top()),
             egui::pos2(x, bottom.max(ruler.bottom())),
         ],
-        egui::Stroke::new(1.5, EditorTheme::ACCENT),
+        egui::Stroke::new(1.5_f32, EditorTheme::ACCENT),
     );
 }

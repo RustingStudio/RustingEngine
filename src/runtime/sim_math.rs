@@ -416,8 +416,10 @@ mod tests {
             );
             let words: Vec<u32> = output
                 .stdout
-                .chunks_exact(4)
-                .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_le_bytes(*word))
                 .collect();
             let violations = simulation_violations(&words);
             assert!(

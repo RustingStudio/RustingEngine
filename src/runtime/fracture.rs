@@ -736,7 +736,7 @@ fn merge(world: &mut World, members: &[Entity]) {
 fn centred(mut mesh: MeshAsset) -> (MeshAsset, V, f32) {
     let mut volume = 0.0;
     let mut moment = V::zeros();
-    for triangle in mesh.indices.chunks_exact(3) {
+    for triangle in mesh.indices.as_chunks::<3>().0 {
         let [a, b, c] = [0, 1, 2]
             .map(|k| V::from(mesh.vertices[triangle[k] as usize].position));
         // The tetrahedron from the origin to the triangle.
@@ -764,7 +764,7 @@ fn hull_cell(mesh: &MeshAsset, points: &[V]) -> Option<Cell> {
         mesh.indices.iter().map(|&i| i as usize).collect()
     };
     let mut cell = box_cell(low, high);
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let Some([a, b, c]) = triangle
             .iter()
             .map(|&i| points.get(i).copied())
@@ -1595,7 +1595,9 @@ impl<'a> Surface<'a> {
             mesh.indices.iter().map(|&i| i as usize).collect()
         };
         let triangles = indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .filter(|t| t.iter().all(|&i| i < mesh.vertices.len()))
             .filter_map(|t| {
                 let corners = [t[0], t[1], t[2]];
@@ -1713,7 +1715,9 @@ mod tests {
 
     fn volume(mesh: &MeshAsset) -> f32 {
         mesh.indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|t| {
                 let [a, b, c] = [0, 1, 2]
                     .map(|k| V::from(mesh.vertices[t[k] as usize].position));
