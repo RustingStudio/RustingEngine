@@ -1170,7 +1170,7 @@ pub fn map_asset_paths<E>(
             if map.len() == 1 {
                 if let Some(Value::String(path)) = map.get_mut(ASSET_KEY) {
                     let converted = convert(Path::new(path.as_str()))?;
-                    *path = converted.to_string_lossy().into_owned();
+                    *path = crate::runtime::portable_path(&converted);
                     return Ok(());
                 }
             }

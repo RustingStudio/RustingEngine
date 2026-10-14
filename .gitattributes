@@ -1,0 +1,3 @@
+# Keep LF on every platform: tests compare include_str! and docs text
+# against "\n", and Windows checkouts would otherwise turn it into "\r\n".
+* text=auto eol=lf

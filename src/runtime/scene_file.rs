@@ -2718,6 +2718,18 @@ pub(crate) fn path_relative_to(base: &Path, target: &Path) -> Option<PathBuf> {
     Some(relative)
 }
 
+/// Writes a relative `path` with `/` separators, so a path saved on Windows
+/// still loads on Linux. Absolute paths keep their native form: Windows
+/// verbatim paths (`\\?\C:\...`) do not accept `/`.
+pub(crate) fn portable_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) && path.is_relative() {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
 pub fn load_scene_document(
     world: &mut World,
     document: &SceneDocument,

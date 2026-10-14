@@ -172,7 +172,7 @@ fn map_source_field(
         return Ok(());
     }
     let converted = convert(Path::new(source.as_str()))?;
-    *source = converted.to_string_lossy().into_owned();
+    *source = crate::runtime::portable_path(&converted);
     *serialized = value.to_string();
     Ok(())
 }
@@ -226,7 +226,7 @@ pub(super) fn map_override_paths(
             if let Some(Value::String(path)) = diff.pointer_mut(pointer) {
                 if !path.is_empty() {
                     let converted = convert(Path::new(path.as_str()))?;
-                    *path = converted.to_string_lossy().into_owned();
+                    *path = crate::runtime::portable_path(&converted);
                 }
             }
         }

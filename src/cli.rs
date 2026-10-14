@@ -157,6 +157,12 @@ impl CliResult {
     }
 }
 
+/// `file` relative to the project root, with `/` separators on every platform.
+fn shown(root: &Path, file: impl AsRef<Path>) -> String {
+    let file = file.as_ref();
+    crate::runtime::portable_path(file.strip_prefix(root).unwrap_or(file))
+}
+
 fn project_error(error: ProjectError, path: &Path) -> CliResult {
     let code = match error {
         ProjectError::InvalidName | ProjectError::InvalidBinaryName => {
@@ -569,7 +575,7 @@ fn game_system_access(root: &Path) -> Vec<Value> {
                     .chars()
                     .take_while(|c| c.is_alphanumeric() || *c == '_')
                     .collect::<String>(),
-                "file": file.strip_prefix(root).unwrap_or(&file),
+                "file": shown(root, &file),
                 "line": text[..start].lines().count() + 1,
                 "reads": reads,
                 "writes": writes,
@@ -842,7 +848,7 @@ fn code_asset_diagnostics(root: &Path) -> Vec<Diagnostic> {
             severity: "warning",
             message: format!(
                 "{}:{line}: `{path}` is not a file under assets/",
-                file.strip_prefix(root).unwrap_or(&file).display(),
+                shown(root, &file),
             ),
             file: Some(file),
             ..Diagnostic::default()
@@ -905,8 +911,7 @@ pub fn project_summary(root: &Path, budget: usize) -> CliResult {
         Err(error) => return project_error(error, root),
     };
     let root = &project.root;
-    let relative =
-        |path: &Path| path.strip_prefix(root).unwrap_or(path).to_owned();
+    let relative = |path: &Path| shown(root, path);
     let mut scene_files = Vec::new();
     for folder in ["scenes", "assets"] {
         scene_files_in(&root.join(folder), &mut scene_files);
@@ -1228,8 +1233,7 @@ pub fn impact(root: &Path, target: &str) -> CliResult {
         Err(error) => return project_error(error, root),
     };
     let root = &project.root;
-    let relative =
-        |path: &Path| path.strip_prefix(root).unwrap_or(path).to_owned();
+    let relative = |path: &Path| shown(root, path);
     let canonical = |path: PathBuf| path.canonicalize().ok();
     let file = [root.join(target), root.join("assets").join(target)]
         .into_iter()
@@ -1411,12 +1415,7 @@ pub fn provenance(root: &Path) -> CliResult {
         Err(error) => return project_error(error, root),
     };
     let root = &project.root;
-    let relative = |path: &Path| {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/")
-    };
+    let relative = |path: &Path| shown(root, path);
     // `Cargo.lock` is TOML; each package is a `[[package]]` block of
     // `key = "value"` lines.
     let lock =
@@ -2197,10 +2196,7 @@ fn lint_missing_translations(
         ("tr_count(\"", &[".one", ".other"][..]),
     ] {
         for (file, line, key) in code_literals(root, &[call]) {
-            let place = format!(
-                "{}:{line}",
-                file.strip_prefix(root).unwrap_or(&file).display()
-            );
+            let place = format!("{}:{line}", shown(root, &file));
             for form in forms {
                 uses.push((place.clone(), format!("{key}{form}")));
             }
@@ -2237,11 +2233,7 @@ fn lint_missing_translations(
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        let shown = file
-            .strip_prefix(root)
-            .unwrap_or(&file)
-            .display()
-            .to_string();
+        let shown = shown(root, &file);
         for (place, key) in &uses {
             if !strings.contains_key(key) {
                 diagnostics.push(Diagnostic {
@@ -2342,10 +2334,8 @@ fn lint_color_only_status(root: &Path) -> Vec<Diagnostic> {
                 }));
                 if entry.first.is_none() {
                     let line = text[..start].lines().count().max(1);
-                    entry.first = Some(format!(
-                        "{}:{line}",
-                        file.strip_prefix(root).unwrap_or(&file).display()
-                    ));
+                    entry.first =
+                        Some(format!("{}:{line}", shown(root, &file)));
                 }
             }
         }
@@ -2715,9 +2705,7 @@ fn lint_missing_names(root: &Path) -> Vec<Diagnostic> {
                             severity: "warning",
                             message: format!(
                                 "{}:{}: {what} `{name}`{hint}",
-                                file.strip_prefix(root)
-                                    .unwrap_or(file)
-                                    .display(),
+                                shown(root, file),
                                 line + 1,
                             ),
                             file: Some(file.clone()),
@@ -2771,7 +2759,7 @@ fn lint_missing_names(root: &Path) -> Vec<Diagnostic> {
                         severity: "warning",
                         message: format!(
                             "{}:{}: no file `{name}` under {under}{hint}",
-                            file.strip_prefix(root).unwrap_or(file).display(),
+                            shown(root, file),
                             line + 1,
                         ),
                         file: Some(file.clone()),
