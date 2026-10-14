@@ -25,9 +25,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install audio and gamepad headers
+      - name: Install audio, D-Bus, and gamepad headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libdbus-1-dev
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Strict Clippy

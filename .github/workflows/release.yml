@@ -84,9 +84,9 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install audio and gamepad headers
+      - name: Install audio, D-Bus, and gamepad headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libdbus-1-dev
       - name: Build release tools
         run: cargo build --release --bin editor --bin user_main --bin cook_scene
       - name: Package Linux archive

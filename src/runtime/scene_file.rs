@@ -564,6 +564,7 @@ struct SceneMeshRendererV7 {
 }
 
 #[derive(Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // one value per renderer while loading a v7 scene; boxing buys nothing
 enum SceneMaterialV7 {
     BuiltinError,
     Inline(SceneMaterialDataV7),
