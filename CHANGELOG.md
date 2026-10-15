@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `GameScene::raycast` and its variants hit a scene's colliders from the first fixed tick: loading a project, `load_scene` and `restart` build the physics bodies at once, with child colliders at their propagated poses, instead of after the first physics step (RAFT).
 - `FrameTime::real_delta` reads the real frame time again while an overloaded app runs in slow motion; only the game clock is clamped to one fixed step. Replays record the real delta beside the clamped one (`ReplayFrame::real_nanos`) (RAFT).
 
 ## [2.5.6] - 2026-10-14

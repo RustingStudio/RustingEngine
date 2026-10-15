@@ -22,6 +22,13 @@ Scenarios do not show it, since their tick 0 is a zero-delta frame that propagat
 - Wanted: bodies built and posed from propagated `GlobalTransform`s when the scene loads,
   so rays hit from tick 0.
 
+Status: done (this commit, test: `rays_hit_child_colliders_before_the_first_physics_step`).
+`cpu_physics::pose_bodies` propagates transforms and builds the bodies when a project loads,
+on `GameScene::load_scene` / `restart` (`forget_old_scene`) and after a code-reload restore.
+Passed: `cargo fmt --all --check`, clippy default / `--no-default-features` /
+`--features gpu-tests` with `-D warnings`, `cargo test --workspace`, and the locked
+`--features gpu-tests` run.
+
 ### Hardened relay
 
 2.4.0's `run_relay_with` (`src/net.rs:863`, `RelayLimits`) caps connections overall and

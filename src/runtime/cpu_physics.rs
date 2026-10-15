@@ -2190,6 +2190,21 @@ fn fall_asleep(
     }
 }
 
+/// Builds the bodies of a freshly loaded scene at its propagated poses, so
+/// raycasts and GPU bodies meet its colliders before the first step.
+pub(crate) fn pose_bodies(world: &mut World) {
+    if !world.contains_resource::<PhysicsWorld>() {
+        return;
+    }
+    super::propagate_transforms(world);
+    let mut meshes =
+        std::mem::take(&mut world.resource_mut::<PhysicsWorld>().meshes);
+    let bodies = gather_bodies(world, &mut meshes);
+    let mut physics = world.resource_mut::<PhysicsWorld>();
+    physics.meshes = meshes;
+    physics.set_bodies(bodies);
+}
+
 /// Collision bodies of every CPU and static collider, in [`SpawnOrder`]. A
 /// mesh collider whose entity has no loaded mesh is left out.
 fn gather_bodies(world: &mut World, meshes: &mut MeshCache) -> Vec<Body> {

@@ -4098,6 +4098,7 @@ fn forget_old_scene(world: &mut World) {
     if world.contains_resource::<crate::runtime::PhysicsWorld>() {
         world.insert_resource(crate::runtime::PhysicsWorld::default());
     }
+    crate::runtime::pose_bodies(world);
 }
 
 /// Clones `entity` and its descendants, naming the copy `name` (unnamed
@@ -4405,6 +4406,7 @@ fn restore_code_reload_state(
     let state: CodeReloadState = serde_json::from_slice(&std::fs::read(path)?)?;
     let world = runtime.world_mut();
     load_scene_document(world, &state.scene, SceneLoadMode::Replace)?;
+    crate::runtime::pose_bodies(world);
     world.insert_resource(GameOnceState(state.once.into_iter().collect()));
     // Names now belong to the restored entities.
     world.remove_resource::<SceneNameIndex>();
@@ -4458,6 +4460,7 @@ fn load_project_runtime<P: Plugin>(
             result?;
         }
     }
+    crate::runtime::pose_bodies(runtime.world_mut());
     let start = scene_document(runtime.world_mut(), "start")?;
     runtime.insert_resource(StartingScene(start));
     if let Some(warning) = stale_cooked_scene_warning(folder, scene_path) {
@@ -7599,6 +7602,64 @@ mod tests {
         .restore(&snapshot)
         .unwrap();
         assert_eq!(run(&mut game), went_on, "restored run matches");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn rays_hit_child_colliders_before_the_first_physics_step() {
+        use crate::runtime::{
+            Collider, ColliderShape, PhysicsBody, RigidBody, RigidBodyKind,
+        };
+        let directory = std::env::temp_dir()
+            .join(format!("rusting-early-rays-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("project.json"), "{}").unwrap();
+        let source = directory.join("main.rscene");
+        let mut editor = App::new();
+        editor.add_plugin(AssetPlugin).unwrap();
+        let island = editor
+            .spawn((Name("Island".into()), Transform::new([10.0, 0.0, 0.0])));
+        let ground = editor.spawn((
+            Name("Ground".into()),
+            Transform::default(),
+            PhysicsBody::default(),
+            RigidBody {
+                kind: RigidBodyKind::Fixed,
+                ..RigidBody::default()
+            },
+            Collider {
+                shape: ColliderShape::Box {
+                    half_extents: [2.0, 0.5, 2.0],
+                },
+                ..Collider::default()
+            },
+        ));
+        rusting_core::hierarchy::set_parent(editor.world_mut(), ground, island)
+            .unwrap();
+        crate::runtime::save_scene(editor.world_mut(), &source, "main")
+            .unwrap();
+
+        fn idle(_: &mut GameScene<'_>, _: &FrameTime) {}
+        let mut game = load_project_runtime(
+            &source,
+            TestGame {
+                update: idle,
+                changed_health: false,
+            },
+        )
+        .unwrap();
+        let down = [0.0, -1.0, 0.0];
+        // At its propagated pose under the island, before any update.
+        let mut scene = GameScene {
+            world: game.world_mut(),
+        };
+        let hit = scene.raycast([10.0, 5.0, 0.0], down, 20.0).unwrap();
+        assert_eq!(hit.name, "Ground");
+        assert!(scene.raycast([0.0, 5.0, 0.0], down, 20.0).is_none());
+        // And again right after the game loads a scene.
+        scene.load_scene("main.rscene").unwrap();
+        let hit = scene.raycast([10.0, 5.0, 0.0], down, 20.0).unwrap();
+        assert_eq!(hit.name, "Ground");
         std::fs::remove_dir_all(&directory).unwrap();
     }
 

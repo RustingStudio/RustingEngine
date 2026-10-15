@@ -75,7 +75,7 @@ pub use classes::ClassIndex;
 pub use cloth::{Cloth, ClothSettings, ClothSheet, ClothVolume};
 pub use components::*;
 pub use cpu_physics::physics_debug_colors;
-pub(crate) use cpu_physics::{gpu_shape_words, next_spawn_order};
+pub(crate) use cpu_physics::{gpu_shape_words, next_spawn_order, pose_bodies};
 pub use cpu_physics::{
     Articulation, AxisMotion, CharacterMove, CollisionEvent, CombineMode,
     Contact, FellOut, FieldFunction, FieldKind, FieldSample, ForceField,
