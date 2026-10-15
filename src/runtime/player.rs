@@ -577,7 +577,9 @@ pub(super) fn player_look(
     else {
         return;
     };
-    if input.key_just_pressed(KeyCode::Escape) || !mouse_look {
+    let escape = input.key_just_pressed(KeyCode::Escape)
+        && !input.cursor_capture_asked();
+    if escape || !mouse_look {
         if input.cursor_captured() {
             input.set_cursor_captured(false);
         }

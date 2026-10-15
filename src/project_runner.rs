@@ -869,10 +869,20 @@ impl GameScene<'_> {
         }
     }
 
+    /// Hides and locks the cursor for mouse look, or frees it. Called with
+    /// true on the frame Esc went down, it keeps the player controller from
+    /// freeing the cursor for an Esc the game used (cancel placing a part).
+    /// A player with mouse look off frees it again.
+    pub fn set_cursor_captured(&mut self, captured: bool) {
+        if let Some(mut input) = self.world.get_resource_mut::<RuntimeInput>() {
+            input.set_cursor_captured(captured);
+        }
+    }
+
     /// Turns the mouse look of player `name` on or off. Off frees a
     /// captured cursor so menus and in-world screens can be clicked; on
-    /// captures it again at the next left click. False without such a
-    /// player.
+    /// captures it again at once while the window has focus, else at the
+    /// next left click. False without such a player.
     pub fn set_mouse_look(&mut self, name: &str, enabled: bool) -> bool {
         let Some(entity) = find_named_entity(self.world, name) else {
             return false;
@@ -884,6 +894,11 @@ impl GameScene<'_> {
             return false;
         };
         player.mouse_look = enabled;
+        if let Some(mut input) = self.world.get_resource_mut::<RuntimeInput>() {
+            if enabled && input.focused() {
+                input.set_cursor_captured(true);
+            }
+        }
         true
     }
 
@@ -6382,6 +6397,64 @@ mod tests {
         assert!((scene.text_scale() - 3.0).abs() < f32::EPSILON);
         scene.set_text_scale(f32::NAN);
         assert!((scene.text_scale() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cursor_grab_follows_mouse_look_focus_and_the_game() {
+        use crate::runtime::{KeyCode, PlayerController};
+        use std::time::Duration;
+        let mut app = App::new();
+        app.spawn((
+            Name("Player".into()),
+            Transform::default(),
+            PlayerController::default(),
+        ));
+        let frame = |app: &mut App, edit: &dyn Fn(&mut GameScene)| {
+            edit(&mut GameScene {
+                world: app.world_mut(),
+            });
+            app.update(Duration::ZERO).unwrap();
+            let mut input = app.world_mut().resource_mut::<RuntimeInput>();
+            input.clear_frame_edges();
+            input.cursor_captured()
+        };
+        // Mouse look coming back on grabs the cursor without a click.
+        assert!(!frame(&mut app, &|scene| {
+            scene.set_mouse_look("Player", false);
+        }));
+        assert!(frame(&mut app, &|scene| {
+            scene.set_mouse_look("Player", true);
+        }));
+        // An Esc the game used keeps the grab; any other Esc frees it.
+        let escape = |scene: &mut GameScene| {
+            scene
+                .world
+                .resource_mut::<RuntimeInput>()
+                .record_key(KeyCode::Escape, true);
+        };
+        assert!(frame(&mut app, &|scene| {
+            escape(scene);
+            scene.set_cursor_captured(true);
+        }));
+        assert!(!frame(&mut app, &|scene| {
+            scene
+                .world
+                .resource_mut::<RuntimeInput>()
+                .record_key(KeyCode::Escape, false);
+            escape(scene);
+        }));
+        // Focus loss frees it, and mouse look turning on then does not
+        // grab a window the player left.
+        assert!(frame(&mut app, &|scene| scene.set_cursor_captured(true)));
+        assert!(!frame(&mut app, &|scene| {
+            scene
+                .world
+                .resource_mut::<RuntimeInput>()
+                .record_focus(false);
+        }));
+        assert!(!frame(&mut app, &|scene| {
+            scene.set_mouse_look("Player", true);
+        }));
     }
 
     #[test]

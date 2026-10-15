@@ -105,6 +105,15 @@ releases keys only, and `GameScene` has no call to grab or free the cursor.
   look on while the window has focus, a release on focus loss, and a way for the game to
   keep an Esc it used (cancel placing a part) from freeing the cursor.
 
+Status: done (this commit, test: `cursor_grab_follows_mouse_look_focus_and_the_game`).
+`GameScene::set_cursor_captured` writes `RuntimeInput::set_cursor_captured`, which also marks
+a grab asked for this frame; `player_look` skips its Esc release on that frame.
+`set_mouse_look(.., true)` grabs at once while focused, and `RuntimeInput::record_focus(false)`
+frees the cursor. Not done: keeping the regrab click from reaching game tools (game code can
+check `cursor_captured()` before acting on a click). Passed: `cargo fmt --all --check`,
+clippy default / `--no-default-features` / `--features gpu-tests` with `-D warnings`,
+`cargo test --workspace`, and the locked `--features gpu-tests` run.
+
 ### Scenario step for a raw key
 
 Scenario `press` and `tap` (`StepAction`, `src/scenario.rs:1046`) take a named action

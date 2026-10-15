@@ -60,6 +60,9 @@ pub struct RuntimeInput {
     /// Mouse wheel turned this frame, in lines.
     #[serde(default)]
     scroll: [f32; 2],
+    /// A grab was asked for this frame, so this frame's Esc keeps it.
+    #[serde(default)]
+    capture_asked: bool,
 }
 
 /// A gamepad button, in the layout of an Xbox pad: `South` is A, `East` B.
@@ -190,8 +193,17 @@ impl RuntimeInput {
 
     /// Asks the window to hide and lock the cursor, for mouse look. The
     /// window runner applies the request after the frame's systems ran.
+    /// A grab asked for on the frame Esc went down outlasts the player
+    /// controller's Esc release, so a game that used that Esc keeps it.
     pub fn set_cursor_captured(&mut self, captured: bool) {
         self.cursor_captured = captured;
+        self.capture_asked = captured;
+    }
+
+    /// True when [`Self::set_cursor_captured`] asked for a grab this frame.
+    #[must_use]
+    pub fn cursor_capture_asked(&self) -> bool {
+        self.capture_asked
     }
 
     /// Current window/render-viewport size in pixels, used to convert cursor
@@ -242,11 +254,13 @@ impl RuntimeInput {
     }
 
     /// Records a `WindowEvent::Focused`. Losing focus also releases every
-    /// held key and button, as [`Self::release_all`] does.
+    /// held key and button, as [`Self::release_all`] does, and frees the
+    /// cursor until the next grab.
     pub fn record_focus(&mut self, focused: bool) {
         self.unfocused = !focused;
         if !focused {
             self.release_all();
+            self.set_cursor_captured(false);
         }
     }
 
@@ -423,6 +437,7 @@ impl RuntimeInput {
         self.press_ticks.clear();
         self.mouse_motion = [0.0; 2];
         self.scroll = [0.0; 2];
+        self.capture_asked = false;
     }
 }
 

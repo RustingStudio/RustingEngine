@@ -114,8 +114,11 @@ click, and draw a crosshair or aim dot at the centre of the screen.
 `pointer_ray()` is for views where the cursor stays free: set
 `mouse_look: false` for those. From game code,
 `scene.set_mouse_look("Player", false)` frees the cursor for a menu or an
-in-world screen, and `true` hands the view back; the next left click
-captures the cursor again.
+in-world screen, and `true` hands the view back and captures the cursor at
+once while the window has focus. Losing focus (alt-tab, the Windows key)
+frees the cursor until the next left click. Esc frees it too; a game that
+uses an Esc itself (cancel placing a part) calls
+`scene.set_cursor_captured(true)` on that frame to keep the view turning.
 
 A scenario turns the view with `set` on the controller's `yaw` and `pitch`,
 then clicks what the centre now faces:
