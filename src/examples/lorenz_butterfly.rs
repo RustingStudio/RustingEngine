@@ -221,12 +221,12 @@ fn plan() -> &'static Plan {
         // RK4 steps finished by the end of each tick.
         let mut done = vec![0usize; TICKS + 1];
         let mut time = 0.0;
-        for tick in 1..=TICKS {
+        for (tick, done) in done.iter_mut().enumerate().skip(1) {
             let seconds = (tick as f64 - 0.5) / FPS;
             if tick <= FREEZE {
                 time += rate(seconds) / FPS;
             }
-            done[tick] = (time / H).round() as usize;
+            *done = (time / H).round() as usize;
         }
         let total = done[TICKS];
 
@@ -246,13 +246,16 @@ fn plan() -> &'static Plan {
             vec![[half, 0.0, 0.0], [0.0, half, 0.0], [0.0, 0.0, half]];
         for corner in 0..8 {
             samples.push([0, 1, 2].map(|axis| {
-                if corner >> axis & 1 == 1 { half } else { -half }
+                if corner >> axis & 1 == 1 {
+                    half
+                } else {
+                    -half
+                }
             }));
         }
         for index in 0..53 {
-            samples.push([0, 1, 2].map(|axis| {
-                (noise(index, axis) - 0.5) * CUBE
-            }));
+            samples
+                .push([0, 1, 2].map(|axis| (noise(index, axis) - 0.5) * CUBE));
         }
 
         // Follow the samples; record their centre and spread per tick.
@@ -262,7 +265,11 @@ fn plan() -> &'static Plan {
         for tick in 0..=TICKS {
             if tick > 0 {
                 for step in done[tick - 1]..done[tick] {
-                    let r = [path[2 * step], path[2 * step + 1], path[2 * step + 2]];
+                    let r = [
+                        path[2 * step],
+                        path[2 * step + 1],
+                        path[2 * step + 2],
+                    ];
                     for d in &mut samples {
                         *d = offset_step(r, *d);
                     }
@@ -287,9 +294,9 @@ fn plan() -> &'static Plan {
                     .max_by(|a, b| dot(*a, *a).total_cmp(&dot(*b, *b)))
                     .unwrap();
                 let along = scale(longest, 1.0 / dot(longest, longest).sqrt());
-                let axis =
-                    [0, 1, 2].map(|a| dot(samples[a], along) / half);
-                let range: f64 = axis.iter().map(|v| v.abs()).sum::<f64>() * half;
+                let axis = [0, 1, 2].map(|a| dot(samples[a], along) / half);
+                let range: f64 =
+                    axis.iter().map(|v| v.abs()).sum::<f64>() * half;
                 hue_axis = Some(scale(axis, 0.5 / range));
             }
             centres.push(centre);
@@ -300,7 +307,8 @@ fn plan() -> &'static Plan {
         // full attractor. The spread swings tenfold as the cloud folds, so
         // follow its log averaged over about a Lorenz time unit; the
         // swings stay on screen as the thread stretching and folding.
-        let times: Vec<f64> = done.iter().map(|&steps| steps as f64 * H).collect();
+        let times: Vec<f64> =
+            done.iter().map(|&steps| steps as f64 * H).collect();
         let trend: Vec<f64> = (0..=TICKS)
             .map(|tick| {
                 let (mut sum, mut weight) = (0.0, 0.0);
@@ -314,19 +322,27 @@ fn plan() -> &'static Plan {
             })
             .collect();
         let screen = |seconds: f64| {
-            keyed(&[(0.0, 0.012), (1.0, 0.014), (3.0, 0.35), (8.0, 0.8)], seconds)
-                .ln()
+            keyed(
+                &[(0.0, 0.012), (1.0, 0.014), (3.0, 0.35), (8.0, 0.8)],
+                seconds,
+            )
+            .ln()
         };
         let raw: Vec<f64> = (0..=TICKS)
-            .map(|tick| (screen(tick as f64 / FPS) - trend[tick]).max(ZOOM_FULL.ln()))
+            .map(|tick| {
+                (screen(tick as f64 / FPS) - trend[tick]).max(ZOOM_FULL.ln())
+            })
             .collect();
         let zoom: Vec<f64> = (0..=TICKS)
             .map(|tick| {
                 let (mut sum, mut weight) = (0.0, 0.0);
-                for back in tick.saturating_sub(40)..=(tick + 40).min(TICKS) {
+                let first = tick.saturating_sub(40);
+                for (back, raw) in
+                    raw.iter().enumerate().skip(first).take(tick + 41 - first)
+                {
                     let off = (back as f64 - tick as f64) / 20.0;
                     let w = (-off * off).exp();
-                    sum += raw[back] * w;
+                    sum += raw * w;
                     weight += w;
                 }
                 (sum / weight).exp()
@@ -335,7 +351,12 @@ fn plan() -> &'static Plan {
 
         let mut params = vec![
             [SIGMA as f32, RHO as f32, BETA as f32, H as f32],
-            [TICKS as f32, (HEAD + 2 * (TICKS + 1)) as f32, FREEZE as f32, 0.0],
+            [
+                TICKS as f32,
+                (HEAD + 2 * (TICKS + 1)) as f32,
+                FREEZE as f32,
+                0.0,
+            ],
         ];
         // A little below the fixed points' z = ρ - 1: the camera sits above,
         // so this centres the wings on screen.
@@ -345,18 +366,30 @@ fn plan() -> &'static Plan {
             // Look at the cloud while zoomed in, at the attractor's middle
             // once it fills the view.
             let s = zoom[tick];
-            let wide = smooth((s.ln() - 1.0_f64.ln()) / ((ZOOM_FULL * 1.2).ln() - 1.0_f64.ln()));
+            let wide = smooth(
+                (s.ln() - 1.0_f64.ln())
+                    / ((ZOOM_FULL * 1.2).ln() - 1.0_f64.ln()),
+            );
             let r = path[2 * done[tick]];
             let to_cloud = scale(centres[tick], -1.0);
             let to_middle = add(r, scale(middle, -1.0));
-            let view = scale(add(scale(to_cloud, 1.0 - wide), scale(to_middle, wide)), s);
-            params.push([view[0] as f32, view[1] as f32, view[2] as f32, s as f32]);
+            let view = scale(
+                add(scale(to_cloud, 1.0 - wide), scale(to_middle, wide)),
+                s,
+            );
+            params.push([
+                view[0] as f32,
+                view[1] as f32,
+                view[2] as f32,
+                s as f32,
+            ]);
             let first = if tick == 0 { 0 } else { done[tick - 1] };
             params.push([first as f32, (done[tick] - first) as f32, 0.0, 0.0]);
             readout.push([times[tick], spreads[tick], s]);
         }
         params.extend(
-            path.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32, 0.0]),
+            path.iter()
+                .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32, 0.0]),
         );
         Plan {
             params,
@@ -420,15 +453,24 @@ fn create(scene: &mut GameScene<'_>) {
     let particle = CubeSpawn::new().class("lorenz");
     let marked = CubeSpawn::new().class("lorenz_mark");
     let mesh = scene.world().resource::<AssetServer>().fallback_mesh;
-    let mut next_order = scene.world().get_resource_or_insert_with(NextSpawnOrder::default).0;
+    let mut next_order = scene
+        .world()
+        .get_resource_or_insert_with(NextSpawnOrder::default)
+        .0;
     let count = n * n * n;
     let offset_of = |index: usize| {
         [index / (n * n), index / n % n, index % n].map(|v| {
-            if n == 1 { 0.0 } else { (v as f64 / (n - 1) as f64 - 0.5) * CUBE }
+            if n == 1 {
+                0.0
+            } else {
+                (v as f64 / (n - 1) as f64 - 0.5) * CUBE
+            }
         })
     };
     // Hue by rank along the stretch, so every color gets as many particles.
-    let along: Vec<f64> = (0..count).map(|i| dot(offset_of(i), plan.hue_axis)).collect();
+    let along: Vec<f64> = (0..count)
+        .map(|i| dot(offset_of(i), plan.hue_axis))
+        .collect();
     let mut ranked: Vec<usize> = (0..count).collect();
     ranked.sort_by(|&a, &b| along[a].total_cmp(&along[b]));
     let mut hues = vec![0; count];
@@ -439,8 +481,10 @@ fn create(scene: &mut GameScene<'_>) {
         let ijk = [index / (n * n), index / n % n, index % n];
         let offset = offset_of(index);
         let material = materials[hues[index]];
-        let p = [0, 1, 2].map(|a| start[a] as f64 + start[3] as f64 * offset[a]);
-        let mut transform = Transform::new([p[0] as f32, p[2] as f32, -p[1] as f32]);
+        let p =
+            [0, 1, 2].map(|a| start[a] as f64 + start[3] as f64 * offset[a]);
+        let mut transform =
+            Transform::new([p[0] as f32, p[2] as f32, -p[1] as f32]);
         transform.scale = [PARTICLE; 3];
         let mark = (ijk[0] == 0 || ijk[0] == n - 1)
             && mark_rows.contains(&ijk[1])
@@ -500,7 +544,8 @@ fn update(scene: &mut GameScene<'_>, time: &FrameTime) {
         events_per_body: 1,
     }]);
     for event in scene.gpu_events("lorenz_mark") {
-        let ijk = MARKS.with(|marks| marks.borrow().get(&event.entity).copied());
+        let ijk =
+            MARKS.with(|marks| marks.borrow().get(&event.entity).copied());
         if let Some([i, j, k]) = ijk {
             let [x, y, z, wing] = event.payload;
             println!("lorenz mark {i} {j} {k} {x} {y} {z} {wing}");
