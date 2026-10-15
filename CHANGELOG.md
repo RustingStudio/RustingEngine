@@ -5,6 +5,7 @@
 ### Added
 
 - Scenario step `{"scroll": [dx, dy]}` turns the mouse wheel over the cursor, so a scenario can scroll an egui `ScrollArea` and `click` rows below the fold. Game code reads the wheel with `RuntimeInput::scroll()`, in lines, from the window too (RAFT).
+- Scenario step `{"key": "SuperLeft"}` taps one key by its `KeyCode` name, for keys no action uses (RAFT).
 - `GameScene::set_cursor_captured(bool)` grabs or frees the cursor; called on the frame Esc went down, it keeps the player controller from freeing the cursor for an Esc the game used. `set_mouse_look(.., true)` now grabs the cursor at once while the window has focus, and losing focus frees it (RAFT).
 
 ### Changed

@@ -253,6 +253,9 @@ Scenarios drive egui the same way a player does:
   `RuntimeInput::scroll()`.
 - `tap` presses a key action for one tick. egui sees it too, so Tab and
   Enter navigate menus.
+- `key` taps one key by its code, whether an action uses it or not:
+  `{"tick": 5, "key": "SuperLeft"}` presses the Windows key for one tick.
+  Names are winit `KeyCode` names such as `KeyE`, `Escape` and `F1`.
 - The headless screen is `capture_size` from tick 0, for layout, egui and
   `viewport_size()` alike. Run the same scenario at 640×360 and 480×270 to
   check that small windows fit.

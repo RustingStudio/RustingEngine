@@ -19,9 +19,9 @@ use crate::rendering::capture::HeadlessCapture;
 use crate::runtime::{
     picking, scene_entity_lenient, set_registered_component,
     set_registered_component_field, ActionMap, Camera, CollisionEvent,
-    EventQueue, FrameTime, GlobalTransform, InputBinding, MeshRenderer,
-    MouseButton, Name, RandomSeed, RenderWorld, RuntimeInput, SceneId,
-    SceneTransform, Stick,
+    EventQueue, FrameTime, GlobalTransform, InputBinding, KeyCode,
+    MeshRenderer, MouseButton, Name, RandomSeed, RenderWorld, RuntimeInput,
+    SceneId, SceneTransform, Stick,
 };
 use crate::{App, AssetServer, Transform};
 
@@ -1061,6 +1061,9 @@ pub enum StepAction {
     /// Presses a named action and releases it before the next tick, so
     /// each tap gives `pressed` one edge.
     Tap(String),
+    /// Taps one key by its code, such as `"SuperLeft"` or `"KeyE"`, bound
+    /// to an action or not: pressed this tick, released before the next.
+    Key(KeyCode),
     /// Checks one value of an entity's reflected scene state.
     Expect(Expectation),
     /// Counts events seen by gameplay from tick 0 through this tick.
@@ -2139,6 +2142,11 @@ pub fn run_scenario(
                 if let StepAction::Tap(action) = &step.action {
                     let _ = press(app.world_mut(), action, false, None);
                 }
+                if let StepAction::Key(key) = &step.action {
+                    app.world_mut()
+                        .resource_mut::<RuntimeInput>()
+                        .record_key(*key, false);
+                }
                 if let StepAction::Click(_) = &step.action {
                     app.world_mut()
                         .resource_mut::<RuntimeInput>()
@@ -2164,6 +2172,12 @@ pub fn run_scenario(
                 }
                 StepAction::Release(action) => {
                     press(app.world_mut(), action, false, None)
+                }
+                StepAction::Key(key) => {
+                    app.world_mut()
+                        .resource_mut::<RuntimeInput>()
+                        .record_key(*key, true);
+                    Ok(format!("key {key:?}"))
                 }
                 StepAction::Set(assignment) => {
                     assign(app.world_mut(), assignment)
@@ -2202,6 +2216,9 @@ pub fn run_scenario(
                     }
                     StepAction::Tap(action) => {
                         ("input", serde_json::json!({"tap": action}))
+                    }
+                    StepAction::Key(key) => {
+                        ("input", serde_json::json!({"key": key}))
                     }
                     StepAction::Set(assignment) => {
                         ("set", serde_json::json!(assignment))
@@ -2495,6 +2512,7 @@ pub fn run_scenario(
                 StepAction::Press(_)
                 | StepAction::Release(_)
                 | StepAction::Tap(_)
+                | StepAction::Key(_)
                 | StepAction::Set(_)
                 | StepAction::Click(_)
                 | StepAction::Restart(_)
@@ -3697,7 +3715,7 @@ fn check_events(
 mod tests {
     use super::*;
     use crate::runtime::{
-        Collider, ColliderShape, HybridPhysicsPlugin, InputBinding, KeyCode,
+        Collider, ColliderShape, HybridPhysicsPlugin, InputBinding,
         PhysicsBody, RenderExtractPlugin, RigidBody, RigidBodyKind,
         ScheduleStage,
     };
@@ -5883,6 +5901,39 @@ mod tests {
             ]),
         ));
         assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn key_steps_tap_a_key_no_action_uses() {
+        let mut app = game();
+        app.add_system(ScheduleStage::Update, |world: &mut World| {
+            let input = world.resource::<RuntimeInput>();
+            let name = if input.key_just_pressed(KeyCode::SuperLeft) {
+                "pressed"
+            } else if input.key_just_released(KeyCode::SuperLeft) {
+                "released"
+            } else {
+                return;
+            };
+            world.spawn((Name(name.into()), SceneId(Uuid::new_v4())));
+        });
+        let report = run_scenario(
+            &mut app,
+            &scenario(
+                5,
+                json!([
+                    {"tick": 2, "key": "SuperLeft"},
+                    {"tick": 2, "expect": {"entity": "pressed", "path": "/name", "equals": "pressed"}},
+                    {"tick": 3, "expect": {"entity": "released", "path": "/name", "equals": "released"}},
+                ]),
+            ),
+            Path::new("."),
+        );
+        assert!(report.passed, "{report:#?}");
+        let unknown = serde_json::from_value::<ScenarioStep>(
+            json!({"tick": 1, "key": "Super"}),
+        );
+        assert!(unknown.is_err());
     }
 
     #[test]

@@ -124,6 +124,12 @@ in a scenario.
   `src/app.rs` covers the Windows key; `tests/ui_cursor.json` covers focus loss.
 - Wanted: a `{"key": "SuperLeft"}` step that presses one key code.
 
+Status: done (this commit, test: `key_steps_tap_a_key_no_action_uses`). `StepAction::Key`
+takes a winit `KeyCode` name, records the press before the tick's update and the release
+before the next, like `tap`; an unknown name fails to parse. Passed: `cargo fmt --all --check`,
+clippy default / `--no-default-features` / `--features gpu-tests` with `-D warnings`,
+`cargo test --workspace`, and the locked `--features gpu-tests` run.
+
 ### Quaternion-safe animation blending
 
 Clip sampling (`AnimationTrack::sample`, `lerp` in `src/runtime/animation.rs:265`) and
