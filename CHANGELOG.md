@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Scenario step `{"scroll": [dx, dy]}` turns the mouse wheel over the cursor, so a scenario can scroll an egui `ScrollArea` and `click` rows below the fold. Game code reads the wheel with `RuntimeInput::scroll()`, in lines, from the window too (RAFT).
+
 ### Changed
 
 - The relay (`rusting relay`, `net::run_relay`) is safe to expose for `NetSession::host_room` / `join_room`: each connection writes through its own bounded queue, so a peer that stops reading is cut off instead of stalling every room; `RelayLimits` gains `max_rooms` (256), `max_clients_per_room` (64), `room_attempts_per_minute` (30, per address), `idle_timeout` (10 minutes after the handshake) and `send_queue` (1 MiB, split into equal shares per client on a host's connection); a sender over `bytes_per_second`, or a message larger than one second of it, is now dropped instead of slowed (RAFT).

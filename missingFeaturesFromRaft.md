@@ -79,6 +79,13 @@ be clicked by label.
 - Wanted: a `{"scroll": [dx, dy]}` step, or a `click` that scrolls the target into view
   first.
 
+Status: done (this commit, test: `scroll_steps_turn_the_wheel_over_an_egui_scroll_area`).
+`StepAction::Scroll` records wheel lines in `RuntimeInput::record_scroll`; the headless egui
+pass sends them as `Event::MouseWheel`, and the windowed runtime records `MouseWheel` events
+too, so game code reads `RuntimeInput::scroll()`. Passed: `cargo fmt --all --check`, clippy
+default / `--no-default-features` / `--features gpu-tests` with `-D warnings`,
+`cargo test --workspace`, and the locked `--features gpu-tests` run.
+
 ### Cursor grab that follows mouse look and focus
 
 The controller's look code (`player_look`, `src/runtime/player.rs:326`) frees the cursor

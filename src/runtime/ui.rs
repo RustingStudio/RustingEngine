@@ -328,6 +328,14 @@ fn raw_input(input: &RuntimeInput, zoom: f32) -> egui::RawInput {
         .map(|[x, y]| egui::pos2(x / zoom, y / zoom));
     if let Some(pos) = cursor {
         raw.events.push(egui::Event::PointerMoved(pos));
+        let [x, y] = input.scroll();
+        if x != 0.0 || y != 0.0 {
+            raw.events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(x, y),
+                modifiers: egui::Modifiers::default(),
+            });
+        }
         for (button, egui_button) in [
             (MouseButton::Left, egui::PointerButton::Primary),
             (MouseButton::Right, egui::PointerButton::Secondary),

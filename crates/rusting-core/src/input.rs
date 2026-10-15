@@ -57,6 +57,9 @@ pub struct RuntimeInput {
     /// The window lost focus (alt-tab) and has not got it back.
     #[serde(default)]
     unfocused: bool,
+    /// Mouse wheel turned this frame, in lines.
+    #[serde(default)]
+    scroll: [f32; 2],
 }
 
 /// A gamepad button, in the layout of an Xbox pad: `South` is A, `East` B.
@@ -171,6 +174,14 @@ impl RuntimeInput {
         self.mouse_motion
     }
 
+    /// Mouse wheel turned since the last [`Self::clear_frame_edges`], in
+    /// lines: positive `y` turns the wheel away from the player, which
+    /// shows content above.
+    #[must_use]
+    pub fn scroll(&self) -> [f32; 2] {
+        self.scroll
+    }
+
     /// True when gameplay asked the window to hide and lock the cursor.
     #[must_use]
     pub fn cursor_captured(&self) -> bool {
@@ -247,6 +258,11 @@ impl RuntimeInput {
     pub fn record_mouse_motion(&mut self, delta: [f32; 2]) {
         self.mouse_motion[0] += delta[0];
         self.mouse_motion[1] += delta[1];
+    }
+    /// Adds one `MouseWheel` event, in lines.
+    pub fn record_scroll(&mut self, lines: [f32; 2]) {
+        self.scroll[0] += lines[0];
+        self.scroll[1] += lines[1];
     }
     /// Records the current window/render-viewport size in pixels.
     pub fn record_viewport_size(&mut self, size: [f32; 2]) {
@@ -376,7 +392,7 @@ impl RuntimeInput {
     /// Clears this frame's edge sets. Runtime integrations call this once per
     /// rendered frame after gameplay systems have read them, so the next frame
     /// starts empty.
-    /// Adds the edge sets, press times and mouse motion of `earlier`, an
+    /// Adds the edge sets, press times, mouse motion and scroll of `earlier`, an
     /// earlier frame, to this one, so presses from frames that ran no fixed
     /// tick reach the next tick.
     pub fn merge_frame_edges(&mut self, earlier: &Self) {
@@ -394,6 +410,7 @@ impl RuntimeInput {
         self.press_ticks.extend(later);
         self.mouse_motion[0] += earlier.mouse_motion[0];
         self.mouse_motion[1] += earlier.mouse_motion[1];
+        self.record_scroll(earlier.scroll);
     }
 
     pub fn clear_frame_edges(&mut self) {
@@ -405,6 +422,7 @@ impl RuntimeInput {
         self.pad_just_released.clear();
         self.press_ticks.clear();
         self.mouse_motion = [0.0; 2];
+        self.scroll = [0.0; 2];
     }
 }
 

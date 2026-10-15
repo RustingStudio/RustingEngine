@@ -1093,6 +1093,9 @@ pub enum StepAction {
     /// its width and height from the top-left corner: `[0.5, 0.5]` is the
     /// center.
     Pointer([f32; 2]),
+    /// Turns the mouse wheel `[dx, dy]` lines over the cursor, as a wheel
+    /// does: `[0, -3]` scrolls the UI under the cursor three lines down.
+    Scroll([f32; 2]),
     /// Tilts the gamepad's left stick, each axis -1..1 (`[0, 1]` is fully
     /// up), until another step moves it. Past half tilt it also presses the
     /// stick's direction (`PadLeftStickUp`, ...).
@@ -2166,6 +2169,12 @@ pub fn run_scenario(
                     assign(app.world_mut(), assignment)
                 }
                 StepAction::Pointer(point) => point_at(app.world_mut(), *point),
+                StepAction::Scroll(lines) => {
+                    app.world_mut()
+                        .resource_mut::<RuntimeInput>()
+                        .record_scroll(*lines);
+                    Ok(format!("scroll {lines:?}"))
+                }
                 StepAction::LeftStick(tilt) => {
                     tilt_stick(app.world_mut(), Stick::Left, *tilt)
                 }
@@ -2490,6 +2499,7 @@ pub fn run_scenario(
                 | StepAction::Click(_)
                 | StepAction::Restart(_)
                 | StepAction::Pointer(_)
+                | StepAction::Scroll(_)
                 | StepAction::LeftStick(_)
                 | StepAction::RightStick(_)
                 | StepAction::Focus(_) => continue,
@@ -5942,6 +5952,59 @@ mod tests {
         let missing = run(&scenario(3, json!([{"tick": 1, "click": "Load"}])));
         let message = &missing.first_failure.unwrap().message;
         assert!(message.contains("no UI text `Load`"), "{message}");
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn scroll_steps_turn_the_wheel_over_an_egui_scroll_area() {
+        let mut app = game();
+        app.add_system(ScheduleStage::Update, |world: &mut World| {
+            let context = world
+                .resource::<crate::runtime::RuntimeUi>()
+                .context()
+                .clone();
+            egui::CentralPanel::default().show(&context, |ui| {
+                egui::ScrollArea::vertical().auto_shrink(false).show(
+                    ui,
+                    |ui| {
+                        for row in 0..100 {
+                            if ui.button(format!("Row {row}")).clicked() {
+                                world.spawn((
+                                    Name(format!("clicked {row}")),
+                                    SceneId(Uuid::new_v4()),
+                                ));
+                            }
+                        }
+                    },
+                );
+            });
+        });
+        let report = run_scenario(
+            &mut app,
+            &scenario(
+                40,
+                json!([
+                    {"tick": 1, "pointer": [0.5, 0.5]},
+                    {"tick": 2, "scroll": [0.0, -200.0]},
+                    {"tick": 30, "click": "Row 99"},
+                    {"tick": 32, "expect": {"entity": "clicked 99", "path": "/name", "equals": "clicked 99"}},
+                ]),
+            ),
+            Path::new("."),
+        );
+        assert!(report.passed, "{report:#?}");
+
+        let mut app = game();
+        let below = run_scenario(
+            &mut app,
+            &scenario(5, json!([{"tick": 3, "click": "Row 99"}])),
+            Path::new("."),
+        );
+        assert!(!below.passed, "without a scroll the row is below the fold");
+        let step: ScenarioStep =
+            serde_json::from_value(json!({"tick": 3, "scroll": [1, -2]}))
+                .unwrap();
+        assert!(matches!(step.action, StepAction::Scroll([1.0, -2.0])));
     }
 
     #[cfg(feature = "ui")]

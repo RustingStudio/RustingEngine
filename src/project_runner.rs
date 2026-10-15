@@ -5349,6 +5349,26 @@ impl ApplicationHandler for ProjectApplication {
                 }
                 input.record_mouse_button(button, state.is_pressed());
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => [x, y],
+                    // About 20 logical pixels per wheel line, as in the
+                    // editor.
+                    winit::event::MouseScrollDelta::PixelDelta(position) => {
+                        let scale = self
+                            .window
+                            .windows
+                            .get_primary_window()
+                            .map_or(1.0, |window| window.scale_factor());
+                        let line = scale * 20.0;
+                        [(position.x / line) as f32, (position.y / line) as f32]
+                    }
+                };
+                self.runtime
+                    .world_mut()
+                    .resource_mut::<RuntimeInput>()
+                    .record_scroll(lines);
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.runtime
                     .world_mut()

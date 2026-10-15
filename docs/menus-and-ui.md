@@ -246,6 +246,11 @@ Scenarios drive egui the same way a player does:
   matches, the failure lists the texts on screen.
 - `pointer` with `[x, y]` view fractions, plus a press of an action bound to
   `MouseLeft`, does the same thing by position.
+- `scroll` with `[dx, dy]` turns the mouse wheel that many lines over the
+  cursor: `{"tick": 5, "scroll": [0, -10]}` scrolls the `ScrollArea` under
+  it down, so a `click` a few ticks later finds rows below the fold. egui
+  eases a scroll over several ticks. Game code reads the wheel with
+  `RuntimeInput::scroll()`.
 - `tap` presses a key action for one tick. egui sees it too, so Tab and
   Enter navigate menus.
 - The headless screen is `capture_size` from tick 0, for layout, egui and
