@@ -131,6 +131,21 @@ path = "src/examples/galaxy_collision.rs"
 required-features = ["window"]
 
 [[example]]
+name = "roche_ring"
+path = "src/examples/roche_ring.rs"
+required-features = ["window"]
+
+[[example]]
+name = "black_hole_cinematic"
+path = "src/examples/black_hole_cinematic.rs"
+required-features = ["window"]
+
+[[example]]
+name = "black_hole_interstellar"
+path = "src/examples/black_hole_interstellar.rs"
+required-features = ["window"]
+
+[[example]]
 name = "galton_board"
 path = "src/examples/galton_board.rs"
 required-features = ["window"]
@@ -147,3 +162,8 @@ path = "src/examples/physics_suite.rs"
 [[example]]
 name = "render_bench"
 path = "src/examples/render_bench.rs"
+
+[[example]]
+name = "lorenz_butterfly"
+path = "src/examples/lorenz_butterfly.rs"
+required-features = ["window"]

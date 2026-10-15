@@ -68,6 +68,7 @@ void condition(inout PhysicsState body) {
         body.properties.y = 1.0;
         body.custom_values.y = 1.0;
         body.custom_values.z = index;
+        body.custom_values.w = 0.0;
         body.angular_velocity.w = 0.0;
         return;
     }
@@ -80,9 +81,24 @@ void condition(inout PhysicsState body) {
         body.angular_velocity.w = 0.0;
         if (position.y < pour.z) {
             body.custom_values.y = 2.0;
+            // A small sideways push, so a ball does not balance exactly on
+            // top of a fixed one below it and build a one-ball tower.
+            body.velocity.x += (2.0 * fract(body.custom_values.z * 0.754878) - 1.0) * 0.5;
             emit_event(body, EVENTS[0], 1u, vec4(position, body.custom_values.z));
         }
         return;
+    }
+    // Landed: the bin is decided. Deep stacks jitter in the contact solver
+    // and throw balls upward, so upward motion is damped hard, and a ball
+    // that has stayed slow for a second is fixed in place.
+    if (body.custom_values.y == 2.0) {
+        body.velocity.y = min(body.velocity.y, body.velocity.y * exp(-20.0 * pc.dt));
+        body.custom_values.w = length(body.velocity.xyz) < 0.5 ? body.custom_values.w + 1.0 : 0.0;
+        if (body.custom_values.w >= 60.0) {
+            body.properties.z = 0.0;
+            body.velocity.xyz = vec3(0.0);
+            body.custom_values.y = 3.0;
+        }
     }
     if (pc.elapsed >= pour.w && pc.elapsed < pour.w + pc.dt) {
         emit_event(body, EVENTS[1], 1u, vec4(position, body.custom_values.z));
@@ -112,7 +128,6 @@ fn row_y(row: usize) -> f32 {
     BIN_HEIGHT + LAST_ROW_GAP + (ROWS - 1 - row) as f32 * row_height()
 }
 
-/// Height of the narrow end of the funnel.
 /// Height of the funnel above its neck. Tall enough to hold every ball
 /// waiting to go through, so none spills over the rim.
 const FUNNEL_HEIGHT: f32 = 160.0;

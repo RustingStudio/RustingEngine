@@ -225,6 +225,9 @@ pub struct App {
     event_maintenance: Vec<fn(&mut World)>,
     plugins: Vec<&'static str>,
     replay_recorder: Option<ReplayRecorder>,
+    /// Hash the CPU state after every fixed step; see
+    /// [`App::set_state_hashing`].
+    state_hashing: bool,
     snapshot_types: snapshot::SnapshotTypes,
     /// The last frame hit the fixed-step cap and its steps took longer than
     /// the time they simulate; see [`App::update`].
@@ -283,6 +286,7 @@ impl Default for App {
             event_maintenance: Vec::new(),
             plugins: Vec::new(),
             replay_recorder: None,
+            state_hashing: true,
             snapshot_types: snapshot::SnapshotTypes::default(),
             overloaded: false,
             overload_reported: false,
@@ -640,6 +644,14 @@ impl App {
         self.replay_recorder = Some(ReplayRecorder::new(&self.world));
     }
 
+    /// Turns the per-tick state hash on or off (on by default). It walks
+    /// and sorts every entity, which costs hundreds of milliseconds a tick
+    /// with a million bodies; live play with nothing to compare against
+    /// turns it off. A replay being recorded keeps it on.
+    pub fn set_state_hashing(&mut self, on: bool) {
+        self.state_hashing = on;
+    }
+
     /// Stops recording and returns the replay, or `None` when not recording.
     pub fn finish_recording(&mut self) -> Option<Replay> {
         self.replay_recorder.take().map(ReplayRecorder::finish)
@@ -783,7 +795,9 @@ impl App {
             time.delta = time.fixed_delta;
             self.fixed_update.run(&mut self.world);
             hybrid_physics::stamp_gpu_commands(&mut self.world);
-            state_hash::record_state_hash(&mut self.world);
+            if self.state_hashing || self.replay_recorder.is_some() {
+                state_hash::record_state_hash(&mut self.world);
+            }
         }
         let mut time = self.world.resource_mut::<FrameTime>();
         time.fixed_tick = end_tick;

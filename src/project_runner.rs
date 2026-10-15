@@ -5544,6 +5544,8 @@ pub(crate) fn run_windowed(
     if replay_out.is_some() {
         runtime.start_recording();
     }
+    // Nothing reads the CPU state hashes in live play.
+    runtime.set_state_hashing(false);
     let event_loop = EventLoop::new()?;
     let mut application = ProjectApplication::new(title, runtime);
     if let Some(path) = std::env::var_os(crate::project::CODE_RELOAD_STATE_ENV)
