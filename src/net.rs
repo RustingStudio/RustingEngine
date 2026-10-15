@@ -883,8 +883,9 @@ impl Drop for NetSession {
 /// clients and client messages to the host. Hosts and clients must give
 /// `token`; an empty one lets anyone in. `rusting relay` runs one. It runs
 /// until the process ends; a failed incoming connection is skipped.
-// ponytail: one lock over every room serialises forwarding; per-room locks
-// and a writer thread per socket if one relay serves many busy rooms.
+// ponytail: one lock over every room serialises room bookkeeping and
+// queueing (not socket writes); per-room locks if one relay serves many busy
+// rooms.
 pub fn run_relay(listener: TcpListener, token: &str) -> io::Result<()> {
     run_relay_with(listener, token, RelayLimits::default())
 }
@@ -900,9 +901,27 @@ pub struct RelayLimits {
     /// New connections one IP address may open per minute, failed ones
     /// included, which also slows token guessing.
     pub connects_per_minute: u32,
-    /// Bytes per second the relay reads from one connection; a faster
-    /// sender is slowed down, not cut off. 0 means no cap.
+    /// Bytes per second one connection may send, with one second's worth
+    /// as a burst; a faster sender is cut off. 0 means no cap.
     pub bytes_per_second: u64,
+    /// Rooms open at once; another host is refused with "relay is full".
+    pub max_rooms: usize,
+    /// Clients in one room; another join is refused with "room is full".
+    pub max_clients_per_room: usize,
+    /// Room opens and join attempts one IP address may make per minute,
+    /// refused ones included, which also slows room code guessing.
+    pub room_attempts_per_minute: u32,
+    /// A connection that sends nothing for this long after its handshake is
+    /// closed. Zero means never.
+    pub idle_timeout: Duration,
+    /// Bytes waiting to be written to one connection. A peer that stops
+    /// reading is cut off when its queue is full, so it never holds up
+    /// anyone else. A host's queue gives each client an equal share
+    /// (this over `max_clients_per_room`); a client over its share is cut
+    /// off, not the host or other clients. One message larger than a
+    /// queue or share still goes when nothing of it is waiting. A message
+    /// sent to many peers is held once.
+    pub send_queue: usize,
 }
 
 impl Default for RelayLimits {
@@ -912,6 +931,11 @@ impl Default for RelayLimits {
             max_connections_per_address: 16,
             connects_per_minute: 60,
             bytes_per_second: 1 << 20,
+            max_rooms: 256,
+            max_clients_per_room: 64,
+            room_attempts_per_minute: 30,
+            idle_timeout: Duration::from_secs(600),
+            send_queue: 1 << 20,
         }
     }
 }
@@ -947,7 +971,7 @@ pub fn run_relay_with(
         let rooms = Arc::clone(&rooms);
         let token = Arc::clone(&token);
         std::thread::spawn(move || {
-            relay_connection(stream, &rooms, &token, limits.bytes_per_second);
+            relay_connection(stream, &rooms, &token, &limits, &slot);
             drop(slot);
         });
     }
@@ -959,8 +983,8 @@ pub fn run_relay_with(
 struct Admission {
     open: usize,
     /// Per address: open connections, start of the minute counted, and
-    /// connects in that minute.
-    addresses: HashMap<IpAddr, (usize, Instant, u32)>,
+    /// connects and room attempts in that minute.
+    addresses: HashMap<IpAddr, (usize, Instant, u32, u32)>,
 }
 
 impl Admission {
@@ -975,17 +999,17 @@ impl Admission {
         let now = Instant::now();
         let minute = Duration::from_secs(60);
         if admission.addresses.len() > 4 * limits.max_connections {
-            admission.addresses.retain(|_, (open, start, _)| {
+            admission.addresses.retain(|_, (open, start, ..)| {
                 *open > 0 || now.duration_since(*start) < minute
             });
         }
         if admission.open >= limits.max_connections {
             return None;
         }
-        let (open, start, connects) =
-            admission.addresses.entry(address).or_insert((0, now, 0));
+        let (open, start, connects, attempts) =
+            admission.addresses.entry(address).or_insert((0, now, 0, 0));
         if now.duration_since(*start) >= minute {
-            (*start, *connects) = (now, 0);
+            (*start, *connects, *attempts) = (now, 0, 0);
         }
         // Refused connects count too, so hammering never resets the count.
         *connects = connects.saturating_add(1);
@@ -1008,6 +1032,20 @@ struct AdmissionSlot {
     address: IpAddr,
 }
 
+impl AdmissionSlot {
+    /// Counts a room open or join from this connection's address; false
+    /// when the address is over `limit` this minute.
+    fn room_attempt(&self, limit: u32) -> bool {
+        let mut admission = self.admission.lock().unwrap();
+        let Some((.., attempts)) = admission.addresses.get_mut(&self.address)
+        else {
+            return false;
+        };
+        *attempts = attempts.saturating_add(1);
+        *attempts <= limit
+    }
+}
+
 impl Drop for AdmissionSlot {
     fn drop(&mut self) {
         let mut admission = self.admission.lock().unwrap();
@@ -1018,7 +1056,7 @@ impl Drop for AdmissionSlot {
     }
 }
 
-/// Slows a reader to a byte rate, allowing one second's worth in a burst.
+/// Holds a reader to a byte rate, allowing one second's worth in a burst.
 struct Throttle {
     rate: f64,
     allowance: f64,
@@ -1035,27 +1073,131 @@ impl Throttle {
         }
     }
 
-    /// Spends `bytes`, sleeping until the rate allows them.
-    fn spend(&mut self, bytes: usize) {
+    /// The largest message one burst allows, so a message the rate would
+    /// refuse is refused before the relay buffers it.
+    fn largest(&self) -> usize {
         if self.rate <= 0.0 {
-            return;
+            MAX_MESSAGE
+        } else {
+            MAX_MESSAGE.min((self.rate as usize).saturating_sub(9))
+        }
+    }
+
+    /// Spends `bytes`; false when the rate does not allow them.
+    fn spend(&mut self, bytes: usize) -> bool {
+        if self.rate <= 0.0 {
+            return true;
         }
         let now = Instant::now();
         let earned = now.duration_since(self.last).as_secs_f64() * self.rate;
         self.allowance = (self.allowance + earned).min(self.rate);
         self.last = now;
         self.allowance -= bytes as f64;
-        if self.allowance < 0.0 {
-            std::thread::sleep(Duration::from_secs_f64(
-                -self.allowance / self.rate,
-            ));
-        }
+        self.allowance >= 0.0
     }
 }
 
+/// A frame waiting in a [`RelayPeer`] queue and the client share it
+/// counts against, if any.
+type Queued = (Arc<[u8]>, Option<Arc<AtomicUsize>>);
+
+/// One relay connection's write side: frames wait in a queue capped in
+/// bytes that a thread of its own writes out. A frame sent to several peers
+/// is shared, not copied. A host's queue is split into one share per
+/// client instead, counted by the client (see [`Self::offer`]).
+struct RelayPeer {
+    queue: Sender<Queued>,
+    /// Bytes queued and not yet written.
+    queued: Arc<AtomicUsize>,
+    limit: usize,
+    stream: TcpStream,
+}
+
+impl RelayPeer {
+    fn new(stream: &TcpStream, limit: usize) -> io::Result<Self> {
+        let (queue, frames) = channel::<Queued>();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let mut writer = stream.try_clone()?;
+        let written = Arc::clone(&queued);
+        std::thread::spawn(move || {
+            for (frame, owner) in frames {
+                if writer.write_all(&frame).is_err() {
+                    let _ = writer.shutdown(Shutdown::Both);
+                    break;
+                }
+                written.fetch_sub(frame.len(), Ordering::Relaxed);
+                if let Some(owner) = owner {
+                    owner.fetch_sub(frame.len(), Ordering::Relaxed);
+                }
+            }
+        });
+        Ok(Self {
+            queue,
+            queued,
+            limit,
+            stream: stream.try_clone()?,
+        })
+    }
+
+    /// Queues a frame; a peer whose queue is full is cut off, since a
+    /// dropped frame would garble everything after it.
+    fn send(&self, frame: &Arc<[u8]>) {
+        if !(fits(&self.queued, frame.len(), self.limit)
+            && self.push(frame, None))
+        {
+            let _ = self.stream.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// Queues a client's frame for this host if it fits the client's
+    /// `share` of the queue (`held` counts the client's bytes not yet
+    /// written), so a client that floods a slow host overflows only its
+    /// own share. False when it does not fit; the caller then drops the
+    /// client.
+    fn offer(
+        &self,
+        frame: &Arc<[u8]>,
+        held: &Arc<AtomicUsize>,
+        share: usize,
+    ) -> bool {
+        fits(held, frame.len(), share) && self.push(frame, Some(held))
+    }
+
+    /// Queues a frame without a size check. Callers hold the rooms lock,
+    /// so only the writer runs alongside.
+    fn push(
+        &self,
+        frame: &Arc<[u8]>,
+        owner: Option<&Arc<AtomicUsize>>,
+    ) -> bool {
+        self.queued.fetch_add(frame.len(), Ordering::Relaxed);
+        if let Some(owner) = owner {
+            owner.fetch_add(frame.len(), Ordering::Relaxed);
+        }
+        self.queue.send((Arc::clone(frame), owner.cloned())).is_ok()
+    }
+
+    fn forward(&self, kind: u8, peer: PeerId, bytes: &[u8]) {
+        self.send(&relay_frame(kind, peer, bytes));
+    }
+}
+
+/// Whether `bytes` more fit beside `held` under `limit`. One frame larger
+/// than the limit still fits when nothing is held.
+fn fits(held: &AtomicUsize, bytes: usize, limit: usize) -> bool {
+    let held = held.load(Ordering::Relaxed);
+    held == 0 || held + bytes <= limit
+}
+
+/// A frame for [`RelayPeer::send`]. Relayed payloads are read at most
+/// `MAX_MESSAGE` long, so encoding cannot fail.
+fn relay_frame(kind: u8, peer: PeerId, bytes: &[u8]) -> Arc<[u8]> {
+    encode_frame(kind, peer, bytes).unwrap_or_default().into()
+}
+
 struct RelayRoom {
-    host: TcpStream,
-    clients: BTreeMap<PeerId, TcpStream>,
+    host: RelayPeer,
+    clients: BTreeMap<PeerId, RelayPeer>,
     next: PeerId,
     /// The host's world seed, sent in each WELCOME.
     seed: Option<u64>,
@@ -1067,10 +1209,11 @@ fn relay_connection(
     mut stream: TcpStream,
     rooms: &Rooms,
     token: &str,
-    bytes_per_second: u64,
+    limits: &RelayLimits,
+    slot: &AdmissionSlot,
 ) {
-    // Kept after the handshake: a peer that stops reading cannot hold the
-    // room lock for longer than this.
+    // Only the writer thread blocks on a peer that stops reading, and only
+    // this long.
     let _ = stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
     let _ = stream.set_nodelay(true);
     let Ok((kind, _, payload)) = read_handshake(&stream) else {
@@ -1087,45 +1230,63 @@ fn relay_connection(
         } else {
             Err("wrong relay token".to_owned())
         }
+    })
+    .and_then(|code| {
+        if slot.room_attempt(limits.room_attempts_per_minute) {
+            Ok(code)
+        } else {
+            Err("too many rooms opened or joined; wait a minute".to_owned())
+        }
     });
     let code = match request {
         Ok(code) => code,
         Err(reason) => {
-            let _ = write_frame(&mut stream, REJECT, HOST, reason.as_bytes());
+            reject(&mut stream, &reason);
             return;
         }
     };
-    let throttle = Throttle::new(bytes_per_second);
-    match code {
-        None => relay_host(stream, rooms, throttle),
-        Some(code) => relay_client(stream, rooms, code, throttle),
+    if !limits.idle_timeout.is_zero() {
+        let _ = stream.set_read_timeout(Some(limits.idle_timeout));
     }
-}
-
-/// Writes a forwarded frame; a peer that cannot take it whole is cut off,
-/// since a half-written frame would garble everything after it.
-fn forward(stream: &mut TcpStream, kind: u8, peer: PeerId, bytes: &[u8]) {
-    if write_frame(stream, kind, peer, bytes).is_err() {
-        let _ = stream.shutdown(Shutdown::Both);
-    }
-}
-
-fn relay_host(mut stream: TcpStream, rooms: &Rooms, mut throttle: Throttle) {
-    let Ok(writer) = stream.try_clone() else {
+    let Ok(peer) = RelayPeer::new(&stream, limits.send_queue) else {
         return;
     };
+    let throttle = Throttle::new(limits.bytes_per_second);
+    match code {
+        None => relay_host(stream, peer, rooms, limits, throttle),
+        Some(code) => relay_client(stream, peer, rooms, limits, code, throttle),
+    }
+}
+
+fn reject(stream: &mut TcpStream, reason: &str) {
+    let _ = write_frame(stream, REJECT, HOST, reason.as_bytes());
+}
+
+fn relay_host(
+    mut stream: TcpStream,
+    peer: RelayPeer,
+    rooms: &Rooms,
+    limits: &RelayLimits,
+    mut throttle: Throttle,
+) {
     let code = {
         let mut rooms = rooms.lock().unwrap();
+        if rooms.len() >= limits.max_rooms {
+            drop(rooms);
+            reject(&mut stream, "relay is full");
+            return;
+        }
         let code = loop {
             let code = room_code();
             if !rooms.contains_key(&code) {
                 break code;
             }
         };
+        peer.forward(ROOM, HOST, code.as_bytes());
         rooms.insert(
             code.clone(),
             RelayRoom {
-                host: writer,
+                host: peer,
                 clients: BTreeMap::new(),
                 next: HOST + 1,
                 seed: None,
@@ -1133,64 +1294,77 @@ fn relay_host(mut stream: TcpStream, rooms: &Rooms, mut throttle: Throttle) {
         );
         code
     };
-    if write_frame(&mut stream, ROOM, HOST, code.as_bytes()).is_ok() {
-        while let Ok((kind, to, bytes)) = read_frame(&mut stream, MAX_MESSAGE) {
-            throttle.spend(9 + bytes.len());
-            if kind != DATA && kind != SEED {
-                continue;
-            }
-            let mut rooms = rooms.lock().unwrap();
-            let Some(room) = rooms.get_mut(&code) else {
-                break;
-            };
-            if kind == SEED {
-                room.seed = bytes.try_into().ok().map(u64::from_le_bytes);
-                continue;
-            }
-            for (&peer, client) in &mut room.clients {
-                if to == EVERYONE || to == peer {
-                    forward(client, DATA, HOST, &bytes);
-                }
+    while let Ok((kind, to, bytes)) =
+        read_frame(&mut stream, throttle.largest())
+    {
+        if !throttle.spend(9 + bytes.len()) {
+            break;
+        }
+        if kind != DATA && kind != SEED {
+            continue;
+        }
+        let mut rooms = rooms.lock().unwrap();
+        let Some(room) = rooms.get_mut(&code) else {
+            break;
+        };
+        if kind == SEED {
+            room.seed = bytes.try_into().ok().map(u64::from_le_bytes);
+            continue;
+        }
+        let frame = relay_frame(DATA, HOST, &bytes);
+        for (&peer, client) in &room.clients {
+            if to == EVERYONE || to == peer {
+                client.send(&frame);
             }
         }
     }
     // The room ends with its host.
     if let Some(room) = rooms.lock().unwrap().remove(&code) {
         for client in room.clients.values() {
-            let _ = client.shutdown(Shutdown::Both);
+            let _ = client.stream.shutdown(Shutdown::Both);
         }
     }
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 fn relay_client(
     mut stream: TcpStream,
+    me: RelayPeer,
     rooms: &Rooms,
+    limits: &RelayLimits,
     code: String,
     mut throttle: Throttle,
 ) {
-    let Ok(writer) = stream.try_clone() else {
-        return;
-    };
+    // This client's bytes waiting in the host's queue, and its share.
+    let held = Arc::new(AtomicUsize::new(0));
+    let share = limits.send_queue / limits.max_clients_per_room.max(1);
     let peer = {
         let mut rooms = rooms.lock().unwrap();
-        let Some(room) = rooms.get_mut(&code) else {
-            drop(rooms);
-            let reason = format!("no room {code}");
-            let _ = write_frame(&mut stream, REJECT, HOST, reason.as_bytes());
-            return;
+        let refused = match rooms.get(&code) {
+            None => Some(format!("no room {code}")),
+            Some(room) if room.clients.len() >= limits.max_clients_per_room => {
+                Some("room is full".to_owned())
+            }
+            Some(_) => None,
         };
-        let peer = room.next;
-        room.next += 1;
-        let welcome = welcome_payload(None, room.seed);
-        if write_frame(&mut stream, WELCOME, peer, &welcome).is_err() {
+        if let Some(reason) = refused {
+            drop(rooms);
+            reject(&mut stream, &reason);
             return;
         }
-        forward(&mut room.host, JOINED, peer, &[]);
-        room.clients.insert(peer, writer);
+        let room = rooms.get_mut(&code).unwrap();
+        let peer = room.next;
+        room.next += 1;
+        me.forward(WELCOME, peer, &welcome_payload(None, room.seed));
+        room.host.push(&relay_frame(JOINED, peer, &[]), None);
+        room.clients.insert(peer, me);
         peer
     };
-    while let Ok((kind, _, bytes)) = read_frame(&mut stream, MAX_MESSAGE) {
-        throttle.spend(9 + bytes.len());
+    while let Ok((kind, _, bytes)) = read_frame(&mut stream, throttle.largest())
+    {
+        if !throttle.spend(9 + bytes.len()) {
+            break;
+        }
         if kind != DATA {
             continue;
         }
@@ -1198,12 +1372,19 @@ fn relay_client(
         let Some(room) = rooms.get_mut(&code) else {
             break;
         };
-        forward(&mut room.host, DATA, peer, &bytes);
+        // A host behind on reading drops the sender, not the room.
+        if !room
+            .host
+            .offer(&relay_frame(DATA, peer, &bytes), &held, share)
+        {
+            break;
+        }
     }
+    let _ = stream.shutdown(Shutdown::Both);
     let mut rooms = rooms.lock().unwrap();
     if let Some(room) = rooms.get_mut(&code) {
         room.clients.remove(&peer);
-        forward(&mut room.host, LEFT, peer, &[]);
+        room.host.push(&relay_frame(LEFT, peer, &[]), None);
     }
 }
 
@@ -1388,6 +1569,10 @@ fn write_frame(
     peer: PeerId,
     payload: &[u8],
 ) -> io::Result<()> {
+    stream.write_all(&encode_frame(kind, peer, payload)?)
+}
+
+fn encode_frame(kind: u8, peer: PeerId, payload: &[u8]) -> io::Result<Vec<u8>> {
     if payload.len() > MAX_MESSAGE {
         return Err(invalid("message is larger than MAX_MESSAGE"));
     }
@@ -1396,7 +1581,7 @@ fn write_frame(
     frame.push(kind);
     frame.extend(peer.to_le_bytes());
     frame.extend(payload);
-    stream.write_all(&frame)
+    Ok(frame)
 }
 
 fn read_frame(
@@ -2000,16 +2185,155 @@ mod tests {
     }
 
     #[test]
-    fn a_throttle_holds_a_reader_to_its_rate() {
+    fn a_throttle_allows_one_seconds_burst_then_refuses() {
         let mut throttle = Throttle::new(100_000);
+        assert!(throttle.spend(100_000));
+        assert!(!throttle.spend(30_000));
+        // No cap at all.
+        assert!(Throttle::new(0).spend(usize::MAX));
+    }
+
+    #[test]
+    fn a_relay_drops_a_sender_over_its_rate() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = listener.local_addr().unwrap();
+        let limits = RelayLimits {
+            bytes_per_second: 2000,
+            ..RelayLimits::default()
+        };
+        std::thread::spawn(move || run_relay_with(listener, "", limits));
+        let host = NetSession::host_room(relay, "").unwrap();
+        let code = host.room_code().unwrap().to_owned();
+        let client = NetSession::join_room(relay, &code, "").unwrap();
+        assert_eq!(wait(&host, 1), [NetEvent::Connected(1)]);
+        client.send(HOST, &[7; 1000]).unwrap();
+        client.send(HOST, &[7; 1500]).unwrap();
+        let events = wait(&host, 2);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[1], NetEvent::Disconnected(1));
+        // A message larger than one burst is refused before it is buffered.
+        let client = NetSession::join_room(relay, &code, "").unwrap();
+        assert_eq!(wait(&host, 1), [NetEvent::Connected(2)]);
+        client.send(HOST, &[7; 4000]).unwrap();
+        assert_eq!(wait(&host, 1), [NetEvent::Disconnected(2)]);
+    }
+
+    #[test]
+    fn a_relay_caps_rooms_clients_and_room_attempts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = listener.local_addr().unwrap();
+        let limits = RelayLimits {
+            max_rooms: 1,
+            max_clients_per_room: 1,
+            room_attempts_per_minute: 4,
+            ..RelayLimits::default()
+        };
+        std::thread::spawn(move || run_relay_with(listener, "", limits));
+        let host = NetSession::host_room(relay, "").unwrap();
+        let code = host.room_code().unwrap().to_owned();
+        let error = NetSession::host_room(relay, "").err().unwrap();
+        assert!(error.to_string().contains("full"), "{error}");
+        let _client = NetSession::join_room(relay, &code, "").unwrap();
+        let error = NetSession::join_room(relay, &code, "").err().unwrap();
+        assert!(error.to_string().contains("full"), "{error}");
+        // Four room opens and joins this minute were used; the fifth is
+        // refused before it reaches a room.
+        let error = NetSession::join_room(relay, "NOROOM", "").err().unwrap();
+        assert!(!error.to_string().contains("no room"), "{error}");
+    }
+
+    #[test]
+    fn a_relay_closes_a_connection_idle_after_its_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = listener.local_addr().unwrap();
+        let limits = RelayLimits {
+            idle_timeout: Duration::from_millis(200),
+            ..RelayLimits::default()
+        };
+        std::thread::spawn(move || run_relay_with(listener, "", limits));
+        let host = NetSession::host_room(relay, "").unwrap();
+        assert_eq!(wait(&host, 1), [NetEvent::Closed]);
+    }
+
+    #[test]
+    fn a_peer_that_stops_reading_stalls_only_itself() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = listener.local_addr().unwrap();
+        let limits = RelayLimits {
+            bytes_per_second: 0,
+            send_queue: 256 << 10,
+            ..RelayLimits::default()
+        };
+        std::thread::spawn(move || run_relay_with(listener, "", limits));
+        // Room A: a client that joins and then never reads.
+        let flooder = NetSession::host_room(relay, "").unwrap();
+        let code = flooder.room_code().unwrap().to_owned();
+        let stuck = TcpStream::connect(relay).unwrap();
+        request_join(&stuck, &code, "").unwrap();
+        assert_eq!(wait(&flooder, 1), [NetEvent::Connected(1)]);
+        // Room B: an ordinary pair.
+        let host = NetSession::host_room(relay, "").unwrap();
+        let code = host.room_code().unwrap().to_owned();
+        let client = NetSession::join_room(relay, &code, "").unwrap();
+        assert_eq!(wait(&host, 1), [NetEvent::Connected(1)]);
+        // Far more than the stuck client's socket buffers hold.
+        let flood = std::thread::spawn(move || {
+            for _ in 0..400 {
+                if flooder.send(EVERYONE, &[1; 64 << 10]).is_err() {
+                    break;
+                }
+            }
+            flooder
+        });
+        std::thread::sleep(Duration::from_millis(300));
         let start = Instant::now();
-        // One second's burst passes at once; the rest waits.
-        throttle.spend(100_000);
-        assert!(start.elapsed() < Duration::from_millis(100));
-        throttle.spend(30_000);
-        let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(250), "{elapsed:?}");
-        assert!(elapsed < Duration::from_millis(600), "{elapsed:?}");
+        client.send(HOST, b"hi").unwrap();
+        assert_eq!(wait(&host, 1), [message(1, "hi")]);
+        assert!(start.elapsed() < Duration::from_millis(500));
+        // The stuck client was cut off once its queue filled.
+        let flooder = flood.join().unwrap();
+        let events = wait(&flooder, 1);
+        assert_eq!(events, [NetEvent::Disconnected(1)]);
+        drop(stuck);
+    }
+
+    #[test]
+    fn a_client_flooding_a_slow_host_is_cut_off_not_the_room_or_others() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = listener.local_addr().unwrap();
+        let limits = RelayLimits {
+            bytes_per_second: 0,
+            send_queue: 256 << 10,
+            max_clients_per_room: 4,
+            ..RelayLimits::default()
+        };
+        std::thread::spawn(move || run_relay_with(listener, "", limits));
+        // A host that opens a room and then never reads.
+        let mut host = TcpStream::connect(relay).unwrap();
+        write_frame(
+            &mut host,
+            HOST_ROOM,
+            HOST,
+            &PROTOCOL_VERSION.to_le_bytes(),
+        )
+        .unwrap();
+        let (kind, _, code) = read_handshake(&host).unwrap();
+        assert_eq!(kind, ROOM);
+        let code = String::from_utf8(code).unwrap();
+        let honest = NetSession::join_room(relay, &code, "").unwrap();
+        let flooder = NetSession::join_room(relay, &code, "").unwrap();
+        for _ in 0..400 {
+            if flooder.send(HOST, &[1; 64 << 10]).is_err() {
+                break;
+            }
+        }
+        assert_eq!(wait(&flooder, 1), [NetEvent::Closed]);
+        // A client within its share of the host's queue stays, and the
+        // room is still open.
+        honest.send(HOST, &[2; 64 << 10]).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(honest.poll(), []);
+        NetSession::join_room(relay, &code, "").unwrap();
     }
 
     #[test]

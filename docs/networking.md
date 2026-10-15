@@ -801,10 +801,20 @@ bytes gives up after 30 seconds.
   path. Do not send other secrets.
 - The relay limits each IP address to 16 open connections and 60 new
   connections a minute (failed ones count, which slows token guessing),
-  caps everyone together at 1024 connections, and reads at most 1 MiB/s
-  from each connection. Still use a long random token. To change the
-  limits, run the relay from Rust with `net::run_relay_with(listener,
-  token, RelayLimits { .. })`.
+  caps everyone together at 1024 connections, and cuts off a connection
+  that sends more than 1 MiB/s (one second's worth may come in a burst).
+  It holds at most 256 rooms and 64 clients in a room, lets one address
+  open or join 30 rooms a minute (refused attempts count, which slows room
+  code guessing), and closes a connection that sends nothing for 10
+  minutes after its handshake. Each connection has its own send queue of
+  1 MiB; a peer that stops reading is cut off when its queue fills, and
+  never slows anyone else. A host's queue is split into equal
+  shares, one per client slot; a client that sends faster than its host
+  reads is cut off when its share fills, and the host and other clients
+  stay. A message larger than one second's rate is
+  refused, so raise `bytes_per_second` to relay bigger ones. Still use a long random token. To
+  change the limits, run the relay from Rust with
+  `net::run_relay_with(listener, token, RelayLimits { .. })`.
 - One player who connects and then sends nothing does not hold up anyone
   else's join; each handshake runs on its own thread and must finish
   within 5 seconds. The relay counts an IPv6 /64 as one address.

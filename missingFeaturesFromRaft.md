@@ -50,6 +50,21 @@ not dropped.
 - Wanted: those limits in `run_relay`, so games can use `NetSession::host_room` /
   `join_room` directly.
 
+Status: done (this commit, tests: `a_peer_that_stops_reading_stalls_only_itself`,
+`a_relay_caps_rooms_clients_and_room_attempts`, `a_relay_drops_a_sender_over_its_rate`,
+`a_relay_closes_a_connection_idle_after_its_handshake`,
+`a_throttle_allows_one_seconds_burst_then_refuses`,
+`a_client_flooding_a_slow_host_is_cut_off_not_the_room_or_others`). Each relay connection writes through
+its own bounded queue and writer thread (`RelayPeer`), so nothing touches a socket under the
+rooms lock; `RelayLimits` gains `max_rooms`, `max_clients_per_room`,
+`room_attempts_per_minute` (per address, refused attempts count), `idle_timeout` and
+`send_queue` (bytes); a sender over `bytes_per_second`, or a message larger than one second
+of it, is dropped. Each client holds at most `send_queue / max_clients_per_room` of its host's queue; a client
+over its share is dropped, not the host or other clients. Known limit: without a token, 16
+addresses (16 connections each) can hold all 256 rooms; run a public relay with a token. Passed: `cargo fmt --all --check`,
+clippy default / `--no-default-features` / `--features gpu-tests` with `-D warnings`,
+`cargo test --workspace`, and the locked `--features gpu-tests` run.
+
 ### Scenario step for the mouse wheel
 
 Scenario steps (`StepAction`, `src/scenario.rs:1046`) can move the pointer, click a
