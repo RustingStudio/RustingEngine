@@ -4270,6 +4270,7 @@ mod tests {
             frames.push(ReplayFrame {
                 tick,
                 delta_nanos: 16_000_000,
+                real_nanos: None,
                 input: input.cloned(),
             });
         };

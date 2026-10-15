@@ -37,6 +37,10 @@ pub struct ReplayFrame {
     pub tick: u64,
     /// Real time the frame advanced the clock by.
     pub delta_nanos: u64,
+    /// [`FrameTime::real_delta`] when it differs from the clock's delta
+    /// (slow motion under overload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real_nanos: Option<u64>,
     /// Input the frame's systems saw; `None` when it equals the previous
     /// frame's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,12 +70,20 @@ impl ReplayRecorder {
     }
 
     /// Before the frame's systems run.
-    pub(super) fn frame_start(&mut self, world: &World, delta: Duration) {
+    pub(super) fn frame_start(
+        &mut self,
+        world: &World,
+        delta: Duration,
+        real: Duration,
+    ) {
+        let nanos =
+            |d: Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
         let input = world.get_resource::<RuntimeInput>();
         let changed = input != self.last_input.as_ref();
         self.replay.frames.push(ReplayFrame {
             tick: world.resource::<FrameTime>().fixed_tick,
-            delta_nanos: u64::try_from(delta.as_nanos()).unwrap_or(u64::MAX),
+            delta_nanos: nanos(delta),
+            real_nanos: (real != delta).then(|| nanos(real)),
             input: input.filter(|_| changed).cloned(),
         });
         if changed {
@@ -180,7 +192,10 @@ fn play_frame(
         current.clone_from(input);
     }
     let report = app
-        .update_exact(Duration::from_nanos(frame.delta_nanos))
+        .update_timed(
+            Duration::from_nanos(frame.delta_nanos),
+            Duration::from_nanos(frame.real_nanos.unwrap_or(frame.delta_nanos)),
+        )
         .map_err(ReplayError::App)?;
     Ok(app
         .world()

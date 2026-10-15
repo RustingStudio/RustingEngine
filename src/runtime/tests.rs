@@ -148,6 +148,10 @@ fn fixed_steps_slower_than_real_time_fall_back_to_slow_motion() {
         .collect::<Vec<_>>();
     assert_eq!(steps[0], 4);
     assert_eq!(steps[4..], [1, 1], "one step per frame: {steps:?}");
+    // Game time slows down, but `real_delta` stays real time.
+    let time = *app.world().resource::<FrameTime>();
+    assert_eq!(time.delta, Duration::from_millis(1));
+    assert_eq!(time.real_delta, Duration::from_millis(50));
 }
 
 fn slow(_: ResMut<Counts>) {

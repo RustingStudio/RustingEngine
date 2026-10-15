@@ -738,7 +738,8 @@ impl App {
     /// debug build, too many bodies), catching up would make every frame
     /// slower than the last. The frame after such a frame counts as one
     /// fixed step long, so the game runs in slow motion instead of
-    /// freezing, and a warning is printed once.
+    /// freezing, and a warning is printed once. [`FrameTime::real_delta`]
+    /// still reads the unclamped `real_delta`.
     pub fn update(
         &mut self,
         real_delta: Duration,
@@ -746,7 +747,7 @@ impl App {
         let control = self.world.resource::<TimeControl>();
         // Clamped before recording, so a replay steps the same way. One
         // fixed step of scaled time, whatever `time_scale` is.
-        let real_delta = match control.time_scale {
+        let clock_delta = match control.time_scale {
             scale if self.overloaded && scale > 0.0 && scale.is_finite() => {
                 // A tiny scale overflows `Duration`; no clamp is needed then.
                 Duration::try_from_secs_f64(
@@ -756,7 +757,7 @@ impl App {
             }
             _ => real_delta,
         };
-        self.update_exact(real_delta)
+        self.update_timed(clock_delta, real_delta)
     }
 
     /// [`Self::update`] without the slow-motion clamp. Replay uses it: the
@@ -764,6 +765,16 @@ impl App {
     /// overloaded must not change how a replay steps.
     pub(crate) fn update_exact(
         &mut self,
+        real_delta: Duration,
+    ) -> Result<FrameReport, AppError> {
+        self.update_timed(real_delta, real_delta)
+    }
+
+    /// Advances the clock by `clock_delta` and shows `real_delta` as
+    /// [`FrameTime::real_delta`].
+    pub(crate) fn update_timed(
+        &mut self,
+        clock_delta: Duration,
         real_delta: Duration,
     ) -> Result<FrameReport, AppError> {
         let fixed_delta = self.world.resource::<TimeControl>().fixed_delta;
@@ -777,9 +788,10 @@ impl App {
         }
 
         if let Some(recorder) = &mut self.replay_recorder {
-            recorder.frame_start(&self.world, real_delta);
+            recorder.frame_start(&self.world, clock_delta, real_delta);
         }
-        let fixed_steps = time::advance(&mut self.world, real_delta)?;
+        let fixed_steps = time::advance(&mut self.world, clock_delta)?;
+        self.world.resource_mut::<FrameTime>().real_delta = real_delta;
         let start = Instant::now();
         // `advance` counts the frame's steps at once; each step sees the
         // ticks completed before it, so tick-indexed values differ per tick.

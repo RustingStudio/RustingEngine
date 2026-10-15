@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `FrameTime::real_delta` reads the real frame time again while an overloaded app runs in slow motion; only the game clock is clamped to one fixed step. Replays record the real delta beside the clamped one (`ReplayFrame::real_nanos`) (RAFT).
+
 ## [2.5.6] - 2026-10-14
 
 ### Added
