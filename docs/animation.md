@@ -416,6 +416,9 @@ them.
 
 - A clip writes its tracks every tick it plays, after `rusting.tween`. Do
   not animate the same property with both.
-- A crossfade blends matching tracks of the old and new clip. Tracks only
-  the old clip has hold their last value until the fade ends.
+- A crossfade blends matching tracks of the old and new clip. A
+  `Position`, `Rotation`, `Scale` or `Orientation` track only the old clip
+  has eases back to the value it had before the player first animated it,
+  and is left there; other tracks only the old clip has hold their last
+  value.
 - Stopping holds the pose. Playing the clip again starts it over.

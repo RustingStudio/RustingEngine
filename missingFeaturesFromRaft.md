@@ -150,6 +150,15 @@ stays where the old clip left it.
 - Wanted: nlerp or slerp with a shortest-path sign flip for Orientation in `sample` and
   `mix`, and a crossfade that eases tracks only one side has back to rest.
 
+Status: done (this commit, tests: `orientation_blends_take_the_short_way_round`,
+`a_crossfade_eases_tracks_the_new_clip_leaves_back_to_rest`). `sample` (Linear and Smooth),
+`mix` and override layers nlerp Orientation after flipping the far key to the near sign.
+`AnimationPlayer` records each Position / Rotation / Scale / Orientation value before it
+first writes it, and a crossfade blends a track only the old clip keys toward that rest
+value, ending on it. Tracks only the new clip keys still start at full weight. Passed:
+`cargo fmt --all --check`, clippy default / `--no-default-features` / `--features gpu-tests`
+with `-D warnings`, `cargo test --workspace`, and the locked `--features gpu-tests` run.
+
 ## Features for v2 (checked against RustingEngine 2.5.6)
 
 What the v2 plan (`docs/superpowers/specs/2026-10-14-rusting-raft-v2-design.md`) needs.

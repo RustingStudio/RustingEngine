@@ -245,16 +245,24 @@ impl AnimationTrack {
         let width = a.value.len().min(b.value.len());
         Some(match self.interpolation {
             Interpolation::Step => a.value.clone(),
-            Interpolation::Linear => lerp(&a.value, &b.value, u),
+            Interpolation::Linear => {
+                blend(&self.property, &a.value, &b.value, u)
+            }
             Interpolation::Smooth => {
-                let p0 = &keys[next.saturating_sub(2)].value;
-                let p3 = &keys[(next + 1).min(last)].value;
+                let b = near(&self.property, &a.value, &b.value);
+                let p0 = near(
+                    &self.property,
+                    &a.value,
+                    &keys[next.saturating_sub(2)].value,
+                );
+                let p3 =
+                    near(&self.property, &b, &keys[(next + 1).min(last)].value);
                 (0..width)
                     .map(|i| {
                         let at = |v: &Vec<f32>| {
                             v.get(i).copied().unwrap_or(a.value[i])
                         };
-                        catmull_rom(at(p0), a.value[i], b.value[i], at(p3), u)
+                        catmull_rom(at(&p0), a.value[i], b[i], at(&p3), u)
                     })
                     .collect()
             }
@@ -264,6 +272,27 @@ impl AnimationTrack {
 
 fn lerp(a: &[f32], b: &[f32], u: f32) -> Vec<f32> {
     a.iter().zip(b).map(|(a, b)| a + (b - a) * u).collect()
+}
+
+/// `lerp` that turns an `Orientation` the short way round.
+fn blend(
+    property: &AnimationProperty,
+    a: &[f32],
+    b: &[f32],
+    u: f32,
+) -> Vec<f32> {
+    lerp(a, &near(property, a, b), u)
+}
+
+/// `b`, negated when it is an `Orientation` on the far side of `a`: q and
+/// -q are the same turn, and only the near one blends without a spin.
+fn near(property: &AnimationProperty, a: &[f32], b: &[f32]) -> Vec<f32> {
+    let dot: f32 = a.iter().zip(b).map(|(a, b)| a * b).sum();
+    if *property == AnimationProperty::Orientation && dot < 0.0 {
+        b.iter().map(|v| -v).collect()
+    } else {
+        b.to_vec()
+    }
 }
 
 fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, u: f32) -> f32 {
@@ -455,6 +484,9 @@ pub struct AnimationPlayer {
     pub root_delta: [f32; 3],
     /// Root motion gathered since game code last took it.
     pub root_motion: [f32; 3],
+    /// Each animated transform value from before this player first wrote
+    /// it, for crossfades to ease tracks the new clip leaves back to.
+    rest: Vec<Write>,
 }
 
 /// Sent when a playing clip passes one of its markers. Delivered in tick
@@ -473,6 +505,7 @@ pub struct AnimationEvent {
     pub name: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 struct Write {
     target: String,
     property: AnimationProperty,
@@ -542,10 +575,10 @@ fn pose(animation: &Animation, clip: &AnimationClip, t: f32) -> Vec<Write> {
         }
         total += weight;
         let mut next = sample(child);
-        mix(&mut next, std::mem::take(&mut mixed), weight / total);
+        mix(&mut next, std::mem::take(&mut mixed), weight / total, &[]);
         mixed = next;
     }
-    mix(&mut writes, mixed, 1.0);
+    mix(&mut writes, mixed, 1.0, &[]);
     writes
 }
 
@@ -586,16 +619,20 @@ fn band_weights<'a>(
     weights
 }
 
-/// Blends `from` into `writes` by `weight` (1 keeps `writes`), and keeps
-/// writes only one side has.
-fn mix(writes: &mut Vec<Write>, from: Vec<Write>, weight: f32) {
-    for from in from {
-        let to = writes
-            .iter_mut()
-            .find(|w| w.target == from.target && w.property == from.property);
-        match to {
-            Some(to) => to.value = lerp(&from.value, &to.value, weight),
-            None => writes.push(from),
+/// Blends `from` into `writes` by `weight` (1 keeps `writes`). A write only
+/// `from` has blends toward its `rest` value, or is kept without one;
+/// writes only `writes` has are kept.
+fn mix(writes: &mut Vec<Write>, from: Vec<Write>, weight: f32, rest: &[Write]) {
+    for mut from in from {
+        let p = &from.property;
+        match writes.iter_mut().find(|w| same(w, &from)) {
+            Some(to) => to.value = blend(p, &from.value, &to.value, weight),
+            None => {
+                if let Some(rest) = rest.iter().find(|r| same(r, &from)) {
+                    from.value = blend(p, &from.value, &rest.value, weight);
+                }
+                writes.push(from);
+            }
         }
     }
 }
@@ -661,6 +698,7 @@ pub fn step_animations(world: &mut World, dt: f32, tick: u64) {
     steps.sort_by_key(|step| step.0);
     for (_, entity, writes, events) in steps {
         for write in writes {
+            keep_rest(world, entity, &write);
             apply(world, entity, write);
         }
         move_root(world, entity, dt);
@@ -780,7 +818,8 @@ fn advance(
             for write in layered {
                 match writes.iter_mut().find(|w| same(w, &write)) {
                     Some(to) => {
-                        to.value = lerp(&to.value, &write.value, weight)
+                        to.value =
+                            blend(&to.property, &to.value, &write.value, weight)
                     }
                     None => writes.push(write),
                 }
@@ -962,7 +1001,8 @@ fn advance_state(
             };
             player.fading = Some((old, done, length));
             let (t, _) = old_clip.local_time(old.elapsed);
-            mix(&mut writes, pose(animation, old_clip, t), weight);
+            let old = pose(animation, old_clip, t);
+            mix(&mut writes, old, weight, &player.rest);
         }
         if weight >= 1.0 {
             player.fading = None;
@@ -1075,6 +1115,40 @@ pub(crate) fn is_step(child: &str, parent: Option<&str>, step: &str) -> bool {
                 .and_then(|rest| rest.strip_prefix('/'))
                 == Some(step)
         })
+}
+
+/// Records the transform value `write` is about to replace, the first time
+/// the player at `root` writes that track.
+fn keep_rest(world: &mut World, root: Entity, write: &Write) {
+    let known = world
+        .get::<AnimationPlayer>(root)
+        .is_none_or(|player| player.rest.iter().any(|r| same(r, write)));
+    let target = find_target(world, root, &write.target);
+    let Some(transform) = target
+        .filter(|_| !known)
+        .and_then(|t| world.get::<Transform>(t))
+    else {
+        return;
+    };
+    let value = match write.property {
+        AnimationProperty::Position => transform.position.to_vec(),
+        AnimationProperty::Rotation => transform.rotation.to_vec(),
+        AnimationProperty::Scale => transform.scale.to_vec(),
+        AnimationProperty::Orientation => {
+            let [roll, pitch, yaw] = transform.rotation;
+            let q =
+                nalgebra::UnitQuaternion::from_euler_angles(roll, pitch, yaw);
+            vec![q.i, q.j, q.k, q.w]
+        }
+        _ => return,
+    };
+    let rest = Write {
+        value,
+        ..write.clone()
+    };
+    if let Some(mut player) = world.get_mut::<AnimationPlayer>(root) {
+        player.rest.push(rest);
+    }
 }
 
 fn apply(world: &mut World, root: Entity, write: Write) {
@@ -1376,6 +1450,71 @@ mod tests {
         world.get_mut::<Transform>(door).unwrap().position[0] = 3.0;
         run(&mut world, 14..16);
         assert_eq!(world.get::<Transform>(door).unwrap().position[0], 3.0);
+    }
+
+    #[test]
+    fn orientation_blends_take_the_short_way_round() {
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        // -(90 degrees about Y): the same turn as +90, other sign.
+        let quarter: &[f32] = &[0.0, -half, 0.0, -half];
+        let eighth = nalgebra::UnitQuaternion::from_axis_angle(
+            &nalgebra::Vector3::y_axis(),
+            std::f32::consts::FRAC_PI_4,
+        );
+        let is_eighth = |v: &[f32]| {
+            let q = nalgebra::Quaternion::new(v[3], v[0], v[1], v[2]);
+            (q.normalize().dot(eighth.quaternion()).abs() - 1.0).abs() < 1e-4
+        };
+        let mut t = track(
+            AnimationProperty::Orientation,
+            &[(0.0, &[0.0, 0.0, 0.0, 1.0]), (1.0, quarter)],
+        );
+        assert!(is_eighth(&t.sample(0.5).unwrap()));
+        t.interpolation = Interpolation::Smooth;
+        assert!(is_eighth(&t.sample(0.5).unwrap()));
+        let write = |value: &[f32]| Write {
+            target: String::new(),
+            property: AnimationProperty::Orientation,
+            value: value.to_vec(),
+        };
+        let mut writes = vec![write(quarter)];
+        mix(&mut writes, vec![write(&[0.0, 0.0, 0.0, 1.0])], 0.5, &[]);
+        assert!(is_eighth(&writes[0].value));
+    }
+
+    #[test]
+    fn a_crossfade_eases_tracks_the_new_clip_leaves_back_to_rest() {
+        let (mut world, door) = world_with(Animation {
+            clips: vec![
+                clip(
+                    "lift",
+                    TweenRepeat::Loop,
+                    vec![track(
+                        AnimationProperty::Position,
+                        &[(0.0, &[0.0, 2.0, 0.0]), (1.0, &[0.0, 2.0, 0.0])],
+                    )],
+                ),
+                clip(
+                    "grow",
+                    TweenRepeat::Loop,
+                    vec![track(
+                        AnimationProperty::Scale,
+                        &[(0.0, &[2.0, 2.0, 2.0]), (1.0, &[2.0, 2.0, 2.0])],
+                    )],
+                ),
+            ],
+            autoplay: "lift".into(),
+            ..Animation::default()
+        });
+        run(&mut world, 0..3);
+        assert_eq!(world.get::<Transform>(door).unwrap().position[1], 2.0);
+        world.get_mut::<Animation>(door).unwrap().command =
+            Some(AnimationCommand::Crossfade("grow".into(), 1.0));
+        run(&mut world, 3..8);
+        let y = world.get::<Transform>(door).unwrap().position[1];
+        assert!((y - 1.0).abs() < 1e-4, "{y}");
+        run(&mut world, 8..14);
+        assert_eq!(world.get::<Transform>(door).unwrap().position[1], 0.0);
     }
 
     #[test]
