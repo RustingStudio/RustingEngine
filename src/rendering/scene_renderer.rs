@@ -7660,14 +7660,15 @@ impl SceneRenderer {
                 .unwrap_or(sway.amplitude);
             normal[1][3] = sway.frequency;
             normal[2][3] = sway.height;
-            // A water surface's waves take the sway's place: no lean, the
-            // first wave and the wave count.
+            // A water surface's waves take the sway's place: its crest foam,
+            // the first wave and the wave count.
             let waves = water_waves
                 .binary_search_by_key(&renderable.entity, |slot| slot.0)
                 .ok()
                 .map(|at| water_waves[at]);
             if let Some((_, first, count, _)) = waves {
-                normal[0][3] = 0.0;
+                normal[0][3] =
+                    material.map_or(0.0, |material| material.water.crest_foam);
                 normal[1][3] = first as f32;
                 normal[2][3] = count as f32;
             }
@@ -8906,8 +8907,6 @@ fn compact_visible(
     (list, ranges, blended)
 }
 
-/// `bounds` widened sideways by their height above the origin, so a foliage
-/// copy leaned up to 45 degrees in the vertex shader stays inside them.
 /// A water surface's entity, first wave and wave count in the frame's wave
 /// buffer, and how far its waves reach up and sideways in metres.
 type WaterWaveSlot = (bevy_ecs::entity::Entity, u32, u32, [f32; 2]);
@@ -8948,6 +8947,8 @@ fn wave_room(bounds: RenderBounds, [up, side]: [f32; 2]) -> RenderBounds {
     }
 }
 
+/// `bounds` widened sideways by their height above the origin, so a foliage
+/// copy leaned up to 45 degrees in the vertex shader stays inside them.
 fn lean_room(bounds: RenderBounds) -> RenderBounds {
     match bounds {
         RenderBounds::Aabb { mut min, mut max } => {
@@ -12512,6 +12513,7 @@ layout(location = 8) flat out vec4 v_transmission;
 layout(location = 9) flat out vec4 v_splat_scale;
 layout(location = 10) flat out vec3 v_tint;
 layout(location = 11) flat out vec4 v_water;
+layout(location = 12) out float v_crest;
 // Index into render_instances from the per-frame visible list.
 layout(location = 4) in uint instance_index;
 // Wind sway: `Foliage` copies and swaying materials carry their lean per
@@ -12544,13 +12546,18 @@ vec2 sway_bend(float y, float height) {
 }
 // Gerstner waves of water surfaces (`physics.w` bit 3), two vec4s each:
 // direction xz, wavenumber, height; then steepness and travelled phase.
-// The instance's normal[1].w is its first wave, normal[2].w the count.
+// The instance's normal[0].w is its crest foam, normal[1].w its first wave
+// and normal[2].w the count.
 layout(set = 0, binding = 16) readonly buffer WaterWaves { vec4 data[]; } water_waves;
 // Moves a flat grid point to its spot on the waves; returns the normal.
-vec3 water_wave(inout vec3 point, uint first, uint count) {
+// `pinch` is how far the sideways sway squeezes the surface: one minus the
+// determinant of its Jacobian, 1 where a crest folds to a point.
+vec3 water_wave(inout vec3 point, uint first, uint count, out float pinch) {
     vec2 start = point.xz;
     vec2 tilt = vec2(0.0);
     float up = 1.0;
+    // xx, zz and xz of the Jacobian's shrink, steepness * sin * D D^T.
+    vec3 squeeze = vec3(0.0);
     for (uint index = first; index < first + count; index++) {
         vec4 shape = water_waves.data[2u * index];
         vec4 motion = water_waves.data[2u * index + 1u];
@@ -12561,7 +12568,9 @@ vec3 water_wave(inout vec3 point, uint first, uint count) {
         point.xz += motion.x / shape.z * shape.xy * c;
         tilt += shape.z * shape.w * shape.xy * c;
         up -= motion.x * s;
+        squeeze += motion.x * s * shape.xyx * shape.xyy;
     }
+    pinch = 1.0 - ((1.0 - squeeze.x) * (1.0 - squeeze.y) - squeeze.z * squeeze.z);
     return normalize(vec3(-tilt.x, max(up, 1e-3), -tilt.y));
 }
 void main() {
@@ -12572,10 +12581,12 @@ void main() {
     vec4 world_position = model * vec4(position, 1.0);
     bool waves = (instance.physics.w & 8u) != 0u;
     vec3 wave_normal = vec3(0.0, 1.0, 0.0);
+    float pinch = 0.0;
     if (waves) {
-        wave_normal = water_wave(world_position.xyz, uint(instance.normal[1].w), uint(instance.normal[2].w));
+        wave_normal = water_wave(world_position.xyz, uint(instance.normal[1].w), uint(instance.normal[2].w), pinch);
     }
-    vec2 lean = foliage_lean(instance.normal[0].w, instance.normal[1].w, model[3].xyz, camera.ambient.w);
+    v_crest = waves ? clamp(instance.normal[0].w * pinch, 0.0, 1.0) : 0.0;
+    vec2 lean = waves ? vec2(0.0) : foliage_lean(instance.normal[0].w, instance.normal[1].w, model[3].xyz, camera.ambient.w);
     vec2 bend = sway_bend(world_position.y - model[3].y, instance.normal[2].w);
     world_position.xz += lean * bend.x;
     // Normals and tangents follow the local shear, the lean times the slope.
@@ -15105,6 +15116,94 @@ mod tests {
         )];
         let covered = lit_rows(&mut scene);
         assert!((12..=20).contains(&covered), "{covered} of 32 rows");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn crest_foam_whitens_where_steep_waves_pinch_the_surface() {
+        use crate::assets::{MeshAsset, MeshVertex, WaterShading};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let white_columns = |crest_foam: f32| {
+            let water = MaterialAsset {
+                model: MaterialModel::Unlit,
+                base_color: [0.0, 0.0, 1.0, 1.0],
+                water: WaterShading {
+                    crest_foam,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut scene = SlabScene::with_extent(&[(0.0, water)], [32, 32]);
+            // An upright grid facing the camera on +z: waves along x sway
+            // its columns sideways and bunch them up at the crests.
+            let columns = 64;
+            let vertices = (0..=columns)
+                .flat_map(|column| {
+                    let x = -2.0 + 4.0 * column as f32 / columns as f32;
+                    [-2.0, 2.0].map(|y| MeshVertex {
+                        position: [x, y, 0.0],
+                        normal: [0.0, 0.0, 1.0],
+                        ..MeshVertex::default()
+                    })
+                })
+                .collect();
+            let indices = (0..columns)
+                .flat_map(|column| {
+                    let (a, b, c, d) = (
+                        2 * column,
+                        2 * column + 1,
+                        2 * column + 3,
+                        2 * column + 2,
+                    );
+                    [a, d, c, a, c, b]
+                })
+                .collect();
+            let grid =
+                scene.assets.meshes.insert(MeshAsset { vertices, indices });
+            let surface = scene.render_world.renderables[0].entity;
+            scene.render_world.renderables[0].mesh = grid;
+            scene.render_world.renderables[0].transform.matrix =
+                Matrix4::identity().into();
+            scene.render_world.water_waves = vec![(
+                surface,
+                vec![crate::runtime::GpuWave {
+                    direction: [1.0, 0.0],
+                    wavenumber: std::f32::consts::TAU,
+                    height: 0.1,
+                    steepness: 0.9,
+                    phase: 0.0,
+                }],
+            )];
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            // B8G8R8A8: blue is byte 0, green byte 1.
+            let pixels = scene.pixels();
+            let blue = (0..32)
+                .filter(|column| {
+                    pixels[((16 * 32 + column) * 4) as usize] > 200
+                })
+                .count();
+            assert_eq!(blue, 32, "the grid covers the middle row");
+            (0..32)
+                .filter(|column| {
+                    pixels[((16 * 32 + column) * 4 + 1) as usize] > 100
+                })
+                .count()
+        };
+        assert_eq!(white_columns(0.0), 0);
+        let foam = white_columns(1.0);
+        assert!((2..=24).contains(&foam), "{foam} of 32 columns foam");
     }
 
     #[test]

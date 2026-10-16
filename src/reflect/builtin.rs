@@ -824,6 +824,7 @@ crate::reflect! {
         deep_color: Option<[f32; 4]> { doc: "RGBA where the view crosses depth_fade metres of water; null keeps one color" },
         depth_fade: f32 { unit: "m", min: 0.01, doc: "metres of water before the color is deep_color" },
         shore_foam: f32 { unit: "m", min: 0.0, doc: "foam band width along the shore in metres of depth; 0 is none" },
+        crest_foam: f32 { min: 0.0, doc: "foam where steep Gerstner waves pinch into crests; 0 is none" },
         ripples: f32 { min: 0.0, max: 1.0, doc: "strength of small scrolling waves on top of the mesh; 0 is none" },
         ripple_length: f32 { unit: "m", min: 0.01, doc: "distance between small waves" },
         waves: Vec<OceanWave> { doc: "Gerstner waves in place of the three sines; empty keeps the sines" },
@@ -1838,6 +1839,7 @@ crate::reflect! {
         deep_color: [f32; 4] { unit: "linear RGBA", min: 0.0, max: 1.0, color: true, doc: "color where the view crosses depth_fade metres of water" },
         depth_fade: f32 { unit: "m", min: 0.0, doc: "metres of water before the color is deep_color; 0 is one color" },
         shore_foam: f32 { unit: "m", min: 0.0, doc: "foam band width in metres of water depth; 0 is none" },
+        crest_foam: f32 { min: 0.0, doc: "foam where steep vertex-shader waves pinch into crests; 0 is none" },
         ripples: f32 { min: 0.0, max: 1.0, doc: "strength of the small scrolling waves; 0 is none" },
         ripple_length: f32 { unit: "m", min: 0.01, doc: "distance between small waves" },
     }

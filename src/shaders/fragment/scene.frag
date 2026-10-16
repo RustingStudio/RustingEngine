@@ -15,6 +15,8 @@ layout(location = 10) flat in vec3 v_tint;
 // Water: x depth fade, y shore foam width, z ripple strength, w ripple
 // length; v_splat_scale holds the deep color.
 layout(location = 11) flat in vec4 v_water;
+// Water crest foam, 0 to 1, from how far the vertex shader's waves pinch.
+layout(location = 12) in float v_crest;
 layout(location = 0) out vec4 f_color;
 layout(set = 1, binding = 0) uniform sampler2D base_color_texture;
 layout(set = 1, binding = 1) uniform sampler2D normal_texture;
@@ -510,6 +512,7 @@ void main() {
             slope *= 0.15 * v_water.z * fade;
             normal = normalize(normal - vec3(slope.x, 0.0, slope.y));
         }
+        base_color = mix(base_color, vec4(1.0), v_crest);
         // The opaque depth is copied before blended draws when some water
         // reads it; scene_color.w says it was.
         if (PASS == 1u && shadow.scene_color.w > 0.5

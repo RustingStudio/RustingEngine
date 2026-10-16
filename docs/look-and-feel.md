@@ -321,7 +321,10 @@ For a sea, list Gerstner `waves` in place of the three built-in sines
 `direction` (degrees around +Y, 0 is +X) at the deep-water speed for its
 `length`, rises `height` metres, and leans its crests by `steepness`: 0 is a
 sine, 1 a pointed crest. Keep the sum of `steepness` at 1 or below, or crests
-fold over. Floating bodies and swimmers ride the same surface.
+fold over. Floating bodies and swimmers ride the same surface. `crest_foam`
+whitens the crests where the waves pinch the surface together: 1 turns a
+crest of steepness 1 fully white, and 0 (the default) draws no foam. The
+plain sines have no steepness, so they get no crest foam.
 
 ```json
 "waves": [

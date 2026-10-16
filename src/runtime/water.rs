@@ -59,6 +59,9 @@ pub struct WaterBody {
     /// Width of the white foam band along the shore, in metres of water
     /// depth. 0 draws no foam.
     pub shore_foam: f32,
+    /// Strength of the white foam where steep Gerstner `waves` pinch the
+    /// surface into crests. 0 draws none.
+    pub crest_foam: f32,
     /// Strength of the small scrolling waves drawn on top of the mesh,
     /// 0 to 1. 0 draws none.
     pub ripples: f32,
@@ -120,6 +123,7 @@ impl Default for WaterBody {
             deep_color: None,
             depth_fade: 4.0,
             shore_foam: 0.0,
+            crest_foam: 0.0,
             ripples: 0.0,
             ripple_length: 1.0,
             waves: Vec::new(),
@@ -332,6 +336,7 @@ fn water_material(water: &WaterBody) -> MaterialAsset {
                 0.0
             },
             shore_foam: water.shore_foam.max(0.0),
+            crest_foam: water.crest_foam.max(0.0),
             ripples: water.ripples.clamp(0.0, 1.0),
             ripple_length: water.ripple_length.max(0.01),
         },
@@ -671,13 +676,14 @@ mod tests {
 
         let lake: WaterBody = serde_json::from_str(
             r#"{"deep_color": [0, 0.1, 0.2, 0.95], "depth_fade": 3,
-                "shore_foam": 0.4, "ripples": 2}"#,
+                "shore_foam": 0.4, "crest_foam": 0.8, "ripples": 2}"#,
         )
         .unwrap();
         let shading = water_material(&lake).water;
         assert_eq!(shading.deep_color, [0.0, 0.1, 0.2, 0.95]);
         assert_eq!(shading.depth_fade, 3.0);
         assert_eq!(shading.shore_foam, 0.4);
+        assert_eq!(shading.crest_foam, 0.8);
         assert_eq!(shading.ripples, 1.0);
         assert!(shading.is_water() && shading.reads_depth());
     }

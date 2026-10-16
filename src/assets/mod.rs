@@ -1419,6 +1419,9 @@ pub struct WaterShading {
     /// Width of the white foam band where the surface meets the ground, in
     /// metres of water depth. 0 draws no foam.
     pub shore_foam: f32,
+    /// Strength of the white foam where steep Gerstner waves pinch the
+    /// surface into crests, 0 to 1 and up. 0 draws none.
+    pub crest_foam: f32,
     /// Strength of the small scrolling waves lit on top of the mesh, 0 to
     /// 1. 0 draws none.
     pub ripples: f32,
@@ -1430,7 +1433,10 @@ impl WaterShading {
     /// Whether the renderer draws this material as water.
     #[must_use]
     pub fn is_water(&self) -> bool {
-        self.depth_fade > 0.0 || self.shore_foam > 0.0 || self.ripples > 0.0
+        self.depth_fade > 0.0
+            || self.shore_foam > 0.0
+            || self.crest_foam > 0.0
+            || self.ripples > 0.0
     }
 
     /// Whether drawing it needs the opaque depth copy.

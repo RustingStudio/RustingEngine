@@ -318,6 +318,7 @@ multiplies the base colour and so cannot turn blue water white.
 
 - Wanted: a `crest_foam` strength in the water shader, driven by how much the Gerstner sway
   pinches the surface (its Jacobian). Spec 4.1 asks for foam on crests and around the raft.
+- Status: done (this commit, test: `crest_foam_whitens_where_steep_waves_pinch_the_surface`).
 
 ### E13. `rusting test` building once
 
