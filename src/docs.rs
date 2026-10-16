@@ -1090,6 +1090,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "add_class",
             "remove_class",
             "children",
+            "bone_world",
         ],
     ),
     (

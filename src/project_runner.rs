@@ -2713,6 +2713,36 @@ impl GameScene<'_> {
             .unwrap_or_default()
     }
 
+    /// World matrix of the bone `bone` under the named object, with the
+    /// latest animation step applied: column-major like `GlobalTransform`,
+    /// translation in elements 12 to 14. `bone` is a name (`Hand`) or a path
+    /// (`Arm/Hand`) and matches the nearest descendant, breadth first, so a
+    /// held object or effect can follow a hand. `None` without such a bone.
+    #[must_use]
+    pub fn bone_world(
+        &mut self,
+        object: &str,
+        bone: &str,
+    ) -> Option<[f32; 16]> {
+        let mut queue = std::collections::VecDeque::from([find_or_warn(
+            self.world, object,
+        )?]);
+        while let Some(at) = queue.pop_front() {
+            if let Some(found) =
+                crate::runtime::find_target(self.world, at, bone)
+            {
+                let matrix = world_matrix(self.world, found);
+                return matrix.as_slice().try_into().ok();
+            }
+            if let Some(children) =
+                self.world.get::<crate::runtime::Children>(at)
+            {
+                queue.extend(children.0.iter().copied());
+            }
+        }
+        None
+    }
+
     /// A hash of the positions, rotations, scales and velocities of the
     /// named objects in `class`, in name order. Unlike the full state hash
     /// it leaves out the clock and everything else, so two rounds that
@@ -8570,6 +8600,62 @@ mod tests {
         assert_eq!(scene.children("Tile"), ["Plank", "Rope"]);
         assert!(scene.children("Plank").is_empty());
         assert!(scene.children("Nothing").is_empty());
+    }
+
+    #[test]
+    fn bone_world_gives_a_named_bones_pose_in_the_world() {
+        let mut app = App::new();
+        let world = app.world_mut();
+        let octopus = world
+            .spawn((
+                Name("Octopus".into()),
+                Transform {
+                    position: [10.0, 0.0, 0.0],
+                    scale: [2.0; 3],
+                    ..Transform::default()
+                },
+            ))
+            .id();
+        let arm = world
+            .spawn((
+                Name("Arm".into()),
+                Transform {
+                    position: [0.0, 1.0, 0.0],
+                    rotation: [0.0, 0.0, std::f32::consts::FRAC_PI_2],
+                    ..Transform::default()
+                },
+            ))
+            .id();
+        let hand = world
+            .spawn((
+                Name("Hand".into()),
+                Transform {
+                    position: [1.0, 0.0, 0.0],
+                    ..Transform::default()
+                },
+            ))
+            .id();
+        rusting_core::hierarchy::set_parent(world, arm, octopus).unwrap();
+        rusting_core::hierarchy::set_parent(world, hand, arm).unwrap();
+        let mut scene = GameScene {
+            world: app.world_mut(),
+        };
+        // The arm turns +X into +Y: the hand sits 2 m above the arm.
+        let at = |matrix: Option<[f32; 16]>| {
+            let matrix = matrix.unwrap();
+            [matrix[12], matrix[13], matrix[14]]
+                .map(|v| (v * 1e3).round() / 1e3)
+        };
+        assert_eq!(at(scene.bone_world("Octopus", "Hand")), [10.0, 4.0, 0.0]);
+        assert_eq!(
+            at(scene.bone_world("Octopus", "Arm/Hand")),
+            [10.0, 4.0, 0.0]
+        );
+        assert_eq!(scene.bone_world("Octopus", "Tail"), None);
+        assert_eq!(scene.bone_world("Squid", "Hand"), None);
+        // Copies find the bone their template names.
+        scene.spawn_copy("Octopus", "Octopus 2", [0.0; 3]).unwrap();
+        assert_eq!(at(scene.bone_world("Octopus 2", "Hand")), [0.0, 4.0, 0.0]);
     }
 
     #[test]

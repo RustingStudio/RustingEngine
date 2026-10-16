@@ -410,6 +410,7 @@ matrices, not a world pose.
   would work but reaches into engine internals.)
 - Wanted: `GameScene::bone_world(object, bone) -> Option<[f32; 16]>` (or position and
   rotation) after this frame's animation.
+- Status: done (this commit, test: `bone_world_gives_a_named_bones_pose_in_the_world`).
 
 ### E21. Global wind for foliage
 

@@ -67,6 +67,7 @@ valid ranges.
 | `queue_free()` | `scene.despawn(name)` |
 | `get_node("Arm/Hand")` | `scene.object(name)` by unique name; `SceneTree::find_path(root, "Arm/Hand")` in a system |
 | `get_parent()`, `get_children()` | `scene.children(name)`; `SceneTree::parent`, `SceneTree::children` in a system |
+| `BoneAttachment3D`, `Skeleton3D.get_bone_global_pose()` | `scene.bone_world(name, "Hand")`, a world matrix to place the held object |
 | `reparent()` | `scene.reparent(name, Some(parent))` |
 | `change_scene_to_file()` | `scene.load_scene("scenes/level_2.rscene")` |
 | `reload_current_scene()` | `scene.restart()` |
