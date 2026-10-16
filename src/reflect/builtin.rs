@@ -1430,6 +1430,21 @@ crate::reflect! {
             unit: "degrees", min: 0.0, max: 20.0,
             doc: "diameter of the drawn sun disc; 0 hides it",
         },
+        cloud_cover: f32 {
+            unit: "factor", min: 0.0, max: 1.0,
+            doc: "share of the sky under clouds: 0 clear, 1 overcast",
+        },
+        cloud_darkness: f32 {
+            unit: "factor", min: 0.0, max: 1.0,
+            doc: "0 white clouds, 1 dark storm clouds",
+        },
+        cloud_speed: f32 {
+            unit: "m/s", min: 0.0,
+            doc: "how fast the clouds drift at their height of 2 km",
+        },
+        wind_direction: [f32; 2] {
+            doc: "world x and z the clouds drift toward",
+        },
     }
 }
 

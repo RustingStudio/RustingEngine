@@ -207,10 +207,18 @@ sky. The sky also lights and reflects in every surface, like an environment
 map; a `rusting.environment_map` still wins for lighting when both are set.
 `haze` (0..1) greys and brightens it, `ground_color` fills the lower half.
 
+`cloud_cover` (0..1) puts that share of the sky under a sheet of clouds
+2 km up. They glow at their thin edges toward the sun and hide its disc
+where they pass in front of it. `cloud_darkness` (0..1) turns white clouds
+into grey storm clouds. They drift at `cloud_speed` metres per second
+toward `wind_direction`, given as world x and z. Lighting and reflections
+still see the sky without clouds.
+
 ```json
 {"name": "Sky", "components": {"rusting.procedural_sky":
   {"intensity": 1.0, "haze": 0.2, "ground_color": [0.3, 0.28, 0.25],
-   "sun_size": 1.0}}}
+   "sun_size": 1.0, "cloud_cover": 0.4, "cloud_darkness": 0.3,
+   "cloud_speed": 10.0, "wind_direction": [1.0, 0.0]}}}
 ```
 
 For a photographed sky, put an equirectangular (2:1) Radiance `.hdr` image

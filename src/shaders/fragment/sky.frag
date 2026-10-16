@@ -37,7 +37,7 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 fog_shafts;
     mat4 fog_volumes[8];
     vec4 fog_volume_colors[8];
-    vec4 sky[3];
+    vec4 sky[4];
 } shadow;
 layout(set = 2, binding = 2) uniform sampler2D environment_map;
 #include "fog.glsl"
@@ -63,14 +63,21 @@ void main() {
         vec3 sun = shadow.sky[0].xyz;
         vec3 sun_color = shadow.sky[1].rgb;
         float haze = shadow.sky[1].w;
-        sky_color = sky_radiance(direction, sun, sun_color, haze,
-            shadow.sky[2].rgb);
-        // The sun disc: its sunlight spread over its solid angle.
+        vec3 ground = shadow.sky[2].rgb;
+        sky_color = sky_radiance(direction, sun, sun_color, haze, ground);
+        vec4 clouds = shadow.sky[3];
+        float density = sky_cloud_density(direction, clouds.xy, clouds.z);
+        if (density > 0.0) {
+            sky_color = mix(sky_color, sky_cloud_color(direction, sun,
+                sun_color, haze, ground, density, clouds.w), density);
+        }
+        // The sun disc: its sunlight spread over its solid angle, hidden
+        // by clouds in front of it.
         float cos_radius = shadow.sky[0].w;
         if (cos_radius < 1.0 && dot(direction, sun) > cos_radius
             && direction.y > 0.0) {
             sky_color += sky_sunlight(sun, sun_color, haze)
-                / (6.2831853 * (1.0 - cos_radius));
+                / (6.2831853 * (1.0 - cos_radius)) * (1.0 - density);
         }
     }
 #ifdef RUSTING_CUSTOM_SKY

@@ -933,9 +933,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.procedural_sky",
-        summary: "Daylight sky computed from the sun (the shadow-casting directional light, else the first one): blue overhead, pale at the horizon, orange at sunset, dark at night, with a sun disc of sun_size degrees. It is drawn behind everything and lights surfaces from every side and in reflections; a rusting.environment_map wins for lighting. haze 0..1 washes it out. The first one found is used.",
+        summary: "Daylight sky computed from the sun (the shadow-casting directional light, else the first one): blue overhead, pale at the horizon, orange at sunset, dark at night, with a sun disc of sun_size degrees. It is drawn behind everything and lights surfaces from every side and in reflections; a rusting.environment_map wins for lighting. haze 0..1 washes it out. cloud_cover 0..1 covers that share of the sky with clouds 2 km up that glow at their edges toward the sun and hide its disc; cloud_darkness 0..1 turns them into storm clouds; they drift at cloud_speed m/s toward wind_direction (world x, z). Lighting and reflections see the sky without clouds. The first one found is used.",
         gpu: "one full-screen sky pass, plus a 128x64 compute bake when the sun or settings change",
-        example: || json!({"intensity": 1.0, "haze": 0.2, "ground_color": [0.3, 0.28, 0.25], "sun_size": 1.0}),
+        example: || json!({"intensity": 1.0, "haze": 0.2, "ground_color": [0.3, 0.28, 0.25], "sun_size": 1.0, "cloud_cover": 0.0, "cloud_darkness": 0.3, "cloud_speed": 10.0, "wind_direction": [1.0, 0.0]}),
     },
     ComponentSection {
         key: "rusting.fog_volume",

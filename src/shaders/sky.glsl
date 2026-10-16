@@ -48,3 +48,50 @@ vec3 sky_radiance(vec3 direction, vec3 sun, vec3 sun_color, float haze,
     vec3 floor_color = ground * sunlight * max(sun.y, 0.0);
     return mix(sky, floor_color, smoothstep(0.0, 0.05, -direction.y));
 }
+
+// Clouds: a sheet of value-noise fbm 2 km up, 3 km per noise cell.
+float sky_hash(vec2 p) {
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p + 34.5);
+    return fract(p.x * p.y);
+}
+float sky_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(sky_hash(i), sky_hash(i + vec2(1.0, 0.0)), f.x),
+               mix(sky_hash(i + vec2(0.0, 1.0)), sky_hash(i + vec2(1.0)), f.x),
+               f.y);
+}
+
+// How thick the clouds are along `direction`, 0..1, for the sheet drifted
+// `drift` metres in x and z and `cover` 0..1 of the sky under clouds.
+// Toward the horizon the sheet blurs into its average cover.
+float sky_cloud_density(vec3 direction, vec2 drift, float cover) {
+    if (cover <= 0.0 || direction.y <= 0.0) {
+        return 0.0;
+    }
+    vec2 p = (direction.xz / max(direction.y, 0.01) * 2000.0 - drift)
+        / 3000.0;
+    float n = 0.0;
+    float amplitude = 0.5;
+    for (int octave = 0; octave < 5; octave++) {
+        n += amplitude * sky_noise(p);
+        p = p * 2.03 + 17.0;
+        amplitude *= 0.5;
+    }
+    float edge = 0.8 * (1.0 - cover);
+    float density = smoothstep(edge - 0.1, edge + 0.15, n);
+    return mix(cover, density, smoothstep(0.0, 0.15, direction.y));
+}
+
+// Cloud color along `direction`: sunlit, glowing at thin edges toward the
+// sun, darkened by `darkness` 0..1 where thick, plus light from the sky.
+vec3 sky_cloud_color(vec3 direction, vec3 sun, vec3 sun_color, float haze,
+                     vec3 ground, float density, float darkness) {
+    vec3 sunlight = sky_sunlight(sun, sun_color, haze);
+    float glow = pow(max(dot(direction, sun), 0.0), 6.0);
+    return sunlight * (0.6 * (1.0 - 0.85 * darkness * density)
+            + 2.0 * glow * (1.0 - density))
+        + 0.5 * sky_radiance(vec3(0.0, 1.0, 0.0), sun, sun_color, haze, ground);
+}

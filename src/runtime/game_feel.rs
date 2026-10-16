@@ -1253,6 +1253,16 @@ pub struct ProceduralSky {
     /// Diameter of the drawn sun disc in degrees; 0 hides it. The real sun
     /// is 0.53.
     pub sun_size: f32,
+    /// Share of the sky under clouds: 0 clear, 1 overcast. Clouds catch
+    /// the sun at their edges and hide its disc.
+    pub cloud_cover: f32,
+    /// 0 white clouds, 1 dark storm clouds where they are thick.
+    pub cloud_darkness: f32,
+    /// How fast the clouds drift, in metres per second at their height of
+    /// 2 km.
+    pub cloud_speed: f32,
+    /// Direction the clouds drift toward, as world x and z.
+    pub wind_direction: [f32; 2],
 }
 
 impl Default for ProceduralSky {
@@ -1262,6 +1272,10 @@ impl Default for ProceduralSky {
             haze: 0.2,
             ground_color: [0.3, 0.28, 0.25],
             sun_size: 1.0,
+            cloud_cover: 0.0,
+            cloud_darkness: 0.3,
+            cloud_speed: 10.0,
+            wind_direction: [1.0, 0.0],
         }
     }
 }

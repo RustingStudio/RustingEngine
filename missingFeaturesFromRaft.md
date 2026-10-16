@@ -203,6 +203,13 @@ Passed: `cargo fmt --all --check`, clippy default / `--no-default-features` /
 - Instead: the sky has no clouds, so weather barely shows overhead.
 - Wanted: `cloud_cover`, `cloud_darkness`, `cloud_speed` and a wind direction, with clouds that
   catch and dim the sun.
+- Status: done (this commit, test: `clouds_grey_the_sky_and_hide_the_sun` (GPU) and
+  `clouds_drift_with_the_wind_and_clamp_their_cover`). `ProceduralSky` gains `cloud_cover`,
+  `cloud_darkness`, `cloud_speed` and `wind_direction`; the background pass draws an fbm sheet
+  2 km up that drifts with `elapsed_seconds`, glows toward the sun and hides its disc. The sky
+  bake (lighting, reflections) stays cloudless so it does not rebake as clouds move. Passed: fmt,
+  clippy (default, no-default-features, gpu-tests), `cargo test --workspace`, gpu-tests under the
+  lock. Looks on real hardware: needs hardware check.
 
 ### E3. Particles stopped by roofs
 

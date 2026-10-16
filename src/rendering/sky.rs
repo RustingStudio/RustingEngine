@@ -41,15 +41,17 @@ const BAKE_EXTENT: [u32; 2] = [128, 64];
 
 /// The sky as the shaders read it: direction toward the sun and the cosine
 /// of the disc's radius, the sun's color times brightness and the haze,
-/// and the ground albedo with 1 in w.
-pub(super) type SkyParams = [[f32; 4]; 3];
+/// the ground albedo with 1 in w, and the clouds: how far they drifted
+/// in x and z (metres), their cover and their darkness.
+pub(super) type SkyParams = [[f32; 4]; 4];
 
 /// Sky settings for `sky` lit by the shadow-casting directional light,
 /// else the first one, else a default sun of brightness 1 high in the
-/// south-west.
+/// south-west, with its clouds drifted for `seconds`.
 pub(super) fn sky_params(
     sky: &ProceduralSky,
     lights: &[ExtractedDirectionalLight],
+    seconds: f32,
 ) -> SkyParams {
     let sun = lights
         .iter()
@@ -70,6 +72,11 @@ pub(super) fn sky_params(
     );
     let [r, g, b] = color.map(|channel| (channel * sky.intensity).max(0.0));
     let [gr, gg, gb] = sky.ground_color.map(|channel| channel.max(0.0));
+    let wind = nalgebra::Vector2::from(sky.wind_direction)
+        .try_normalize(1e-6)
+        .unwrap_or_default()
+        * sky.cloud_speed
+        * seconds;
     [
         [
             direction.x,
@@ -79,6 +86,12 @@ pub(super) fn sky_params(
         ],
         [r, g, b, sky.haze.clamp(0.0, 1.0)],
         [gr, gg, gb, 1.0],
+        [
+            wind.x,
+            wind.y,
+            sky.cloud_cover.clamp(0.0, 1.0),
+            sky.cloud_darkness.clamp(0.0, 1.0),
+        ],
     ]
 }
 
@@ -90,7 +103,8 @@ pub(super) struct SkyBake {
     /// Every mip, for lighting.
     pub(super) view: Arc<ImageView>,
     pub(super) sampler: Arc<Sampler>,
-    baked: Option<SkyParams>,
+    /// The settings in the image; clouds are left out of it.
+    baked: Option<[[f32; 4]; 3]>,
 }
 
 impl SkyBake {
@@ -166,18 +180,21 @@ impl SkyBake {
         })
     }
 
-    /// Records a bake of `params` and its mip chain, unless the image
-    /// already holds them.
+    /// Records a bake of `params` without its clouds and its mip chain,
+    /// unless the image already holds them.
     pub(super) fn record(
         &mut self,
         commands: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         params: SkyParams,
     ) -> Result<(), SceneRenderError> {
-        if self.baked == Some(params) {
+        // ponytail: lighting and reflections see a cloudless sky, so the
+        // bake does not rerun as clouds drift; bake the cover in if
+        // overcast scenes need dimmer light.
+        let [sun, light, ground, _] = params;
+        if self.baked == Some([sun, light, ground]) {
             return Ok(());
         }
-        self.baked = Some(params);
-        let [sun, light, ground] = params;
+        self.baked = Some([sun, light, ground]);
         let [width, height] = BAKE_EXTENT;
         commands
             .bind_pipeline_compute(self.pipeline.clone())
@@ -274,14 +291,35 @@ mod tests {
             light(false, [1.0, 0.0, 0.0], 100_000.0),
             light(true, [0.0, -1.0, 0.0], 50_000.0),
         ];
-        let [sun, color, ground] = sky_params(&sky, &lights);
+        let [sun, color, ground, clouds] = sky_params(&sky, &lights, 0.0);
         assert!((sun[1] - 1.0).abs() < 1e-5, "{sun:?}");
         assert!((sun[3] - 30.0_f32.to_radians().cos()).abs() < 1e-6);
         assert_eq!(color, [1.0, 0.5, 0.25, 0.2]);
         assert_eq!(ground[3], 1.0);
+        assert_eq!(clouds, [0.0, 0.0, 0.0, 0.3]);
         // Without shadows the first light is the sun.
-        let [sun, color, _] = sky_params(&sky, &lights[..1]);
+        let [sun, color, _, _] = sky_params(&sky, &lights[..1], 0.0);
         assert!((sun[0] + 1.0).abs() < 1e-5, "{sun:?}");
         assert_eq!(color[0], 2.0);
+    }
+
+    #[test]
+    fn clouds_drift_with_the_wind_and_clamp_their_cover() {
+        let sky = ProceduralSky {
+            cloud_cover: 1.5,
+            cloud_darkness: -1.0,
+            cloud_speed: 10.0,
+            wind_direction: [0.0, -3.0],
+            ..ProceduralSky::default()
+        };
+        let [.., clouds] = sky_params(&sky, &[], 4.0);
+        assert_eq!(clouds, [0.0, -40.0, 1.0, 0.0]);
+        // No direction leaves them still.
+        let still = ProceduralSky {
+            wind_direction: [0.0; 2],
+            ..sky
+        };
+        let [.., clouds] = sky_params(&still, &[], 4.0);
+        assert_eq!(&clouds[..2], &[0.0, 0.0]);
     }
 }

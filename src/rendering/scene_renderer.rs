@@ -605,7 +605,7 @@ struct ShadowUpload {
     /// The procedural sky, as `sky::sky_params` lays it out; all zero
     /// without one. `sky[2].w` is 2 when the environment map is drawn as
     /// the background instead.
-    sky: [[f32; 4]; 3],
+    sky: [[f32; 4]; 4],
     /// x counts the decals.
     decal_info: [f32; 4],
     /// World-to-box matrix of each decal; the box spans -1..1.
@@ -3500,10 +3500,13 @@ impl SceneRenderer {
         if split {
             self.scene_color_view_projection = Some(clip);
         }
-        let sky = render_world
-            .procedural_sky
-            .filter(|_| lit)
-            .map(|sky| sky_params(&sky, &render_world.directional_lights));
+        let sky = render_world.procedural_sky.filter(|_| lit).map(|sky| {
+            sky_params(
+                &sky,
+                &render_world.directional_lights,
+                render_world.elapsed_seconds,
+            )
+        });
         let environment = render_world
             .environment
             .and_then(|(texture, intensity, background)| {
@@ -14013,6 +14016,77 @@ mod tests {
             r > r0 + 20 && g > g0 + 20 && b > b0 + 20,
             "sky light: {r} {g} {b}, without: {r0} {g0} {b0}"
         );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn clouds_grey_the_sky_and_hide_the_sun() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        // The orthographic camera looks 60 degrees up, so every pixel sees
+        // the same patch of sky.
+        let up = Vector3::new(0.0, 3.0_f32.sqrt(), -1.0).normalize();
+        let sun =
+            |toward: Vector3<f32>| crate::runtime::ExtractedDirectionalLight {
+                entity: bevy_ecs::entity::Entity::from_raw_u32(2000).unwrap(),
+                transform: crate::runtime::GlobalTransform {
+                    matrix: nalgebra::Rotation3::rotation_between(
+                        &-Vector3::z(),
+                        &-toward.normalize(),
+                    )
+                    .unwrap()
+                    .to_homogeneous()
+                    .into(),
+                },
+                light: crate::runtime::DirectionalLight {
+                    color: [1.0; 3],
+                    illuminance: 100_000.0,
+                    shadows: false,
+                },
+            };
+        let mut scene = SlabScene::new(&[]);
+        scene
+            .render_world
+            .active_camera
+            .as_mut()
+            .unwrap()
+            .transform
+            .matrix =
+            nalgebra::Rotation3::rotation_between(&-Vector3::z(), &up)
+                .unwrap()
+                .to_homogeneous()
+                .into();
+        let mut look = |toward: Vector3<f32>, cover, darkness| {
+            scene.render_world.directional_lights = vec![sun(toward)];
+            scene.render_world.procedural_sky =
+                Some(crate::runtime::ProceduralSky {
+                    sun_size: 20.0,
+                    cloud_cover: cover,
+                    cloud_darkness: darkness,
+                    ..crate::runtime::ProceduralSky::default()
+                });
+            render_pixel(&mut scene, [4, 4])
+        };
+        let behind = Vector3::new(0.0, 0.5, 1.0);
+        let [r, _, b] = look(behind, 0.0, 0.0);
+        assert!(b > r + 10, "clear sky: {r} {b}");
+        let [r, g, b] = look(behind, 1.0, 0.0);
+        assert!(b < r + 10, "white clouds: {r} {b}");
+        let [dr, dg, db] = look(behind, 1.0, 1.0);
+        assert!(
+            dr + 20 < r && dg + 20 < g && db + 20 < b,
+            "dark clouds: {dr} {dg} {db}, white: {r} {g} {b}"
+        );
+        // Dark clouds hide the sun's disc.
+        let [r, g, b] = look(up, 0.0, 0.0);
+        assert!(r > 250 && g > 250 && b > 200, "sun disc: {r} {g} {b}");
+        let [r, g, b] = look(up, 1.0, 1.0);
+        assert!(r < 200 && g < 200 && b < 200, "hidden sun: {r} {g} {b}");
     }
 
     #[test]

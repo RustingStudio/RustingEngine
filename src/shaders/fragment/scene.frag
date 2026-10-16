@@ -62,7 +62,7 @@ layout(set = 2, binding = 1) readonly buffer Shadow {
     vec4 fog_shafts;
     mat4 fog_volumes[8];
     vec4 fog_volume_colors[8];
-    vec4 sky[3];
+    vec4 sky[4];
     vec4 decal_info;
     mat4 decals[16];
     vec4 decal_axes[16];
