@@ -82,7 +82,7 @@ pub enum ParticleSimulation {
     Cpu,
     /// In a compute shader each frame, for up to `MAX_GPU_PARTICLES`.
     /// Turbulence, start colors, rotation, spin, `Local` space, `Velocity`
-    /// facing and collision restarts are ignored, and alpha blended
+    /// facing, collision restarts and `blockers` are ignored, and alpha blended
     /// particles are not sorted. GPU force fields push the particles, and
     /// `collide` bounces them off physics colliders.
     Gpu,
@@ -269,6 +269,10 @@ pub struct ParticleEmitter {
     /// spawns this many particles where each parent particle dies, instead
     /// of by rate and bursts. 0 for a normal emitter.
     pub on_parent_death: u32,
+    /// `Cpu` simulation: particles die inside [`ParticleBlocker`] boxes and
+    /// below [`Heightfield`](super::Heightfield) ground, so rain stops at
+    /// roofs and the ground.
+    pub blockers: bool,
     /// Set by `play`, `pause`, `stop`, and `restart`.
     #[serde(skip)]
     pub command: ParticleCommand,
@@ -318,6 +322,7 @@ impl Default for ParticleEmitter {
             collide: false,
             trail: 0.0,
             on_parent_death: 0,
+            blockers: false,
             command: ParticleCommand::None,
         }
     }
@@ -708,6 +713,116 @@ fn step(
     }
 }
 
+/// A box of half size `extents` around the object, turned and scaled with
+/// it, that removes the particles of emitters with `blockers` on as they
+/// enter it: a cabin's roof and walls that keep the rain out.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ParticleBlocker {
+    /// Half size of the box in the object's local axes, in metres.
+    pub extents: [f32; 3],
+}
+
+impl Default for ParticleBlocker {
+    fn default() -> Self {
+        Self { extents: [1.0; 3] }
+    }
+}
+
+type BlockerParts = (
+    &'static ParticleBlocker,
+    Option<&'static GlobalTransform>,
+    Option<&'static crate::Transform>,
+);
+
+type GroundParts = (
+    &'static super::Heightfield,
+    Option<&'static GlobalTransform>,
+    Option<&'static crate::Transform>,
+);
+
+/// What kills the particles of emitters with `blockers`: each
+/// [`ParticleBlocker`] as a world-to-box matrix (the box spans -1..1), and
+/// each [`Heightfield`](super::Heightfield) with its world-to-local matrix.
+#[derive(Default)]
+struct Blockers<'a> {
+    boxes: Vec<nalgebra::Matrix4<f32>>,
+    grounds: Vec<(nalgebra::Matrix4<f32>, &'a super::Heightfield)>,
+}
+
+impl<'a> Blockers<'a> {
+    fn new(
+        boxes: impl Iterator<Item = QueryItem<'a, 'a, BlockerParts>>,
+        grounds: impl Iterator<Item = QueryItem<'a, 'a, GroundParts>>,
+    ) -> Self {
+        let inverse = |global, transform, scale: [f32; 3]| {
+            (nalgebra::Matrix4::from(emitter_frame(global, transform).matrix)
+                * nalgebra::Matrix4::new_nonuniform_scaling(&scale.into()))
+            .try_inverse()
+        };
+        Self {
+            boxes: boxes
+                .filter_map(|(blocker, global, transform)| {
+                    inverse(global, transform, blocker.extents)
+                })
+                .collect(),
+            grounds: grounds
+                .filter_map(|(field, global, transform)| {
+                    Some((inverse(global, transform, [1.0; 3])?, field))
+                })
+                .collect(),
+        }
+    }
+
+    fn kills(&self, point: [f32; 3]) -> bool {
+        let point = nalgebra::Point3::from(point);
+        self.boxes.iter().any(|to_box| {
+            to_box
+                .transform_point(&point)
+                .iter()
+                .all(|axis| axis.abs() <= 1.0)
+        }) || self.grounds.iter().any(|(to_local, field)| {
+            let local = to_local.transform_point(&point);
+            ground_height(field, local.x, local.z)
+                .is_some_and(|height| local.y < height)
+        })
+    }
+}
+
+/// Height of `field` at local `x`, `z` on the same two triangles per cell
+/// as [`Heightfield::mesh`](super::Heightfield::mesh); `None` off the grid.
+fn ground_height(field: &super::Heightfield, x: f32, z: f32) -> Option<f32> {
+    let rows = field.heights.len();
+    let columns = field.heights.iter().map(Vec::len).max().unwrap_or(0);
+    if rows < 2 || columns < 2 || field.spacing <= 0.0 {
+        return None;
+    }
+    let u = x / field.spacing + 0.5 * (columns - 1) as f32;
+    let v = z / field.spacing + 0.5 * (rows - 1) as f32;
+    if !(0.0..=(columns - 1) as f32).contains(&u)
+        || !(0.0..=(rows - 1) as f32).contains(&v)
+    {
+        return None;
+    }
+    let column = (u as usize).min(columns - 2);
+    let row = (v as usize).min(rows - 2);
+    let (across, along) = (u - column as f32, v - row as f32);
+    // Short rows count as 0 past their end, as in the mesh.
+    let height =
+        |r: usize, c: usize| field.heights[r].get(c).copied().unwrap_or(0.0);
+    let [a, b, c, d] = [
+        height(row, column),
+        height(row, column + 1),
+        height(row + 1, column),
+        height(row + 1, column + 1),
+    ];
+    Some(if across + along <= 1.0 {
+        a + (b - a) * across + (c - a) * along
+    } else {
+        d + (c - d) * (1.0 - across) + (b - d) * (1.0 - along)
+    })
+}
+
 /// Per fixed step: adds a [`ParticleSystem`] to every new emitter.
 pub(super) fn add_particle_systems(
     mut commands: Commands,
@@ -756,10 +871,13 @@ pub(super) fn update_particles(
     time: Res<FrameTime>,
     seed: Res<RandomSeed>,
     mut emitters: Query<EmitterParts>,
+    boxes: Query<BlockerParts>,
+    grounds: Query<GroundParts>,
 ) {
     let dt = time.fixed_delta.as_secs_f32();
+    let blockers = Blockers::new(boxes.iter(), grounds.iter());
     for parts in &mut emitters {
-        advance(parts, &seed, time.fixed_tick, dt);
+        advance(parts, &blockers, &seed, time.fixed_tick, dt);
     }
 }
 
@@ -770,6 +888,7 @@ fn advance(
         '_,
         EmitterParts,
     >,
+    blockers: &Blockers,
     seed: &RandomSeed,
     tick: u64,
     dt: f32,
@@ -786,6 +905,16 @@ fn advance(
         }
     }
     step(&emitter, &mut system, frame, seed, tick, stream, dt);
+    if emitter.blockers {
+        let local = emitter.space == ParticleSpace::Local;
+        system.particles.retain(|particle| {
+            !blockers.kills(if local {
+                frame.point(particle.position)
+            } else {
+                particle.position
+            })
+        });
+    }
 }
 
 /// Clock of [`preview_particles`]: time not yet stepped, and its own tick.
@@ -825,10 +954,18 @@ pub fn preview_particles(world: &mut World, real: Duration) {
     let steps = steps.min(4);
     let first = preview.tick;
     preview.tick += steps;
-    let mut emitters = world.query::<EmitterParts>();
+    let mut state = bevy_ecs::system::SystemState::<(
+        Query<EmitterParts>,
+        Query<BlockerParts>,
+        Query<GroundParts>,
+    )>::new(world);
+    let Ok((mut emitters, boxes, grounds)) = state.get_mut(world) else {
+        return;
+    };
+    let blockers = Blockers::new(boxes.iter(), grounds.iter());
     for tick in first..first + steps {
-        for parts in emitters.iter_mut(world) {
-            advance(parts, &seed, tick, fixed.as_secs_f32());
+        for parts in &mut emitters {
+            advance(parts, &blockers, &seed, tick, fixed.as_secs_f32());
         }
     }
 }
@@ -1287,6 +1424,67 @@ mod tests {
             step(emitter, &mut system, frame, &seed, tick, 7, 1.0 / 60.0);
         }
         system
+    }
+
+    #[test]
+    fn blocked_rain_stops_at_roofs_and_the_ground() {
+        let field = crate::runtime::Heightfield {
+            heights: vec![vec![0.0, 2.0], vec![0.0, 2.0]],
+            spacing: 2.0,
+            ..Default::default()
+        };
+        // The ground rises from 0 at x = -1 to 2 at x = 1.
+        assert_eq!(ground_height(&field, 0.0, 0.5), Some(1.0));
+        assert_eq!(ground_height(&field, 1.5, 0.0), None);
+        let mut world = World::new();
+        world.spawn((
+            crate::Transform::default(),
+            GlobalTransform::default(),
+            field,
+        ));
+        let mut roof = GlobalTransform::default();
+        roof.matrix[3] = [5.0, 3.0, 0.0, 1.0];
+        world.spawn((
+            roof,
+            ParticleBlocker {
+                extents: [2.0, 0.5, 2.0],
+            },
+        ));
+        // Rain over the hill, over the roof, and over open ground with
+        // blockers off.
+        let rain = |x: f32, blockers| {
+            let mut frame = GlobalTransform::default();
+            frame.matrix[3] = [x, 6.0, 0.0, 1.0];
+            (
+                frame,
+                ParticleEmitter {
+                    rate: 60.0,
+                    lifetime: [3.0, 3.0],
+                    speed: [0.0, 0.0],
+                    gravity: 9.81,
+                    blockers,
+                    ..ParticleEmitter::default()
+                },
+            )
+        };
+        let hill = world.spawn(rain(0.0, true)).id();
+        let roofed = world.spawn(rain(5.0, true)).id();
+        let open = world.spawn(rain(5.0, false)).id();
+        for _ in 0..30 {
+            preview_particles(&mut world, Duration::from_secs_f32(1.0 / 15.0));
+        }
+        let lowest = |entity| {
+            let system = world.get::<ParticleSystem>(entity).unwrap();
+            assert!(system.alive() > 0);
+            system
+                .particles
+                .iter()
+                .map(|particle| particle.position[1])
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!(lowest(hill) >= 0.9, "{}", lowest(hill));
+        assert!(lowest(roofed) >= 3.5, "{}", lowest(roofed));
+        assert!(lowest(open) < 0.0, "{}", lowest(open));
     }
 
     #[test]

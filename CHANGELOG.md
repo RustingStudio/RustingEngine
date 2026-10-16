@@ -4,6 +4,7 @@
 
 ### Added
 
+- `rusting.particle_blocker` boxes and the emitter option `blockers`: CPU particles die inside the boxes and below `rusting.heightfield` ground, so rain stops at roofs (RAFT).
 - `rusting.procedural_sky` draws clouds: `cloud_cover` (0..1), `cloud_darkness` (0..1), `cloud_speed` (m/s) and `wind_direction` (world x, z). They glow at their edges toward the sun and hide its disc; lighting still sees the clear sky (RAFT).
 - `rusting.water` `ocean: true` makes an endless sea: bodies float and players swim everywhere, and the surface grid follows the active camera with cells that grow away from it (RAFT).
 - `rusting.water` takes `waves`, a list of Gerstner `OceanWave`s (`direction`, `length`, `height`, `steepness`) with sharp crests and analytic normals in place of the three sines, and `time`, a game clock for the waves in place of the fixed tick. `WaterBody::wave` returns the swayed surface and takes its time as `f64`, so waves keep their shape hours in; `WaterBody` is no longer `Copy` (RAFT).

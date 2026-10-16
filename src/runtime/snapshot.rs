@@ -426,6 +426,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<BurstEmitter>();
     types.register::<BurstParticle>();
     types.register::<super::ParticleEmitter>();
+    types.register::<super::ParticleBlocker>();
     types.register::<super::ParticleSystem>();
     types.register::<super::ParticleShader>();
     types.register::<super::Animation>();

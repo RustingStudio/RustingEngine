@@ -42,9 +42,9 @@ use crate::runtime::{
     Ragdoll, RagdollBone, RootMotion, Skin,
 };
 use crate::runtime::{
-    ColorKey, CurveKey, EmitterShape, ParticleBlend, ParticleBurst,
-    ParticleEmitter, ParticleFacing, ParticleShader, ParticleSimulation,
-    ParticleSpace, ParticleSprite,
+    ColorKey, CurveKey, EmitterShape, ParticleBlend, ParticleBlocker,
+    ParticleBurst, ParticleEmitter, ParticleFacing, ParticleShader,
+    ParticleSimulation, ParticleSpace, ParticleSprite,
 };
 
 crate::reflect! {
@@ -515,6 +515,7 @@ crate::reflect! {
         collide: bool { doc: "Gpu: bounce off physics colliders" },
         trail: f32 { unit: "s", min: 0.0, doc: "Gpu: seconds of path trailing each particle, 0 for none" },
         on_parent_death: u32 { doc: "Gpu under a Gpu parent emitter: particles spawned where each parent particle dies; 0 for a normal emitter" },
+        blockers: bool { doc: "Cpu: particles die inside rusting.particle_blocker boxes and below heightfield ground" },
         #[skip] command: crate::runtime::ParticleCommand,
     }
 }
@@ -1557,6 +1558,15 @@ crate::reflect! {
         color: [f32; 3] {
             unit: "linear rgb", min: 0.0,
             doc: "light every sprite gets before 2D lights; without one sprites keep full color",
+        },
+    }
+}
+
+crate::reflect! {
+    struct ParticleBlocker {
+        extents: [f32; 3] {
+            unit: "m", min: 0.0,
+            doc: "half size of the box in the object's local axes",
         },
     }
 }

@@ -216,6 +216,11 @@ Passed: `cargo fmt --all --check`, clippy default / `--no-default-features` /
 - Instead: rain falls through roofs and into cabins.
 - Wanted: an emitter option that kills particles below a height field or inside
   `rusting.particle_blocker` boxes.
+- Status: done (this commit, test: `blocked_rain_stops_at_roofs_and_the_ground`).
+  `ParticleEmitter::blockers` kills CPU particles inside `ParticleBlocker { extents }` boxes
+  (turned and scaled with the object) and below any `Heightfield`, in the fixed step and the
+  editor preview. GPU simulated emitters ignore it. Passed: fmt, clippy (default,
+  no-default-features, gpu-tests), `cargo test --workspace`, gpu-tests under the lock.
 
 ### E4. Global wetness
 

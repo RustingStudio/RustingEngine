@@ -1199,6 +1199,8 @@ pub const SLIDE_SOUND_COMPONENT: &str = "rusting.slide_sound";
 pub const BURST_EMITTER_COMPONENT: &str = "rusting.burst_emitter";
 /// Registry name of the built-in particle emitter.
 pub const PARTICLE_EMITTER_COMPONENT: &str = "rusting.particle_emitter";
+/// Registry name of the built-in particle blocker box.
+pub const PARTICLE_BLOCKER_COMPONENT: &str = "rusting.particle_blocker";
 /// Registry name of the built-in particle shader.
 pub const PARTICLE_SHADER_COMPONENT: &str = "rusting.particle_shader";
 /// Registry name of the built-in keyframe animation.
@@ -1375,6 +1377,9 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::ParticleShader>(PARTICLE_SHADER_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::ParticleBlocker>(PARTICLE_BLOCKER_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::Animation>(ANIMATION_COMPONENT)

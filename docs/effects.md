@@ -121,6 +121,20 @@ emitters fresh; the preview's particles stay in the editor.
 
 Particles are unlit. Their color is what you see, times `emissive`.
 
+## Roofs and ground
+
+With `blockers: true`, an emitter's particles die below
+`rusting.heightfield` ground and inside every `rusting.particle_blocker`
+box, so rain stops at a cabin's roof instead of falling into it:
+
+```json
+{"name": "Cabin roof", "transform": {"position": [0, 3, 0]},
+ "components": {"rusting.particle_blocker": {"extents": [3.0, 0.2, 4.0]}}}
+```
+
+The box takes the object's rotation and scale. Only CPU simulated
+particles are blocked; GPU particles pass through.
+
 ## From game code
 
 ```rust
