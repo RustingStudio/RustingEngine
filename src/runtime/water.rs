@@ -20,8 +20,9 @@ use bevy_ecs::prelude::{
 use nalgebra::Vector3;
 use std::f32::consts::TAU;
 
-/// A rectangle of water centered on the entity. It is axis aligned: the
-/// entity's rotation and scale are ignored, only its position counts.
+/// A rectangle of water centered on the entity, or with `ocean` an endless
+/// sea. It is axis aligned: the entity's rotation and scale are ignored,
+/// only its position counts.
 /// `flow_direction` turns both the waves and the current, so a long thin
 /// water with a `flow_speed` makes a river.
 #[derive(
@@ -69,6 +70,10 @@ pub struct WaterBody {
     /// Seconds on the game's own clock, for waves that follow a day cycle or
     /// a pause; `None` follows the fixed tick.
     pub time: Option<f64>,
+    /// An endless sea at the entity's height: bodies float everywhere, and
+    /// the `size` grid follows the active camera with cells that grow away
+    /// from it.
+    pub ocean: bool,
 }
 
 /// One Gerstner wave of a [`WaterBody`]: crests that travel at the
@@ -119,6 +124,7 @@ impl Default for WaterBody {
             ripple_length: 1.0,
             waves: Vec::new(),
             time: None,
+            ocean: false,
         }
     }
 }
@@ -221,8 +227,9 @@ impl WaterBody {
     }
 
     pub(super) fn contains(&self, center: [f32; 3], x: f32, z: f32) -> bool {
-        (x - center[0]).abs() <= self.size[0] / 2.0
-            && (z - center[2]).abs() <= self.size[1] / 2.0
+        self.ocean
+            || (x - center[0]).abs() <= self.size[0] / 2.0
+                && (z - center[2]).abs() <= self.size[1] / 2.0
     }
 }
 
@@ -267,11 +274,21 @@ fn build_mesh(water: &WaterBody, center: [f32; 3], time: f64) -> MeshAsset {
     let cells = water.resolution.clamp(2, 256) as f32;
     let nx = ((water.size[0] / longer * cells).ceil() as usize).max(1);
     let nz = ((water.size[1] / longer * cells).ceil() as usize).max(1);
+    // -1 to 1 across the grid. Ocean cells are a quarter of the even size
+    // at the center and grow to seven times that at the rim.
+    let reach = |i: usize, n: usize| {
+        let u = 2.0 * i as f32 / n as f32 - 1.0;
+        if water.ocean {
+            u * (0.25 + 0.75 * u.abs())
+        } else {
+            u
+        }
+    };
     let mut vertices = Vec::with_capacity((nx + 1) * (nz + 1));
     for j in 0..=nz {
         for i in 0..=nx {
-            let x = center[0] + (i as f32 / nx as f32 - 0.5) * water.size[0];
-            let z = center[2] + (j as f32 / nz as f32 - 0.5) * water.size[1];
+            let x = center[0] + reach(i, nx) * water.size[0] / 2.0;
+            let z = center[2] + reach(j, nz) * water.size[1] / 2.0;
             let (height, slope) = water.wave(x, z, time);
             let n = Vector3::new(-slope[0], 1.0, -slope[1]).normalize();
             vertices.push(MeshVertex {
@@ -297,7 +314,8 @@ fn build_mesh(water: &WaterBody, center: [f32; 3], time: f64) -> MeshAsset {
 }
 
 /// Per fixed step: gives each [`WaterBody`] its surface entity and rewrites
-/// the surface mesh for the current tick. The surface entity carries a
+/// the surface mesh for the current tick, around the active camera for an
+/// ocean. The surface entity carries a
 /// `FluidParticle` marker, so [`super::fluid::sync_fluid_visuals`] despawns
 /// it when the body goes.
 /// ponytail: the grid uploads again each tick; move the waves to the vertex
@@ -316,14 +334,40 @@ pub(super) fn sync_water(
         Option<&mut WaterMesh>,
     )>,
     markers: Query<&super::FluidParticle>,
+    cameras: Query<(
+        Entity,
+        &super::Camera,
+        &crate::Transform,
+        Option<&super::Parent>,
+        Option<&super::GlobalTransform>,
+    )>,
 ) {
     let seconds = time.fixed_tick as f64 * time.fixed_delta.as_secs_f64();
     let Some(mut assets) = assets else {
         return;
     };
+    let eye = cameras
+        .iter()
+        .filter(|(_, camera, ..)| camera.active)
+        .max_by_key(|(entity, camera, ..)| {
+            super::audio::camera_rank(*entity, camera)
+        })
+        .map(|(_, _, transform, parent, global)| {
+            super::cpu_physics::world_position(transform, parent, global)
+        });
     for (owner, water, transform, parent, global, mesh) in &mut waters {
-        let position =
+        let mut position =
             super::cpu_physics::world_position(transform, parent, global);
+        if let Some(eye) = eye.filter(|_| water.ocean) {
+            // Moves in whole center cells, so near vertices stay put.
+            // ponytail: far cells still slide a little as the camera moves;
+            // ring snapping if the horizon shimmers.
+            let longer = water.size[0].max(water.size[1]);
+            let cell = longer / water.resolution.clamp(2, 256) as f32 / 4.0;
+            for axis in [0, 2] {
+                position[axis] = (eye[axis] / cell).round() * cell;
+            }
+        }
         let built = build_mesh(water, position, water.clock(seconds));
         let existing = mesh.as_deref().filter(|mesh| {
             markers
@@ -716,6 +760,58 @@ mod tests {
         let fixed = app.world().resource::<FrameTime>();
         let seconds = fixed.fixed_tick as f64 * fixed.fixed_delta.as_secs_f64();
         assert_ne!(*built, build_mesh(&water, [0.0; 3], seconds));
+    }
+
+    #[test]
+    fn an_ocean_follows_the_camera_and_floats_bodies_everywhere() {
+        use crate::runtime::{App, Camera};
+        let ocean = WaterBody {
+            size: [100.0, 100.0],
+            resolution: 8,
+            wave_height: 0.0,
+            ocean: true,
+            ..WaterBody::default()
+        };
+        assert!(ocean.contains([0.0; 3], 1e4, -1e4));
+        let lake = WaterBody {
+            ocean: false,
+            ..ocean.clone()
+        };
+        assert!(!lake.contains([0.0; 3], 1e4, -1e4));
+        let mut app = App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        let owner = app
+            .world_mut()
+            .spawn((ocean, crate::Transform::new([0.0, 2.0, 0.0])))
+            .id();
+        app.world_mut().spawn((
+            Camera {
+                active: true,
+                ..Camera::default()
+            },
+            crate::Transform::new([500.0, 10.0, -300.0]),
+        ));
+        app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+            .unwrap();
+        let mesh = app.world().get::<WaterMesh>(owner).unwrap().mesh;
+        let assets = app.world().resource::<AssetServer>();
+        let vertices = &assets.meshes.get(mesh).unwrap().vertices;
+        let middle = |axis: usize| {
+            let (low, high) =
+                vertices
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(low, high), v| {
+                        (low.min(v.position[axis]), high.max(v.position[axis]))
+                    });
+            (low + high) / 2.0
+        };
+        assert!((middle(0) - 500.0).abs() < 4.0, "{}", middle(0));
+        assert!((middle(2) + 300.0).abs() < 4.0, "{}", middle(2));
+        assert_eq!(vertices[0].position[1], 2.0);
+        // Row 0 runs along x: cells near the camera are finer.
+        let gap =
+            |i: usize| vertices[i + 1].position[0] - vertices[i].position[0];
+        assert!(gap(4) * 3.0 < gap(0), "{} {}", gap(4), gap(0));
     }
 
     #[test]

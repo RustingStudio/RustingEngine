@@ -323,6 +323,13 @@ fold over. Floating bodies and swimmers ride the same surface.
 time skip moves them; `null` follows the fixed tick. Game code reads the
 surface with `WaterBody::wave(x, z, water.clock(seconds))`.
 
+`"ocean": true` makes the water an endless sea at the entity's height.
+Bodies float and players swim anywhere, not only inside `size`. The drawn
+grid is still `size` across with `resolution` cells, but it follows the
+active camera, and its cells start at a quarter of the even size under the
+camera and grow to seven times that at the rim. Give it a `size` that reaches
+the horizon, such as 2000 x 2000.
+
 ## Text in the world
 
 `rusting.text` puts text on a sign, over a door or above an object. It

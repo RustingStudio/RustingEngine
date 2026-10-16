@@ -950,14 +950,20 @@ pub fn active_camera(world: &mut World) -> Option<(Entity, super::Camera)> {
     cameras
         .iter(world)
         .filter(|(_, camera)| camera.active)
-        .max_by_key(|(entity, camera)| {
-            (
-                camera.viewport.is_none(),
-                camera.priority,
-                std::cmp::Reverse(entity.to_bits()),
-            )
-        })
+        .max_by_key(|(entity, camera)| camera_rank(*entity, camera))
         .map(|(entity, camera)| (entity, *camera))
+}
+
+/// Order active cameras compete in; the highest aims.
+pub(crate) fn camera_rank(
+    entity: Entity,
+    camera: &super::Camera,
+) -> (bool, i32, std::cmp::Reverse<u64>) {
+    (
+        camera.viewport.is_none(),
+        camera.priority,
+        std::cmp::Reverse(entity.to_bits()),
+    )
 }
 
 /// Turns the [`SoundEvent`]s visible this frame into play requests, then

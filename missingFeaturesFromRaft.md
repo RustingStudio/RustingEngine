@@ -190,7 +190,13 @@ swayed surface over `(x, z)` (8 fixed-point steps back to the swayed start point
 is no longer `Copy`. Passed: `cargo fmt --all --check`, clippy default /
 `--no-default-features` / `--features gpu-tests` with `-D warnings`, `cargo test --workspace`,
 and the locked `--features gpu-tests` run.
-E1b (`ocean`): not started.
+E1b: done (this commit, test: `an_ocean_follows_the_camera_and_floats_bodies_everywhere`).
+`WaterBody::ocean` makes `contains` true everywhere (buoyancy and swimming), and `sync_water`
+centers the grid on the active camera (same pick as `active_camera`, snapped to whole center
+cells) with cells a quarter of the even size at the center growing to 1.75x at the rim.
+Passed: `cargo fmt --all --check`, clippy default / `--no-default-features` /
+`--features gpu-tests` with `-D warnings`, `cargo test --workspace`, and the locked
+`--features gpu-tests` run.
 
 ### E2. Clouds on `rusting.procedural_sky`
 

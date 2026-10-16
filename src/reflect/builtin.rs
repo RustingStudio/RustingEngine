@@ -813,6 +813,7 @@ crate::reflect! {
         ripple_length: f32 { unit: "m", min: 0.01, doc: "distance between small waves" },
         waves: Vec<OceanWave> { doc: "Gerstner waves in place of the three sines; empty keeps the sines" },
         time: Option<f64> { unit: "s", doc: "the game's own clock for the waves; null follows the fixed tick" },
+        ocean: bool { doc: "endless sea: bodies float everywhere and the size grid follows the active camera, finer near it" },
     }
 }
 
