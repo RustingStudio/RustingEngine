@@ -1082,6 +1082,18 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
         example: || json!({"stiffness": 400.0, "damping": 14.0}),
     },
     ComponentSection {
+        key: "rusting.render_layer",
+        summary: "World (default) or Viewmodel, on an object with a mesh_renderer. While the active camera has a rusting.viewmodel_camera, Viewmodel meshes draw over the world with that camera's own field of view, so a held tool never pokes into walls; lighting and shadows still see them where they are. Without one they draw as World.",
+        gpu: "none: a flag in the per-instance data; viewmodel meshes skip occlusion culling",
+        example: || json!("Viewmodel"),
+    },
+    ComponentSection {
+        key: "rusting.viewmodel_camera",
+        summary: "On a perspective camera: draws rusting.render_layer Viewmodel meshes over the world with vertical_fov_radians in place of the camera's own field of view. Frustum culling still uses the camera's field of view.",
+        gpu: NO_GPU,
+        example: || json!({"vertical_fov_radians": 0.9}),
+    },
+    ComponentSection {
         key: "rusting.material_override",
         summary: "Per-object material values on an object with a mesh_renderer: base_color (linear RGBA, multiplied into the base color texture), emissive (linear RGB glow), metallic, roughness, uv_scale and uv_offset each replace its material's value; null keeps the material's. Objects sharing a material still draw in one instanced batch, so a hundred crates in a hundred colors cost one material. Applies to the object only, not its children.",
         gpu: "none: the values ride in the per-instance data the renderer already uploads",

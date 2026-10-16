@@ -48,8 +48,8 @@ use crate::runtime::{
     CAMERA_SCREEN_COMPONENT, CAMERA_SHAKE_COMPONENT, COLOR_GRADING_COMPONENT,
     COLOR_LUT_COMPONENT, DEPTH_OF_FIELD_COMPONENT, FLASH_COMPONENT,
     FOG_SHADER_COMPONENT, MATERIAL_OVERRIDE_COMPONENT, MOTION_BLUR_COMPONENT,
-    POST_SHADER_COMPONENT, SKY_SHADER_COMPONENT, SPAWN_GRID_COMPONENT,
-    SQUASH_COMPONENT,
+    POST_SHADER_COMPONENT, RENDER_LAYER_COMPONENT, SKY_SHADER_COMPONENT,
+    SPAWN_GRID_COMPONENT, SQUASH_COMPONENT, VIEWMODEL_CAMERA_COMPONENT,
 };
 
 /// Components that together make a World Environment object.
@@ -220,6 +220,14 @@ pub(in crate::editor) fn component_help(
         SPAWN_GRID_COMPONENT => (
             "Copies this object onto a grid when the game runs.",
             "Ball pits, crowds, rows of crates; one object instead of thousands.",
+        ),
+        RENDER_LAYER_COMPONENT => (
+            "Viewmodel draws this mesh over the world with the camera's viewmodel field of view.",
+            "Held tools and weapons in first person that never poke into walls.",
+        ),
+        VIEWMODEL_CAMERA_COMPONENT => (
+            "Draws Viewmodel layer meshes over the world with their own field of view.",
+            "A first-person camera whose held tool keeps one size at any world FOV.",
         ),
         MATERIAL_OVERRIDE_COMPONENT => (
             "Replaces some of its material's values for this object only.",

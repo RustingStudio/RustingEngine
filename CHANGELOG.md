@@ -4,7 +4,7 @@
 
 ### Added
 
-- `RenderLayer::Viewmodel` on a mesh and `ViewmodelCamera { vertical_fov_radians }` on the active camera: held tools draw over the world with their own field of view and never poke into walls (RAFT).
+- `rusting.render_layer` (`RenderLayer::Viewmodel`) on a mesh and `rusting.viewmodel_camera` (`ViewmodelCamera { vertical_fov_radians }`) on the active camera: held tools draw over the world with their own field of view and never poke into walls (RAFT).
 - `ColorGrading::lens_droplets` (0 to 1): rain drops on the camera lens that bend the image behind them and fade after a few seconds, for first-person views in storms.
 - `GameScene::set_wetness(0..1)` and `MaterialAsset::wettable`: wettable materials darken and turn glossy as the global wetness rises, so decks, sails and rocks get wet in the rain, not only terrain.
 - `rusting.particle_blocker` boxes and the emitter option `blockers`: CPU particles die inside the boxes and below `rusting.heightfield` ground, so rain stops at roofs (RAFT).

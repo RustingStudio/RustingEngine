@@ -261,6 +261,9 @@ The camera side is `ViewmodelCamera { vertical_fov_radians }` on the active came
 no second pass: viewmodel meshes scale clip-space xy to their FOV and squash their depth
 toward the near plane, so they draw over walls in the same pass and keep true world lighting.
 Frustum culling still uses the main camera's FOV.
+E7b: done (this commit, test: `examples_load_through_the_scene_parser_and_registry_unchanged`).
+Scene files, snapshots, the editor and the schema know `rusting.render_layer` and
+`rusting.viewmodel_camera`.
 
 ### E8. Reading the resolved quality profile
 

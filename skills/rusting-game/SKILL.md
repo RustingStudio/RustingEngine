@@ -272,6 +272,8 @@ each one's fields, defaults and an example:
 - `rusting.camera_shake`: Trauma shake on a camera.
 - `rusting.spawn_grid`: Bulk spawn.
 - `rusting.squash`: Squash and stretch spring.
+- `rusting.render_layer`: World (default) or Viewmodel, on an object with a mesh_renderer.
+- `rusting.viewmodel_camera`: On a perspective camera: draws rusting.render_layer Viewmodel meshes over the world with vertical_fov_radians in place of the camera's own field of view.
 - `rusting.material_override`: Per-object material values on an object with a mesh_renderer: base_color (linear RGBA, multiplied into the base color texture), emissive (linear RGB glow), metallic, roughness, uv_scale and uv_offset each replace its material's value; null keeps the material's.
 - `rusting.flash`: Hit flash.
 - `rusting.sound_cue`: Sends a SoundEvent when the body starts touching something or game code calls trigger().

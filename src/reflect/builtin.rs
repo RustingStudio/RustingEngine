@@ -29,11 +29,12 @@ use crate::runtime::{
     PhysicsMaterial, PhysicsSettings, PhysicsSyncMode, Pickup,
     PlatformerController, PlayerController, Polygon2d, PostShader, PostVolume,
     ProceduralSky, QualityProfile, RandomSeed, ReflectionProbe, RenderBounds,
-    RenderSettings, ReverbZone, SceneBackground, SceneInstance, ShadowQuality,
-    SkyLight, SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid,
-    Sprite, SpriteAnimation, Squash, StateAction, StateTransition, SurfaceClip,
-    Terrain, TerrainFracture, TerrainLayer, TileKind, TileMap, ToneMapper,
-    ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
+    RenderLayer, RenderSettings, ReverbZone, SceneBackground, SceneInstance,
+    ShadowQuality, SkyLight, SkyShader, SlideSound, SoftBlock, SoundCue,
+    SoundId, SpawnGrid, Sprite, SpriteAnimation, Squash, StateAction,
+    StateTransition, SurfaceClip, Terrain, TerrainFracture, TerrainLayer,
+    TileKind, TileMap, ToneMapper, ToneMapping, Tween, TweenProperty,
+    TweenRepeat, Vehicle, ViewmodelCamera, WaterBody, Wheel,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -341,6 +342,19 @@ crate::reflect! {
     struct SpawnGrid {
         count: [u32; 3] { unit: "cells", doc: "along X, Y and Z, original included" },
         spacing: [f32; 3] { unit: "m" },
+    }
+}
+
+crate::reflect! {
+    enum RenderLayer { World, Viewmodel }
+}
+
+crate::reflect! {
+    struct ViewmodelCamera {
+        vertical_fov_radians: f32 {
+            unit: "rad", min: 0.01, max: 3.1,
+            doc: "field of view of the camera's Viewmodel meshes",
+        },
     }
 }
 

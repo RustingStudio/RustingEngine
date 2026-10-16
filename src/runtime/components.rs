@@ -52,8 +52,17 @@ pub enum RenderLayer {
     serde::Serialize,
     serde::Deserialize,
 )]
+#[serde(default)]
 pub struct ViewmodelCamera {
     pub vertical_fov_radians: f32,
+}
+
+impl Default for ViewmodelCamera {
+    fn default() -> Self {
+        Self {
+            vertical_fov_radians: std::f32::consts::FRAC_PI_3,
+        }
+    }
 }
 
 /// Per-object values that replace its material's: a red and a blue crate

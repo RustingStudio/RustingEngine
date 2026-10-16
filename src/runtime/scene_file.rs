@@ -1187,6 +1187,10 @@ pub const SQUASH_COMPONENT: &str = "rusting.squash";
 /// Registry name of the built-in hit flash.
 pub const FLASH_COMPONENT: &str = "rusting.flash";
 pub const MATERIAL_OVERRIDE_COMPONENT: &str = "rusting.material_override";
+/// Registry name of the built-in mesh render layer.
+pub const RENDER_LAYER_COMPONENT: &str = "rusting.render_layer";
+/// Registry name of the built-in viewmodel camera.
+pub const VIEWMODEL_CAMERA_COMPONENT: &str = "rusting.viewmodel_camera";
 /// Registry name of the built-in camera trauma shake.
 pub const CAMERA_SHAKE_COMPONENT: &str = "rusting.camera_shake";
 /// Registry name of the built-in event-triggered sound cue.
@@ -1365,6 +1369,12 @@ impl Default for SceneComponentRegistry {
             .expect("empty registry has no duplicates");
         registry
             .register::<super::MaterialOverride>(MATERIAL_OVERRIDE_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::RenderLayer>(RENDER_LAYER_COMPONENT)
+            .expect("empty registry has no duplicates");
+        registry
+            .register::<super::ViewmodelCamera>(VIEWMODEL_CAMERA_COMPONENT)
             .expect("empty registry has no duplicates");
         registry
             .register::<super::SpawnGrid>(SPAWN_GRID_COMPONENT)
