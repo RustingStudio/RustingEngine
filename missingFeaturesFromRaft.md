@@ -274,6 +274,9 @@ VRAM it picks Balanced, and otherwise High. Game code only sees the requested
 - Instead: game-side content (ocean grid, foliage counts, rain particles, view distance) treats
   Auto like Medium.
 - Wanted: a read-only `RenderSettings::resolved_quality`, or a `GameScene` getter.
+- Status: done (this commit, test: `resolved_quality_follows_the_gpu_once_a_renderer_starts`).
+  `GameScene::resolved_quality()`; the game runner now puts `RendererCapabilities` in the
+  world, as the editor already did. It stays `Auto` before a renderer starts.
 
 ### E9. Shadow cascade count
 

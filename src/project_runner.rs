@@ -908,6 +908,23 @@ impl GameScene<'_> {
         self.world.resource::<RenderSettings>().render_scale
     }
 
+    /// The profile the renderer draws with: `RenderSettings::quality` with
+    /// `Auto` resolved from the GPU, so game content such as foliage
+    /// counts can follow it. Stays `Auto` until a renderer starts, such as
+    /// in headless runs.
+    #[must_use]
+    pub fn resolved_quality(&self) -> crate::runtime::QualityProfile {
+        let requested = self.world.resource::<RenderSettings>().quality;
+        self.world
+            .get_resource::<crate::rendering::scene_renderer::RendererCapabilities>()
+            .map_or(requested, |capabilities| {
+                crate::rendering::scene_renderer::resolve_quality(
+                    requested,
+                    capabilities,
+                )
+            })
+    }
+
     /// Waits for the display refresh before showing each frame.
     pub fn set_vsync(&mut self, enabled: bool) {
         self.world.resource_mut::<RenderSettings>().vsync = enabled;
@@ -4787,9 +4804,11 @@ impl WindowRunner {
             )
             .expect("failed to create game scene renderer"),
         );
-        runtime
-            .world_mut()
-            .insert_resource(crate::runtime::GpuSkinning);
+        if let Some(scene_renderer) = &self.scene_renderer {
+            let world = runtime.world_mut();
+            world.insert_resource(scene_renderer.capabilities().clone());
+            world.insert_resource(crate::runtime::GpuSkinning);
+        }
         self.cloth = crate::rendering::gpu_cloth::GpuClothRunner::new(
             self.vulkan.device().clone(),
             renderer.graphics_queue(),
@@ -8922,6 +8941,36 @@ mod tests {
         let mut scene = GameScene { world: &mut world };
         scene.set_time_scale(-2.0);
         assert_eq!(scene.time_scale(), 0.0);
+    }
+
+    #[test]
+    fn resolved_quality_follows_the_gpu_once_a_renderer_starts() {
+        use crate::rendering::scene_renderer::{
+            Capability, RendererCapabilities,
+        };
+        use crate::runtime::QualityProfile;
+        let mut world = World::new();
+        world.insert_resource(RenderSettings::default());
+        let scene = GameScene { world: &mut world };
+        assert_eq!(scene.resolved_quality(), QualityProfile::Auto);
+        world.insert_resource(RendererCapabilities {
+            device_name: String::new(),
+            integrated_gpu: true,
+            device_local_bytes: 8 << 30,
+            multi_draw_indirect: Capability::default(),
+            draw_indirect_count: Capability::default(),
+            bindless_textures: Capability::default(),
+            memory_budget: Capability::default(),
+            sampler_anisotropy: Capability::default(),
+            timestamp_queries: false,
+            msaa_samples: 1,
+            msaa_2x: false,
+        });
+        let scene = GameScene { world: &mut world };
+        assert_eq!(scene.resolved_quality(), QualityProfile::Eco);
+        world.resource_mut::<RenderSettings>().quality = QualityProfile::High;
+        let scene = GameScene { world: &mut world };
+        assert_eq!(scene.resolved_quality(), QualityProfile::High);
     }
 
     #[test]

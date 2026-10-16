@@ -164,6 +164,10 @@ scene.set_exposure(1.8); // brighter, e.g. a CCTV feed; 1 is neutral
 - Fullscreen and window size apply after the frame. The platform can pick
   another window size; read `scene.viewport_size()` on a later frame.
   Headless runs ignore both.
+- `scene.resolved_quality()` is the profile the renderer draws with, with
+  `Auto` resolved from the GPU (`Eco`, `Balanced` or `High`). Scale game
+  content such as foliage counts, rain particles or view distance by it. It
+  stays `Auto` until a renderer starts, such as in headless runs.
 - `set_exposure` writes the scene's `rusting.tone_mapping` exposure and adds
   one when the scene has none.
 - None of these are saved. Store them with `save_data` and set them again

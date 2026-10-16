@@ -1211,6 +1211,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
         &[
             "set_render_scale",
             "render_scale",
+            "resolved_quality",
             "set_pixelated",
             "set_upscale_sharpness",
             "set_vsync",
