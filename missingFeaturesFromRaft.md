@@ -338,6 +338,7 @@ multiplies the base colour and so cannot turn blue water white.
 - Instead: the 10-slot hotbar is picked with keys 1-0 only.
 - Wanted: `WheelUp` / `WheelDown` as pressable inputs (one press per wheel line), or
   `GameScene::scroll_delta()`.
+- Status: done (this commit, `GameScene::scroll_delta()`, test: `a_tick_function_reads_each_wheel_turn_once`).
 
 ### E15. Copies keep animation and skin
 

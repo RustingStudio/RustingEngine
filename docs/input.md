@@ -52,6 +52,7 @@ The engine binds the player controller's actions itself:
 | `scene.pointer_ray()` | the world ray under the cursor, for aiming and picking |
 | `scene.clicked()` | the HUD buttons clicked since the last frame |
 | `scene.window_focused()` | false while the window has lost focus |
+| `scene.scroll_delta()` | mouse wheel lines turned since the last frame (or tick); `[0, 1]` is one line away from the player |
 
 ```rust
 use rusting_engine::prelude::*;

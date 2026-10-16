@@ -1029,6 +1029,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "rebind",
             "window_focused",
             "viewport_size",
+            "scroll_delta",
         ],
     ),
     (

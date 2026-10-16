@@ -1861,6 +1861,15 @@ impl GameScene<'_> {
         self.world.resource::<RuntimeInput>().cursor_position()
     }
 
+    /// Mouse wheel lines turned since the last frame, or in a tick function
+    /// since the last tick: positive `y` turns the wheel away from the
+    /// player. A frame that runs several ticks gives its scroll to the first.
+    /// For a hotbar, step the slot by the sign of `y`.
+    #[must_use]
+    pub fn scroll_delta(&self) -> [f32; 2] {
+        self.world.resource::<RuntimeInput>().scroll()
+    }
+
     /// View size in pixels. In `rusting test` it is the scenario's
     /// `capture_size` from tick 0.
     #[must_use]
@@ -6780,6 +6789,43 @@ mod tests {
         app.run_exit_update().unwrap();
         assert!(app.exit_requested());
         assert_eq!(*SEEN.lock().unwrap(), ["tick", "update", "exit"]);
+    }
+
+    #[test]
+    fn a_tick_function_reads_each_wheel_turn_once() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+        static LINES: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+        fn idle(_: &mut GameScene<'_>, _: &FrameTime) {}
+        fn tick(scene: &mut GameScene<'_>, _: &FrameTime) {
+            LINES.lock().unwrap().push(scene.scroll_delta()[1]);
+        }
+        let mut app = App::new();
+        app.add_plugin(SimpleGamePlugin {
+            update: idle,
+            tick: Some(tick),
+            components: None,
+        })
+        .unwrap();
+        let step = app
+            .world()
+            .resource::<crate::runtime::TimeControl>()
+            .fixed_delta;
+        let frame = |app: &mut App, delta: Duration, lines: f32| {
+            app.world_mut()
+                .resource_mut::<RuntimeInput>()
+                .record_scroll([0.0, lines]);
+            app.update_exact(delta).unwrap();
+            app.world_mut()
+                .resource_mut::<RuntimeInput>()
+                .clear_frame_edges();
+        };
+        // A fast frame's turn waits for the next frame, whose first of two
+        // ticks gets both turns.
+        frame(&mut app, step / 4, 1.0);
+        frame(&mut app, step * 2, 2.0);
+        frame(&mut app, step, -1.0);
+        assert_eq!(*LINES.lock().unwrap(), [3.0, 0.0, -1.0]);
     }
 
     #[test]
