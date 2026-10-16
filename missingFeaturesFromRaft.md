@@ -285,6 +285,9 @@ High 4096 and 80 m. It does not set how many cascades there are.
 
 - Wanted: a cascade count per setting. Spec 4.2 asks for 2 on Low, 3 on Medium and 4 on
   High/Ultra.
+- Status: done (this commit, test: `shadow_settings_override_the_profile`).
+  `shadow_settings` returns the cascade count: 2 on Low/Eco, 3 on Medium/Balanced and 4 on
+  High. The atlas stays 2x2, so fewer cascades leave tiles unused at the same texel size.
 
 ### E10. Texture resolution cap
 

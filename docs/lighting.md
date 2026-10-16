@@ -20,8 +20,8 @@ lamps near room centres. A spot or point light with `"shadows": true` stops
 at walls, so a flashlight does not light the far side of a door. One light
 per frame casts shadows: the first directional light with `shadows`, or,
 when there is none, the first spot light with `shadows`, then the first
-point light with `shadows`. The sun's shadow uses four cascades, sharp near
-the camera; a point light's shadow renders six cube faces. A mesh's `cast_shadows` and
+point light with `shadows`. The sun's shadow uses cascades, sharp near the
+camera: 2 at `ShadowQuality::Low`, 3 at `Medium` and 4 at `High`; a point light's shadow renders six cube faces. A mesh's `cast_shadows` and
 `receive_shadows` apply to that one shadow.
 
 Point and spot lights have a `radius`: the size of the glowing bulb, in

@@ -623,12 +623,12 @@ struct ShadowUpload {
 /// distance in front of the camera it covers, for a resolved profile.
 /// Higher profiles cover more distance at a finer texel size; every Vulkan
 /// device supports 4096-texel 2D images.
-/// Shadow map size and reach for a shadow setting, where `Auto` follows
-/// the resolved quality profile.
+/// Shadow map size, reach and directional cascade count for a shadow
+/// setting, where `Auto` follows the resolved quality profile.
 pub fn shadow_settings_for(
     shadows: ShadowQuality,
     profile: QualityProfile,
-) -> (u32, f32) {
+) -> (u32, f32, usize) {
     shadow_settings(match shadows {
         ShadowQuality::Auto => profile,
         ShadowQuality::Low => QualityProfile::Eco,
@@ -637,11 +637,13 @@ pub fn shadow_settings_for(
     })
 }
 
-pub fn shadow_settings(profile: QualityProfile) -> (u32, f32) {
+pub fn shadow_settings(profile: QualityProfile) -> (u32, f32, usize) {
     match profile {
-        QualityProfile::Eco => (1024, 30.0),
-        QualityProfile::Balanced => (2048, 50.0),
-        QualityProfile::High | QualityProfile::Auto => (4096, 80.0),
+        QualityProfile::Eco => (1024, 30.0, 2),
+        QualityProfile::Balanced => (2048, 50.0, 3),
+        QualityProfile::High | QualityProfile::Auto => {
+            (4096, 80.0, SHADOW_CASCADES)
+        }
     }
 }
 
@@ -3316,7 +3318,7 @@ impl SceneRenderer {
         }
         let gpu_cull = cull_sets.last();
         let early_cull = occlusion.then(|| &cull_sets[0]);
-        let (shadow_size, shadow_distance) =
+        let (shadow_size, shadow_distance, cascade_count) =
             shadow_settings_for(render_world.shadows, quality);
         if self.shadow_framebuffer.extent()[0] != shadow_size {
             // In-flight frames keep the old map alive through their command
@@ -3336,8 +3338,10 @@ impl SceneRenderer {
                 let mut near = 0.0;
                 let mut cascades = Vec::new();
                 let mut far = [0.0; 4];
-                for (index, end) in far.iter_mut().enumerate() {
-                    *end = cascade_end(index, shadow_distance);
+                for (index, end) in
+                    far.iter_mut().take(cascade_count).enumerate()
+                {
+                    *end = cascade_end(index, shadow_distance, cascade_count);
                     let (center, radius) = frustum_slice_sphere(
                         &steady_clip,
                         eye,
@@ -10870,7 +10874,7 @@ fn create_shadow_pass(
         }
     )
     .map_err(|error| SceneRenderError(error.to_string()))?;
-    let (size, _) = shadow_settings(QualityProfile::Balanced);
+    let (size, ..) = shadow_settings(QualityProfile::Balanced);
     let (framebuffer, shadow_map) =
         create_shadow_target(&render_pass, memory_allocator, size)?;
     // Outside the map the border depth of 1.0 compares as lit.
@@ -11723,7 +11727,7 @@ fn camera_eye_forward(camera: Option<ExtractedCamera>) -> ([f32; 3], [f32; 3]) {
     })
 }
 
-/// Directional shadow cascades, one per tile of a 2x2 shadow map atlas.
+/// Most directional shadow cascades, one per tile of a 2x2 shadow map atlas.
 const SHADOW_CASCADES: usize = 4;
 /// Light views the shadow upload holds: the six cube faces of a point light.
 const SHADOW_VIEWS: usize = 6;
@@ -11731,9 +11735,9 @@ const SHADOW_VIEWS: usize = 6;
 /// Camera depth where cascade `index` ends: mostly logarithmic splits, so
 /// the near cascades are small and sharp, blended with even ones so the
 /// far cascades are not too thin.
-fn cascade_end(index: usize, distance: f32) -> f32 {
+fn cascade_end(index: usize, distance: f32, count: usize) -> f32 {
     let near = 0.5_f32.min(distance);
-    let t = (index + 1) as f32 / SHADOW_CASCADES as f32;
+    let t = (index + 1) as f32 / count as f32;
     let logarithmic = near * (distance / near).powf(t);
     0.75 * logarithmic + 0.25 * distance * t
 }
@@ -14833,20 +14837,24 @@ mod tests {
     fn shadow_settings_override_the_profile() {
         assert_eq!(
             shadow_settings_for(ShadowQuality::Auto, QualityProfile::Eco),
-            (1024, 30.0)
+            (1024, 30.0, 2)
         );
         assert_eq!(
             shadow_settings_for(ShadowQuality::High, QualityProfile::Eco),
-            (4096, 80.0)
+            (4096, 80.0, 4)
         );
         assert_eq!(
             shadow_settings_for(ShadowQuality::Low, QualityProfile::High),
-            (1024, 30.0)
+            (1024, 30.0, 2)
         );
         assert_eq!(
             shadow_settings_for(ShadowQuality::Medium, QualityProfile::High),
-            (2048, 50.0)
+            (2048, 50.0, 3)
         );
+        // The last cascade always reaches the full shadow distance.
+        for count in 2..=SHADOW_CASCADES {
+            assert!((cascade_end(count - 1, 50.0, count) - 50.0).abs() < 1e-3);
+        }
     }
 
     #[test]

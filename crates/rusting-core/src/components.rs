@@ -417,18 +417,19 @@ pub enum Antialiasing {
     Taa,
 }
 
-/// Shadow map resolution and reach. `Auto` follows the quality profile.
+/// Shadow map resolution, reach and sun cascades. `Auto` follows the
+/// quality profile.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
 )]
 pub enum ShadowQuality {
     #[default]
     Auto,
-    /// 1024 px map, 30 m reach.
+    /// 1024 px map, 30 m reach, 2 cascades.
     Low,
-    /// 2048 px map, 50 m reach.
+    /// 2048 px map, 50 m reach, 3 cascades.
     Medium,
-    /// 4096 px map, 80 m reach.
+    /// 4096 px map, 80 m reach, 4 cascades.
     High,
 }
 

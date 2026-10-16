@@ -4,6 +4,7 @@
 
 ### Added
 
+- `ShadowQuality` sets the sun's cascade count: 2 on Low, 3 on Medium and 4 on High, so low settings render fewer shadow views (RAFT).
 - `GameScene::resolved_quality()`: the quality profile the renderer draws with, `Auto` resolved from the GPU, so game content can scale with it (RAFT).
 - `rusting.render_layer` (`RenderLayer::Viewmodel`) on a mesh and `rusting.viewmodel_camera` (`ViewmodelCamera { vertical_fov_radians }`) on the active camera: held tools draw over the world with their own field of view and never poke into walls (RAFT).
 - `ColorGrading::lens_droplets` (0 to 1): rain drops on the camera lens that bend the image behind them and fade after a few seconds, for first-person views in storms.
