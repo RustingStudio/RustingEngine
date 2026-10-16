@@ -305,6 +305,9 @@ in `water.rs` says so too). An ocean at resolution 96 has about 9,400 vertices, 
 about 0.6 MB and roughly 1 ms of CPU per tick. Storm seas need finer grids.
 
 - Wanted: wave displacement in the vertex shader.
+- Status: split into E11a (the vertex shader displaces a flat grid by `RenderWorld::water_waves`)
+  and E11b (`sync_water` builds the flat grid once and extraction fills the waves each tick).
+  - E11a Status: done (this commit, test: `water_waves_lift_a_flat_grid_in_the_vertex_shader`).
 
 ### E12. Foam on wave crests
 

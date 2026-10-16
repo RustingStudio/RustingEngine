@@ -1147,6 +1147,8 @@ struct PreparedRenderInstances {
     wetness: f32,
     /// `RenderWorld::viewmodels` the flags in `physics.w` were packed for.
     viewmodels: Vec<bevy_ecs::entity::Entity>,
+    /// [`water_wave_layout`] the wave slots in `normal` were packed for.
+    water_waves: Vec<WaterWaveSlot>,
     material_revisions: Vec<(Handle<MaterialAsset>, u64)>,
     instances: Subbuffer<[RenderInstanceUpload]>,
     /// Opaque and masked batches.
@@ -1610,11 +1612,15 @@ struct PreparedFrame {
     last_used: u64,
 }
 
+/// Wave rows as uploaded and the buffer holding them.
+type WaveRows = (Vec<[f32; 4]>, Subbuffer<[[f32; 4]]>);
+
 type GraphicsBuffers = (
     Subbuffer<[GpuBodyState]>,
     Subbuffer<[RenderInstanceUpload]>,
     Subbuffer<[LightUpload]>,
     Subbuffer<[GpuForceFieldUpload]>,
+    Subbuffer<[[f32; 4]]>,
 );
 
 fn same_buffer<T: ?Sized>(a: &Subbuffer<T>, b: &Subbuffer<T>) -> bool {
@@ -2031,6 +2037,9 @@ pub struct SceneRenderer {
     /// binding 14), kept while they stay the same.
     lean_fields:
         Option<(Vec<GpuForceFieldUpload>, Subbuffer<[GpuForceFieldUpload]>)>,
+    /// `RenderWorld::water_waves` as two vec4s per wave (set 0 binding 16),
+    /// kept while they stay the same.
+    water_waves: Option<WaveRows>,
     preparation_time: Duration,
     recording_time: Duration,
     counters: RenderCounters,
@@ -2430,6 +2439,7 @@ impl SceneRenderer {
             gpu_pass_times: GpuPassTimes::default(),
             gpu_part_times: GpuPartTimes::default(),
             lean_fields: None,
+            water_waves: None,
             preparation_time: Duration::ZERO,
             recording_time: Duration::ZERO,
             counters: RenderCounters::default(),
@@ -3164,18 +3174,56 @@ impl SceneRenderer {
             self.counters.upload_bytes += buffer.size();
             self.lean_fields = Some((lean_fields, buffer));
         }
+        // Without water one zeroed entry moves nothing.
+        let mut wave_data = render_world
+            .water_waves
+            .iter()
+            .flat_map(|(_, waves)| waves)
+            .flat_map(|wave| {
+                [
+                    [
+                        wave.direction[0],
+                        wave.direction[1],
+                        wave.wavenumber,
+                        wave.height,
+                    ],
+                    [wave.steepness, wave.phase, 0.0, 0.0],
+                ]
+            })
+            .collect::<Vec<_>>();
+        if wave_data.is_empty() {
+            wave_data.push([0.0; 4]);
+        }
+        if self
+            .water_waves
+            .as_ref()
+            .is_none_or(|(data, _)| *data != wave_data)
+        {
+            let buffer = self
+                .instance_allocator
+                .allocate_slice::<[f32; 4]>(wave_data.len() as DeviceSize)
+                .map_err(|error| SceneRenderError(error.to_string()))?;
+            buffer
+                .write()
+                .map_err(|error| SceneRenderError(error.to_string()))?
+                .copy_from_slice(&wave_data);
+            self.counters.upload_bytes += buffer.size();
+            self.water_waves = Some((wave_data, buffer));
+        }
         let render_instances = self.prepared_instances.as_ref().unwrap();
         let bound: GraphicsBuffers = (
             physics.states.clone(),
             render_instances.instances.clone(),
             lights.buffer.clone(),
             self.lean_fields.as_ref().unwrap().1.clone(),
+            self.water_waves.as_ref().unwrap().1.clone(),
         );
         let stale = self.prepared_frames.get(&frame_key).is_none_or(|frame| {
             !same_buffer(&frame.bound.0, &bound.0)
                 || !same_buffer(&frame.bound.1, &bound.1)
                 || !same_buffer(&frame.bound.2, &bound.2)
                 || !same_buffer(&frame.bound.3, &bound.3)
+                || !same_buffer(&frame.bound.4, &bound.4)
         });
         if stale {
             let graphics_set = DescriptorSet::new(
@@ -3186,6 +3234,7 @@ impl SceneRenderer {
                     WriteDescriptorSet::buffer(1, bound.1.clone()),
                     WriteDescriptorSet::buffer(2, bound.2.clone()),
                     WriteDescriptorSet::buffer(14, bound.3.clone()),
+                    WriteDescriptorSet::buffer(16, bound.4.clone()),
                 ],
                 [],
             )
@@ -7449,8 +7498,10 @@ impl SceneRenderer {
             .map(|screen| screen.material.key())
             .collect::<Vec<_>>();
         screens.sort_unstable();
+        let water_waves = water_wave_layout(render_world);
         let unchanged = |prepared: &PreparedRenderInstances| {
             prepared.flashes == render_world.flashes
+                && prepared.water_waves == water_waves
                 && prepared.material_overrides
                     == render_world.material_overrides
                 && prepared.lightmaps == render_world.lightmaps
@@ -7609,6 +7660,17 @@ impl SceneRenderer {
                 .unwrap_or(sway.amplitude);
             normal[1][3] = sway.frequency;
             normal[2][3] = sway.height;
+            // A water surface's waves take the sway's place: no lean, the
+            // first wave and the wave count.
+            let waves = water_waves
+                .binary_search_by_key(&renderable.entity, |slot| slot.0)
+                .ok()
+                .map(|at| water_waves[at]);
+            if let Some((_, first, count, _)) = waves {
+                normal[0][3] = 0.0;
+                normal[1][3] = first as f32;
+                normal[2][3] = count as f32;
+            }
             let mut color = material
                 .map_or([1.0, 0.0, 1.0, 1.0], |material| material.base_color);
             let (mut emissive, mut surface) =
@@ -7702,6 +7764,7 @@ impl SceneRenderer {
                                 .binary_search(&renderable.entity)
                                 .is_ok(),
                         ) << 2
+                        | u32::from(waves.is_some()) << 3
                         | lightmap_slot(render_world, renderable.entity) << 8,
                 ],
                 transmission: material.map_or([0.0; 4], |material| {
@@ -7764,6 +7827,14 @@ impl SceneRenderer {
                 let local = match swaying {
                     true => local.map(lean_room),
                     false => local,
+                };
+                let local = match water_waves
+                    .binary_search_by_key(&renderable.entity, |slot| slot.0)
+                {
+                    Ok(at) => {
+                        local.map(|local| wave_room(local, water_waves[at].3))
+                    }
+                    Err(_) => local,
                 };
                 // ponytail: the GPU tests a sphere around the box, which
                 // keeps some instances the CPU box test drops; send boxes
@@ -7891,6 +7962,7 @@ impl SceneRenderer {
             renderables_revision: render_world.renderables_revision,
             wetness: render_world.wetness,
             viewmodels: render_world.viewmodels.clone(),
+            water_waves,
             layout_revision: render_world.renderables_layout_revision,
             packed,
             sources,
@@ -8836,6 +8908,46 @@ fn compact_visible(
 
 /// `bounds` widened sideways by their height above the origin, so a foliage
 /// copy leaned up to 45 degrees in the vertex shader stays inside them.
+/// A water surface's entity, first wave and wave count in the frame's wave
+/// buffer, and how far its waves reach up and sideways in metres.
+type WaterWaveSlot = (bevy_ecs::entity::Entity, u32, u32, [f32; 2]);
+
+fn water_wave_layout(render_world: &RenderWorld) -> Vec<WaterWaveSlot> {
+    let mut first = 0;
+    render_world
+        .water_waves
+        .iter()
+        .map(|(entity, waves)| {
+            let reach = waves.iter().fold([0.0, 0.0], |[up, side], wave| {
+                [
+                    up + wave.height.abs(),
+                    side + wave.steepness / wave.wavenumber.max(1e-3),
+                ]
+            });
+            let slot = (*entity, first, waves.len() as u32, reach);
+            first += waves.len() as u32;
+            slot
+        })
+        .collect()
+}
+
+/// Grows a flat water grid's bounds by how far its waves move vertices.
+fn wave_room(bounds: RenderBounds, [up, side]: [f32; 2]) -> RenderBounds {
+    match bounds {
+        RenderBounds::Aabb { mut min, mut max } => {
+            for (axis, reach) in [side, up, side].into_iter().enumerate() {
+                min[axis] -= reach;
+                max[axis] += reach;
+            }
+            RenderBounds::Aabb { min, max }
+        }
+        RenderBounds::Sphere { center, radius } => RenderBounds::Sphere {
+            center,
+            radius: radius + up + side,
+        },
+    }
+}
+
 fn lean_room(bounds: RenderBounds) -> RenderBounds {
     match bounds {
         RenderBounds::Aabb { mut min, mut max } => {
@@ -12430,12 +12542,39 @@ vec2 sway_bend(float y, float height) {
     if (y <= 0.0) return vec2(0.0);
     return y < height ? vec2(y * y / (2.0 * height), y / height) : vec2(y - 0.5 * height, 1.0);
 }
+// Gerstner waves of water surfaces (`physics.w` bit 3), two vec4s each:
+// direction xz, wavenumber, height; then steepness and travelled phase.
+// The instance's normal[1].w is its first wave, normal[2].w the count.
+layout(set = 0, binding = 16) readonly buffer WaterWaves { vec4 data[]; } water_waves;
+// Moves a flat grid point to its spot on the waves; returns the normal.
+vec3 water_wave(inout vec3 point, uint first, uint count) {
+    vec2 start = point.xz;
+    vec2 tilt = vec2(0.0);
+    float up = 1.0;
+    for (uint index = first; index < first + count; index++) {
+        vec4 shape = water_waves.data[2u * index];
+        vec4 motion = water_waves.data[2u * index + 1u];
+        float phase = shape.z * dot(shape.xy, start) - motion.y;
+        float s = sin(phase);
+        float c = cos(phase);
+        point.y += shape.w * s;
+        point.xz += motion.x / shape.z * shape.xy * c;
+        tilt += shape.z * shape.w * shape.xy * c;
+        up -= motion.x * s;
+    }
+    return normalize(vec3(-tilt.x, max(up, 1e-3), -tilt.y));
+}
 void main() {
     RenderInstance instance = render_instances.data[instance_index];
     mat4 model = instance.physics.x == 0xffffffffu
         ? instance.model
         : physics_states.data[instance.physics.x].model;
     vec4 world_position = model * vec4(position, 1.0);
+    bool waves = (instance.physics.w & 8u) != 0u;
+    vec3 wave_normal = vec3(0.0, 1.0, 0.0);
+    if (waves) {
+        wave_normal = water_wave(world_position.xyz, uint(instance.normal[1].w), uint(instance.normal[2].w));
+    }
     vec2 lean = foliage_lean(instance.normal[0].w, instance.normal[1].w, model[3].xyz, camera.ambient.w);
     vec2 bend = sway_bend(world_position.y - model[3].y, instance.normal[2].w);
     world_position.xz += lean * bend.x;
@@ -12460,7 +12599,7 @@ void main() {
             linear[1] / dot(linear[1], linear[1]),
             linear[2] / dot(linear[2], linear[2]));
     }
-    v_normal = normal_matrix * normal;
+    v_normal = waves ? wave_normal : normal_matrix * normal;
     // The lean is a shear; normals take its inverse transpose.
     v_normal.y -= lean.x * v_normal.x + lean.y * v_normal.z;
     // Terrain vertex colors are splat weights, normalized per pixel: the
@@ -14895,6 +15034,77 @@ mod tests {
         assert_eq!(at(columns - 1, rows - 1, 0), [8]);
         assert!(!list[2 * CLUSTER_COUNT..].contains(&7));
         assert!(!list[2 * CLUSTER_COUNT..].contains(&9));
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn water_waves_lift_a_flat_grid_in_the_vertex_shader() {
+        use crate::assets::{MeshAsset, MeshVertex};
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let unlit = MaterialAsset {
+            model: MaterialModel::Unlit,
+            ..Default::default()
+        };
+        let mut scene = SlabScene::with_extent(&[(0.0, unlit)], [32, 32]);
+        // A flat grid at y = 0, seen edge-on by the camera on +z: it covers
+        // no pixels until waves running along z raise and lower its rows.
+        let rows = 64;
+        let vertices = (0..=rows)
+            .flat_map(|row| {
+                let z = -2.0 + 4.0 * row as f32 / rows as f32;
+                [-2.0, 2.0].map(|x| MeshVertex {
+                    position: [x, 0.0, z],
+                    normal: [0.0, 1.0, 0.0],
+                    ..MeshVertex::default()
+                })
+            })
+            .collect();
+        let indices = (0..rows)
+            .flat_map(|row| {
+                let (a, b, c, d) =
+                    (2 * row, 2 * row + 1, 2 * row + 3, 2 * row + 2);
+                [a, d, c, a, c, b]
+            })
+            .collect();
+        let grid = scene.assets.meshes.insert(MeshAsset { vertices, indices });
+        let surface = scene.render_world.renderables[0].entity;
+        scene.render_world.renderables[0].mesh = grid;
+        scene.render_world.renderables[0].transform.matrix =
+            Matrix4::identity().into();
+        let lit_rows = |scene: &mut SlabScene| {
+            scene.render_world.renderables_revision += 1;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let pixels = scene.pixels();
+            (0..32)
+                .filter(|row| pixels[((row * 32 + 16) * 4 + 1) as usize] > 50)
+                .count()
+        };
+        assert_eq!(lit_rows(&mut scene), 0, "the flat grid is edge-on");
+        // Waves 0.5 m high over the view's 2 m cover about half the rows.
+        scene.render_world.water_waves = vec![(
+            surface,
+            vec![crate::runtime::GpuWave {
+                direction: [0.0, 1.0],
+                wavenumber: std::f32::consts::TAU,
+                height: 0.5,
+                steepness: 0.3,
+                phase: 1.0,
+            }],
+        )];
+        let covered = lit_rows(&mut scene);
+        assert!((12..=20).contains(&covered), "{covered} of 32 rows");
     }
 
     #[test]

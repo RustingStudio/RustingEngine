@@ -129,6 +129,23 @@ impl Default for WaterBody {
     }
 }
 
+/// One Gerstner wave the scene vertex shader adds to a flat water grid,
+/// at one moment: see `RenderWorld::water_waves`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuWave {
+    /// Unit travel direction in world x, z.
+    pub direction: [f32; 2],
+    /// Radians per metre: 2π over the wavelength.
+    pub wavenumber: f32,
+    /// Crest height above the rest level in metres.
+    pub height: f32,
+    /// Sideways sway toward crests, 0 to 1; 0 for a plain sine wave.
+    pub steepness: f32,
+    /// Phase the wave has travelled, wrapped to one turn: the shader's
+    /// phase is `wavenumber * dot(direction, xz) - phase`.
+    pub phase: f32,
+}
+
 /// `(amplitude share, length share, speed share, direction offset)`.
 const WAVES: [[f32; 4]; 3] = [
     [0.57, 1.0, 1.0, 0.0],

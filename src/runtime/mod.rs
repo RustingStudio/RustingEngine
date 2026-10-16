@@ -145,7 +145,7 @@ pub use two_d::*;
 #[cfg(feature = "ui")]
 pub use ui::{RuntimeUi, UiTheme};
 pub use vehicle::{Vehicle, Wheel};
-pub use water::{OceanWave, WaterBody, WaterMesh};
+pub use water::{GpuWave, OceanWave, WaterBody, WaterMesh};
 pub use waypoints::WaypointGraph;
 pub use world_text::{WorldText, WorldTextMesh};
 

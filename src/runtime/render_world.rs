@@ -277,6 +277,9 @@ pub struct RenderWorld {
     pub viewmodels: Vec<Entity>,
     /// The active camera's [`super::ViewmodelCamera`] field of view.
     pub viewmodel_fov: Option<f32>,
+    /// Gerstner waves the scene vertex shader adds to each water surface,
+    /// by surface entity, sorted by entity. The surface mesh stays flat.
+    pub water_waves: Vec<(Entity, Vec<super::GpuWave>)>,
     /// Each renderable's [`super::MaterialOverride`], sorted by entity.
     pub material_overrides: Vec<(Entity, super::MaterialOverride)>,
     /// Index of each entity in `renderables`.
