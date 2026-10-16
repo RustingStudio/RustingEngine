@@ -5335,6 +5335,10 @@ pub struct RunOptions {
     /// export, from its own folder instead of cooking and building the
     /// project.
     pub exe: Option<PathBuf>,
+    /// The project folder and game executable an earlier run of this
+    /// command already cooked and built, such as the first scenario of a
+    /// folder: run it instead of cooking and building again.
+    pub built: Option<(PathBuf, PathBuf)>,
     /// Run as a dedicated server (`--server`): no window, real-time ticks
     /// until the game quits or `timeout` stops it.
     pub server: bool,
@@ -5575,33 +5579,15 @@ fn run_game_project_once(root: &Path, options: RunOptions) -> CliResult {
             let _ = std::fs::create_dir_all(root.join("build"));
             (root.to_path_buf(), executable, Duration::ZERO)
         }
-        None => {
-            let cooked = cook_project(root);
-            if !cooked.ok {
-                return cooked;
+        None => match &options.built {
+            Some((root, executable)) => {
+                (root.clone(), executable.clone(), Duration::ZERO)
             }
-            let project = match open_project(root) {
-                Ok(project) => project,
-                Err(error) => return project_error(error, root),
-            };
-            let build =
-                match cargo(&project, "build", options.release, None, &[]) {
-                    Ok(build) => build,
-                    Err(result) => return result,
-                };
-            match crate::project::built_executable(
-                &project.root,
-                &project.root.join("Cargo.toml"),
-                &project.manifest.binary_name,
-                None,
-                options.release,
-            ) {
-                Ok(executable) => (project.root, executable, build.duration),
-                Err(error) => {
-                    return CliResult::failure("BUILD_FAILED", error, None)
-                }
-            }
-        }
+            None => match build_game(root, options.release) {
+                Ok(built) => built,
+                Err(result) => return result,
+            },
+        },
     };
     let mut game = Command::new(&executable);
     match &options.exe {
@@ -5805,12 +5791,37 @@ fn run_game_project_once(root: &Path, options: RunOptions) -> CliResult {
     result
 }
 
+/// Cooks the main scene and builds the game. Returns the project folder,
+/// the executable and how long the build took.
+fn build_game(
+    root: &Path,
+    release: bool,
+) -> Result<(PathBuf, PathBuf, Duration), CliResult> {
+    let cooked = cook_project(root);
+    if !cooked.ok {
+        return Err(cooked);
+    }
+    let project =
+        open_project(root).map_err(|error| project_error(error, root))?;
+    let build = cargo(&project, "build", release, None, &[])?;
+    let executable = crate::project::built_executable(
+        &project.root,
+        &project.root.join("Cargo.toml"),
+        &project.manifest.binary_name,
+        None,
+        release,
+    )
+    .map_err(|error| CliResult::failure("BUILD_FAILED", error, None))?;
+    Ok((project.root, executable, build.duration))
+}
+
 /// Runs every `.json` scenario in `folder`, in name order, and fails when
-/// any of them fails.
+/// any of them fails. The game is cooked and built once, before the first
+/// scenario, and every scenario runs that build.
 pub fn test_game_folder(
     root: &Path,
     folder: &Path,
-    options: RunOptions,
+    mut options: RunOptions,
 ) -> CliResult {
     let mut files: Vec<PathBuf> = match std::fs::read_dir(folder) {
         Ok(entries) => entries
@@ -5832,6 +5843,16 @@ pub fn test_game_folder(
             format!("no scenario files in {}", folder.display()),
             Some(folder.to_path_buf()),
         );
+    }
+    let mut build_ms = 0;
+    if options.exe.is_none() && options.built.is_none() {
+        match build_game(root, options.release) {
+            Ok((root, executable, duration)) => {
+                build_ms = duration.as_millis() as u64;
+                options.built = Some((root, executable));
+            }
+            Err(result) => return result,
+        }
     }
     let mut runs = Vec::new();
     let mut first_failure = None;
@@ -5880,7 +5901,7 @@ pub fn test_game_folder(
             first_failure = Some(result);
         }
     }
-    let data = json!({"root": root, "scenarios": runs});
+    let data = json!({"root": root, "build_ms": build_ms, "scenarios": runs});
     // The editor's Agent panel shows the newest run from this file; a
     // `--without` run inverts pass and fail, so it is not saved there.
     if options.without.is_empty() {
@@ -6936,6 +6957,54 @@ mod shape_tests {
             },
         );
         assert_eq!(missing.diagnostics[0].code, "FILE_NOT_FOUND");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_scenario_folder_runs_every_scenario_in_the_one_build() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir()
+            .join(format!("rusting-test-built-{}", uuid::Uuid::new_v4()));
+        let tests = root.join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(tests.join(format!("{name}.json")), name).unwrap();
+        }
+        // Stands in for the game the folder built before its first
+        // scenario: it logs each scenario it runs and passes it.
+        let game = root.join("game");
+        std::fs::write(
+            &game,
+            "#!/bin/sh
+name=$(cat \"$RUSTING_TEST_SCENARIO\")
+\
+             echo \"$name\" >> runs
+\
+             printf '{\"name\":\"%s\",\"seed\":0,\"passed\":true,\
+             \"ticks_run\":3,\"first_failure\":null,\"steps\":[],\
+             \"captures\":[]}' \"$name\" > \"$RUSTING_TEST_REPORT\"
+",
+        )
+        .unwrap();
+        std::fs::set_permissions(&game, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let options = RunOptions {
+            built: Some((root.clone(), game)),
+            ..RunOptions::default()
+        };
+        let result = test_game_folder(&root, &tests, options);
+        assert!(result.ok, "{:?}", result.diagnostics);
+        assert_eq!(result.data["scenarios"].as_array().unwrap().len(), 3);
+        let runs = std::fs::read_to_string(root.join("runs")).unwrap();
+        assert_eq!(runs, "a\nb\nc\n");
+        // No project here: nothing was cooked or built again.
+        assert!(!root.join("target").exists());
+        // Without a build, the folder fails once, before any scenario.
+        let unbuilt = test_game_folder(&root, &tests, RunOptions::default());
+        assert!(!unbuilt.ok);
+        assert!(unbuilt.data.get("scenarios").is_none());
+        assert_eq!(std::fs::read_to_string(root.join("runs")).unwrap(), runs);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -4,6 +4,7 @@
 
 ### Added
 
+- `rusting test` on a scenario folder cooks and builds the game once, then runs every scenario with that build, instead of running `cargo build` before each one. The result gives the build time as `build_ms`.
 - `rusting.water` and `WaterShading` take `crest_foam`: the crests of steep Gerstner waves turn white where the waves pinch the surface together (the Jacobian of their sideways sway).
 - Water and ocean waves now move in the scene vertex shader. The surface grid uploads once instead of every tick, so large seas cost less CPU time.
 - `GameScene::set_max_texture_size(px)` and `RenderSettings::max_texture_size`: textures larger than the cap upload at half size until they fit, so a Low preset loads 2K textures at 1K (RAFT).

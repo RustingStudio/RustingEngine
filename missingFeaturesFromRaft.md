@@ -328,6 +328,7 @@ multiplies the base colour and so cannot turn blue water white.
   changes or fail.
 - Wanted: build once and run every scenario with that binary. This is faster and keeps a laptop
   cooler.
+- Status: done (this commit, test: `a_scenario_folder_runs_every_scenario_in_the_one_build`).
 
 ### E14. Mouse wheel input actions
 
