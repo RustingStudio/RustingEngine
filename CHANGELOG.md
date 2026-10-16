@@ -4,6 +4,7 @@
 
 ### Added
 
+- Water and ocean waves now move in the scene vertex shader. The surface grid uploads once instead of every tick, so large seas cost less CPU time.
 - `GameScene::set_max_texture_size(px)` and `RenderSettings::max_texture_size`: textures larger than the cap upload at half size until they fit, so a Low preset loads 2K textures at 1K (RAFT).
 - `ShadowQuality` sets the sun's cascade count: 2 on Low, 3 on Medium and 4 on High, so low settings render fewer shadow views (RAFT).
 - `GameScene::resolved_quality()`: the quality profile the renderer draws with, `Auto` resolved from the GPU, so game content can scale with it (RAFT).

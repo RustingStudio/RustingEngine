@@ -204,6 +204,55 @@ impl WaterBody {
         (height, slope)
     }
 
+    /// The waves the scene vertex shader adds to the flat surface grid at
+    /// `time`: the Gerstner `waves`, else the three plain sine waves. They
+    /// trace the surface [`Self::wave`] samples.
+    #[must_use]
+    pub fn gpu_waves(&self, time: f64) -> Vec<GpuWave> {
+        let wave =
+            |angle: f32, k: f32, speed: f32, height, steepness| GpuWave {
+                direction: [angle.cos(), angle.sin()],
+                wavenumber: k,
+                height,
+                steepness,
+                // Minus the phase at the origin: how far the wave travelled.
+                phase: -phase(k, 0.0, speed, time),
+            };
+        let waves = if self.waves.is_empty() {
+            let base = self.flow_direction.to_radians();
+            WAVES
+                .iter()
+                .map(|&[amplitude, length, speed, turn]| {
+                    wave(
+                        base + turn,
+                        TAU / (self.wave_length.max(0.05) * length),
+                        self.wave_speed * speed,
+                        amplitude * self.wave_height,
+                        0.0,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            self.waves
+                .iter()
+                .map(|ocean| {
+                    let k = TAU / ocean.length.max(0.05);
+                    wave(
+                        ocean.direction.to_radians(),
+                        k,
+                        (9.81 / k).sqrt(),
+                        ocean.height,
+                        ocean.steepness.clamp(0.0, 1.0),
+                    )
+                })
+                .collect()
+        };
+        waves
+            .into_iter()
+            .filter(|wave| wave.height != 0.0 || wave.steepness != 0.0)
+            .collect()
+    }
+
     /// Height, slope and sideways sway of the Gerstner surface point that
     /// starts at `(x, z)` before the waves move it.
     fn gerstner(
@@ -256,7 +305,11 @@ pub struct WaterMesh {
     mesh: Handle<MeshAsset>,
     material: Handle<MaterialAsset>,
     entity: Entity,
+    /// Size, resolution, ocean flag and center the grid was built for.
+    grid: WaterGrid,
 }
+
+type WaterGrid = ([f32; 2], u32, bool, [f32; 3]);
 
 impl WaterMesh {
     pub(super) fn entity(&self) -> Entity {
@@ -286,7 +339,8 @@ fn water_material(water: &WaterBody) -> MaterialAsset {
     }
 }
 
-fn build_mesh(water: &WaterBody, center: [f32; 3], time: f64) -> MeshAsset {
+/// The flat surface grid; the scene vertex shader adds the waves.
+fn build_mesh(water: &WaterBody, center: [f32; 3]) -> MeshAsset {
     let longer = water.size[0].max(water.size[1]).max(0.01);
     let cells = water.resolution.clamp(2, 256) as f32;
     let nx = ((water.size[0] / longer * cells).ceil() as usize).max(1);
@@ -306,11 +360,9 @@ fn build_mesh(water: &WaterBody, center: [f32; 3], time: f64) -> MeshAsset {
         for i in 0..=nx {
             let x = center[0] + reach(i, nx) * water.size[0] / 2.0;
             let z = center[2] + reach(j, nz) * water.size[1] / 2.0;
-            let (height, slope) = water.wave(x, z, time);
-            let n = Vector3::new(-slope[0], 1.0, -slope[1]).normalize();
             vertices.push(MeshVertex {
-                position: [x, center[1] + height, z],
-                normal: [n.x, n.y, n.z],
+                position: [x, center[1], z],
+                normal: [0.0, 1.0, 0.0],
                 uv: [i as f32 / nx as f32, j as f32 / nz as f32],
                 tangent: [1.0, 0.0, 0.0, 1.0],
                 color: [1.0; 4],
@@ -330,17 +382,15 @@ fn build_mesh(water: &WaterBody, center: [f32; 3], time: f64) -> MeshAsset {
     MeshAsset { vertices, indices }
 }
 
-/// Per fixed step: gives each [`WaterBody`] its surface entity and rewrites
-/// the surface mesh for the current tick, around the active camera for an
-/// ocean. The surface entity carries a
-/// `FluidParticle` marker, so [`super::fluid::sync_fluid_visuals`] despawns
-/// it when the body goes.
-/// ponytail: the grid uploads again each tick; move the waves to the vertex
-/// shader if large seas show in profiles.
+/// Per fixed step: gives each [`WaterBody`] its surface entity and a flat
+/// surface grid, around the active camera for an ocean. The grid is built
+/// again only when its size, resolution or center changes; the waves move
+/// it in the scene vertex shader (`RenderWorld::water_waves`). The surface
+/// entity carries a `FluidParticle` marker, so
+/// [`super::fluid::sync_fluid_visuals`] despawns it when the body goes.
 #[allow(clippy::type_complexity)]
 pub(super) fn sync_water(
     mut commands: Commands,
-    time: Res<FrameTime>,
     assets: Option<ResMut<AssetServer>>,
     mut waters: Query<(
         Entity,
@@ -359,7 +409,6 @@ pub(super) fn sync_water(
         Option<&super::GlobalTransform>,
     )>,
 ) {
-    let seconds = time.fixed_tick as f64 * time.fixed_delta.as_secs_f64();
     let Some(mut assets) = assets else {
         return;
     };
@@ -385,16 +434,19 @@ pub(super) fn sync_water(
                 position[axis] = (eye[axis] / cell).round() * cell;
             }
         }
-        let built = build_mesh(water, position, water.clock(seconds));
-        let existing = mesh.as_deref().filter(|mesh| {
+        let grid = (water.size, water.resolution, water.ocean, position);
+        let existing = mesh.filter(|mesh| {
             markers
                 .get(mesh.entity)
                 .is_ok_and(|marker| marker.0 == owner)
         });
         match existing {
-            Some(mesh) => {
-                if let Some(slot) = assets.meshes.get_mut(mesh.mesh) {
-                    *slot = built;
+            Some(mut mesh) => {
+                if mesh.grid != grid {
+                    if let Some(slot) = assets.meshes.get_mut(mesh.mesh) {
+                        *slot = build_mesh(water, position);
+                    }
+                    mesh.grid = grid;
                 }
                 let wanted = water_material(water);
                 if assets
@@ -410,7 +462,7 @@ pub(super) fn sync_water(
                 }
             }
             None => {
-                let handle = assets.meshes.insert(built);
+                let handle = assets.meshes.insert(build_mesh(water, position));
                 let material = assets.materials.insert(water_material(water));
                 let entity = commands
                     .spawn((
@@ -432,6 +484,7 @@ pub(super) fn sync_water(
                     mesh: handle,
                     material,
                     entity,
+                    grid,
                 });
             }
         }
@@ -753,8 +806,64 @@ mod tests {
     }
 
     #[test]
-    fn a_water_clock_moves_the_mesh_in_place_of_the_fixed_tick() {
-        use crate::runtime::App;
+    fn gpu_waves_trace_the_surface_the_cpu_samples() {
+        let calm = WaterBody {
+            wave_height: 0.0,
+            ..WaterBody::default()
+        };
+        assert!(calm.gpu_waves(5.0).is_empty());
+        let river = WaterBody {
+            wave_height: 0.3,
+            flow_direction: 40.0,
+            ..WaterBody::default()
+        };
+        let sea = WaterBody {
+            waves: vec![
+                OceanWave {
+                    direction: 20.0,
+                    length: 12.0,
+                    height: 0.6,
+                    steepness: 0.5,
+                },
+                OceanWave {
+                    direction: -70.0,
+                    length: 5.0,
+                    height: 0.2,
+                    steepness: 0.3,
+                },
+            ],
+            ..WaterBody::default()
+        };
+        // The vertex shader's sum, on the CPU: a grid point at (x, z)
+        // moves sideways and up onto the surface `wave` samples.
+        for water in [river, sea] {
+            for time in [0.0, 37.25, 1e6] {
+                for [x, z] in [[0.0, 0.0], [3.3, -1.7], [-8.1, 6.4]] {
+                    let mut point = [x, 0.0, z];
+                    for wave in water.gpu_waves(time) {
+                        let phase = wave.wavenumber
+                            * (wave.direction[0] * x + wave.direction[1] * z)
+                            - wave.phase;
+                        point[1] += wave.height * phase.sin();
+                        for (axis, dir) in [(0, 0), (2, 1)] {
+                            point[axis] += wave.steepness / wave.wavenumber
+                                * wave.direction[dir]
+                                * phase.cos();
+                        }
+                    }
+                    let (height, _) = water.wave(point[0], point[2], time);
+                    assert!(
+                        (height - point[1]).abs() < 2e-3,
+                        "{height} {point:?} at {time}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_water_clock_sets_the_waves_in_place_of_the_fixed_tick() {
+        use crate::runtime::{App, RenderWorld};
         let water = WaterBody {
             size: [4.0, 4.0],
             resolution: 4,
@@ -763,20 +872,37 @@ mod tests {
         };
         let mut app = App::new();
         app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        app.add_plugin(crate::runtime::RenderExtractPlugin).unwrap();
         app.world_mut().resource_mut::<FrameTime>().fixed_tick = 20;
         let owner = app
             .world_mut()
             .spawn((water.clone(), crate::Transform::default()))
             .id();
-        app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
-            .unwrap();
-        let mesh = app.world().get::<WaterMesh>(owner).unwrap().mesh;
+        let step = std::time::Duration::from_secs_f64(1.0 / 60.0);
+        app.update(step).unwrap();
+        let surface = *app.world().get::<WaterMesh>(owner).unwrap();
+        let revision = |app: &App| {
+            app.world()
+                .resource::<AssetServer>()
+                .meshes
+                .revision(surface.mesh)
+        };
+        let first = revision(&app);
         let assets = app.world().resource::<AssetServer>();
-        let built = assets.meshes.get(mesh).unwrap();
-        assert_eq!(*built, build_mesh(&water, [0.0; 3], 123.4));
-        let fixed = app.world().resource::<FrameTime>();
-        let seconds = fixed.fixed_tick as f64 * fixed.fixed_delta.as_secs_f64();
-        assert_ne!(*built, build_mesh(&water, [0.0; 3], seconds));
+        assert_eq!(
+            *assets.meshes.get(surface.mesh).unwrap(),
+            build_mesh(&water, [0.0; 3])
+        );
+        let render_world = app.world().resource::<RenderWorld>();
+        assert_eq!(
+            render_world.water_waves,
+            vec![(surface.entity, water.gpu_waves(123.4))]
+        );
+        // Later ticks keep the flat grid.
+        for _ in 0..3 {
+            app.update(step).unwrap();
+        }
+        assert_eq!(revision(&app), first);
     }
 
     #[test]
@@ -838,7 +964,7 @@ mod tests {
             resolution: 10,
             ..WaterBody::default()
         };
-        let mesh = build_mesh(&water, [0.0; 3], 0.0);
+        let mesh = build_mesh(&water, [0.0; 3]);
         assert_eq!(mesh.vertices.len(), 11 * 6);
         assert_eq!(mesh.indices.len(), 10 * 5 * 6);
     }

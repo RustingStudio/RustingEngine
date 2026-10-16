@@ -791,6 +791,15 @@ pub fn extract_render_world(world: &mut World) {
             .collect();
         viewmodels.sort();
     }
+    let seconds = time.fixed_tick as f64 * time.fixed_delta.as_secs_f64();
+    let mut water_waves = world
+        .query::<(&super::WaterBody, &super::WaterMesh)>()
+        .iter(world)
+        .map(|(water, mesh)| {
+            (mesh.entity(), water.gpu_waves(water.clock(seconds)))
+        })
+        .collect::<Vec<_>>();
+    water_waves.sort_by_key(|(entity, _)| *entity);
     let mut material_overrides = world
         .query_filtered::<(Entity, &super::MaterialOverride), With<MeshRenderer>>()
         .iter(world)
@@ -804,6 +813,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.flashes = flashes;
     render_world.viewmodels = viewmodels;
     render_world.viewmodel_fov = viewmodel_fov;
+    render_world.water_waves = water_waves;
     render_world.material_overrides = material_overrides;
     match renderables {
         None => {

@@ -307,7 +307,9 @@ about 0.6 MB and roughly 1 ms of CPU per tick. Storm seas need finer grids.
 - Wanted: wave displacement in the vertex shader.
 - Status: split into E11a (the vertex shader displaces a flat grid by `RenderWorld::water_waves`)
   and E11b (`sync_water` builds the flat grid once and extraction fills the waves each tick).
-  - E11a Status: done (this commit, test: `water_waves_lift_a_flat_grid_in_the_vertex_shader`).
+  - E11a Status: done (84f4f6b, test: `water_waves_lift_a_flat_grid_in_the_vertex_shader`).
+  - E11b Status: done (this commit, tests: `gpu_waves_trace_the_surface_the_cpu_samples`,
+    `a_water_clock_sets_the_waves_in_place_of_the_fixed_tick`).
 
 ### E12. Foam on wave crests
 
