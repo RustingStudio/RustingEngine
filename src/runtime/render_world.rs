@@ -856,8 +856,10 @@ pub fn extract_render_world(world: &mut World) {
                     Some(_) => {}
                 }
             }
-            let removed =
-                render_world.renderables.len() + added - renderables.len();
+            // Foliage gives one entity many renderables, so a group that
+            // gains copies would count below zero.
+            let removed = (render_world.renderables.len() + added)
+                .saturating_sub(renderables.len());
             render_world.index = renderables
                 .iter()
                 .enumerate()
@@ -1081,6 +1083,7 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
         With<RenderBounds>,
         With<super::TerrainChunks>,
         With<super::Heightfield>,
+        With<super::Foliage>,
     )>>();
     for (
         entity,
@@ -1114,8 +1117,11 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
                 *count += 1;
                 if newer(tick) {
                     // Foliage copies and terrain chunks share their
-                    // owner's entity, so a moved owner rebuilds.
-                    if slot == 0 && !scattered {
+                    // owner's entity, so a moved owner or part rebuilds.
+                    if slot == 0
+                        && !scattered
+                        && foliage_owner(world, entity).is_none()
+                    {
                         moved.push(entity);
                     } else {
                         changed = true;
@@ -1148,17 +1154,15 @@ fn renderables_signature(world: &mut World) -> u64 {
         &MeshRenderer,
         Option<&RenderBounds>,
         Option<&super::SkinnedMesh>,
-        Option<&super::Foliage>,
     )>();
     let mut terrains =
         world.query::<(Entity, &GlobalTransform, &super::TerrainChunks)>();
     let world = &*world;
-    for (entity, transform, renderer, bounds, skinned, foliage) in
-        query.iter(world)
-    {
+    for (entity, transform, renderer, bounds, skinned) in query.iter(world) {
         if !visible_in_hierarchy(world, entity) {
             continue;
         }
+        let foliage = foliage_owner(world, entity).map(|(_, foliage)| foliage);
         count += 1;
         entity.to_bits().hash(&mut hasher);
         skinned
@@ -1254,10 +1258,29 @@ fn collect_foliage(
         .iter()
         .enumerate()
         .filter_map(|(at, renderable)| {
-            let foliage = world.get::<super::Foliage>(renderable.entity)?;
+            let (_, foliage) = foliage_owner(world, renderable.entity)?;
             Some((at, foliage.sway))
         })
         .collect()
+}
+
+/// The `Foliage` on `entity` or its nearest ancestor, and the object that
+/// holds it, so every part of a multi-part model scatters as one group.
+// ponytail: each part leans in the wind from its own origin, so leaves on a
+// tall trunk lag the trunk's tip; lean from the group's base if it shows.
+fn foliage_owner(
+    world: &World,
+    entity: Entity,
+) -> Option<(Entity, &super::Foliage)> {
+    let mut current = entity;
+    // The step limit guards against a damaged scene with a parent cycle.
+    for _ in 0..1024 {
+        if let Some(foliage) = world.get::<super::Foliage>(current) {
+            return Some((current, foliage));
+        }
+        current = world.get::<super::Parent>(current)?.0;
+    }
+    None
 }
 
 /// A heightfield's world matrix, its inverse, and the terrain drawing it.
@@ -1322,7 +1345,6 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
         &MeshRenderer,
         Option<&RenderBounds>,
         Option<&super::SkinnedMesh>,
-        Option<&super::Foliage>,
     )>();
     let mut fields = world.query::<(
         &GlobalTransform,
@@ -1340,7 +1362,7 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
     let mut renderables = query
         .iter(world_ref)
         .filter(|(entity, ..)| visible_in_hierarchy(world_ref, *entity))
-        .flat_map(|(entity, transform, renderer, bounds, skinned, foliage)| {
+        .flat_map(|(entity, transform, renderer, bounds, skinned)| {
             let renderable = ExtractedRenderable {
                 entity,
                 transform: *transform,
@@ -1350,17 +1372,27 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
                 receive_shadows: renderer.receive_shadows,
                 bounds: bounds.copied(),
             };
-            let Some(foliage) = foliage else {
+            let Some((owner, foliage)) = foliage_owner(world_ref, entity)
+            else {
                 return vec![renderable];
             };
+            // Each part keeps its place in the group: a copy of the group
+            // is placed and settled, then the part rides on it.
             let model = nalgebra::Matrix4::from(transform.matrix);
+            let group = world_ref
+                .get::<GlobalTransform>(owner)
+                .map_or(model, |owner| nalgebra::Matrix4::from(owner.matrix));
+            let part = group
+                .try_inverse()
+                .unwrap_or_else(nalgebra::Matrix4::identity)
+                * model;
             foliage
                 .placements()
                 .into_iter()
-                .filter_map(|local| settle(foliage, model * local, &grounds))
+                .filter_map(|local| settle(foliage, group * local, &grounds))
                 .map(|matrix| ExtractedRenderable {
                     transform: GlobalTransform {
-                        matrix: matrix.into(),
+                        matrix: (matrix * part).into(),
                     },
                     ..renderable
                 })
@@ -1749,6 +1781,66 @@ mod tests {
         let placed = copies(&mut app, far);
         assert_eq!(placed.len(), 20);
         assert!(placed.iter().all(|at| at[1] == 0.0));
+    }
+
+    #[test]
+    fn foliage_on_a_parent_scatters_every_part_together() {
+        use crate::runtime::Foliage;
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let server = AssetServer::default();
+        let renderer = renderer(&server);
+        app.insert_resource(server);
+        let foliage = Foliage {
+            count: 5,
+            radius: 3.0,
+            ..Foliage::default()
+        };
+        let palm =
+            app.spawn((Transform::new([0.0, 10.0, 0.0]), foliage.clone()));
+        let trunk = app.spawn((Transform::default(), renderer));
+        let leaves = app.spawn((Transform::new([0.0, 2.0, 0.0]), renderer));
+        for part in [trunk, leaves] {
+            rusting_core::hierarchy::set_parent(app.world_mut(), part, palm)
+                .unwrap();
+        }
+        let copies = |app: &mut App, entity| {
+            app.update(Duration::from_secs_f64(1.0 / 60.0)).unwrap();
+            app.world()
+                .resource::<RenderWorld>()
+                .renderables
+                .iter()
+                .filter(|renderable| renderable.entity == entity)
+                .map(|renderable| renderable.transform.matrix[3])
+                .collect::<Vec<_>>()
+        };
+        copies(&mut app, trunk);
+        let (bases, tops) = (copies(&mut app, trunk), copies(&mut app, leaves));
+        assert_eq!(bases.len(), 5);
+        for ((base, top), local) in
+            bases.iter().zip(&tops).zip(foliage.placements())
+        {
+            assert_eq!(base[0], local[(0, 3)]);
+            assert_eq!(base[1], 10.0);
+            // Leaves stand on their own trunk, raised by its scale.
+            let scale = local.fixed_view::<3, 1>(0, 1).norm();
+            assert!((top[0] - base[0]).abs() < 1e-5);
+            assert!((top[1] - base[1] - 2.0 * scale).abs() < 1e-5);
+        }
+        let sways = app
+            .world()
+            .resource::<RenderWorld>()
+            .foliage_sways()
+            .count();
+        assert_eq!(sways, 10);
+        // A moved part still draws all its copies.
+        app.world_mut()
+            .get_mut::<Transform>(leaves)
+            .unwrap()
+            .position[1] = 3.0;
+        assert_eq!(copies(&mut app, leaves).len(), 5);
+        app.world_mut().get_mut::<Foliage>(palm).unwrap().count = 7;
+        assert_eq!(copies(&mut app, leaves).len(), 7);
     }
 
     #[test]

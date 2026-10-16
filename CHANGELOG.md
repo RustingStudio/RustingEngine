@@ -4,6 +4,7 @@
 
 ### Added
 
+- `rusting.foliage` on the parent of a multi-part model (a palm's trunk and leaves) scatters the whole model, each part keeping its place on every copy.
 - `GameScene::children(name)` lists the names of a node's children, so game code can tint or hide a model part by part.
 - A copy of a copy (`spawn_copy` of a spawned shark) now animates its own bones and skin: copied children are named `"<copy>/<bone>"`, not `"<copy>/<old copy>/<bone>"`.
 - `GameScene::scroll_delta()` returns the mouse wheel lines turned since the last frame, or in a tick function since the last tick, for hotbars and zoom.

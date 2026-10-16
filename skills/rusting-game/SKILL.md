@@ -244,7 +244,7 @@ each one's fields, defaults and an example:
 - `rusting.reflection_probe`: Box of half size extents around the object's position.
 - `rusting.light_probe_grid`: Grid of resolution light probes spread through a world-aligned box of half size extents around the object.
 - `rusting.lightmap`: On an object with a mesh_renderer: bakes the light bouncing onto it into six square faces of resolution texels wrapped around its mesh's box.
-- `rusting.foliage`: On an object with a mesh_renderer: draws count copies of its mesh in place of the object, scattered over a disc of radius metres on its local XZ plane, each turned and scaled between scale_min and scale_max at random by seed.
+- `rusting.foliage`: On an object with a mesh_renderer, or on the parent of a multi-part model such as a palm's trunk and leaves: draws count copies of its mesh (of every mesh under it, each part keeping its place on the copy) in place of the object, scattered over a disc of radius metres on its local XZ plane, each turned and scaled between scale_min and scale_max at random by seed.
 - `rusting.terrain`: On an object with a rusting.heightfield: draws the heights as terrain in square chunks of chunk_cells cells (0, the default, picks the size from the heightfield so the terrain makes at most about 150 chunks; each chunk is one draw per view and shadow cascade).
 - `rusting.fog`: Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre.
 - `rusting.procedural_sky`: Daylight sky computed from the sun (the shadow-casting directional light, else the first one): blue overhead, pale at the horizon, orange at sunset, dark at night, with a sun disc of sun_size degrees.

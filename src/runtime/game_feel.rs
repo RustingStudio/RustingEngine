@@ -1390,7 +1390,9 @@ impl Default for Lightmap {
 /// material, so they draw as one instanced batch. Wind and other force
 /// fields lean each copy away from its base by `sway` per m/s² of push.
 /// `conform` sets each copy on the heightfield below it, and `layers` keeps
-/// only the copies standing on chosen terrain layers.
+/// only the copies standing on chosen terrain layers. On a parent, every
+/// mesh under it is copied with each placement, so a two-mesh palm
+/// scatters whole.
 #[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Foliage {

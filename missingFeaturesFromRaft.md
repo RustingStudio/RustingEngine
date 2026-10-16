@@ -374,6 +374,8 @@ leaves), so they cannot be foliage.
   material (`tools/scene/build_scene.py`).
 - Wanted: `Foliage` on a parent copies the whole subtree as one instanced group, or takes a
   list of meshes that share each copy's transform.
+- Status: done (this commit, test: `foliage_on_a_parent_scatters_every_part_together`).
+  Each mesh under a `Foliage` parent draws one instanced batch per part.
 
 ### E18. Foliage density per quality preset
 
