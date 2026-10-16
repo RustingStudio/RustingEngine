@@ -2692,6 +2692,27 @@ impl GameScene<'_> {
         names
     }
 
+    /// Names of the named object's children, in child order, so game code
+    /// can walk a model part by part (for example to tint each one with
+    /// [`Self::set_color`]). Unnamed children are left out.
+    #[must_use]
+    pub fn children(&mut self, name: &str) -> Vec<String> {
+        let Some(entity) = find_or_warn(self.world, name) else {
+            return Vec::new();
+        };
+        self.world
+            .get::<crate::runtime::Children>(entity)
+            .map(|children| {
+                children
+                    .0
+                    .iter()
+                    .filter_map(|&child| self.world.get::<Name>(child))
+                    .map(|name| name.0.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// A hash of the positions, rotations, scales and velocities of the
     /// named objects in `class`, in name order. Unlike the full state hash
     /// it leaves out the clock and everything else, so two rounds that
@@ -8528,6 +8549,27 @@ mod tests {
             world: app.world_mut(),
         };
         scene.spawn_copy("Ember", "Copy", [0.0; 3]);
+    }
+
+    #[test]
+    fn children_lists_the_named_parts_of_a_node() {
+        let mut app = App::new();
+        let world = app.world_mut();
+        let tile = world.spawn(Name("Tile".into())).id();
+        let parts = [
+            world.spawn(Name("Plank".into())).id(),
+            world.spawn(Transform::default()).id(),
+            world.spawn(Name("Rope".into())).id(),
+        ];
+        for part in parts {
+            rusting_core::hierarchy::set_parent(world, part, tile).unwrap();
+        }
+        let mut scene = GameScene {
+            world: app.world_mut(),
+        };
+        assert_eq!(scene.children("Tile"), ["Plank", "Rope"]);
+        assert!(scene.children("Plank").is_empty());
+        assert!(scene.children("Nothing").is_empty());
     }
 
     #[test]

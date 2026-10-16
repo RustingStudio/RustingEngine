@@ -4,6 +4,7 @@
 
 ### Added
 
+- `GameScene::children(name)` lists the names of a node's children, so game code can tint or hide a model part by part.
 - A copy of a copy (`spawn_copy` of a spawned shark) now animates its own bones and skin: copied children are named `"<copy>/<bone>"`, not `"<copy>/<old copy>/<bone>"`.
 - `GameScene::scroll_delta()` returns the mouse wheel lines turned since the last frame, or in a tick function since the last tick, for hotbars and zoom.
 - `rusting test` on a scenario folder cooks and builds the game once, then runs every scenario with that build, instead of running `cargo build` before each one. The result gives the build time as `build_ms`.

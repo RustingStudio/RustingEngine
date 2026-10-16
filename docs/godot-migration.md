@@ -66,7 +66,7 @@ valid ranges.
 | `duplicate()` | `scene.spawn_copy(template, name, position)` |
 | `queue_free()` | `scene.despawn(name)` |
 | `get_node("Arm/Hand")` | `scene.object(name)` by unique name; `SceneTree::find_path(root, "Arm/Hand")` in a system |
-| `get_parent()`, `get_children()` | `SceneTree::parent`, `SceneTree::children` |
+| `get_parent()`, `get_children()` | `scene.children(name)`; `SceneTree::parent`, `SceneTree::children` in a system |
 | `reparent()` | `scene.reparent(name, Some(parent))` |
 | `change_scene_to_file()` | `scene.load_scene("scenes/level_2.rscene")` |
 | `reload_current_scene()` | `scene.restart()` |

@@ -362,6 +362,8 @@ inside the engine), and `set_color` changes one node.
   (`TILE_PARTS` in `src/view/mod.rs`), so a damaged tile can be darkened part by part.
 - Wanted: `GameScene::children(name) -> Vec<String>`, or `set_color_tree(name, tint)` that
   multiplies the colour of a node and every node under it.
+- Status: done (this commit, test: `children_lists_the_named_parts_of_a_node`).
+  `GameScene::children`; tint a tree with it plus `color`/`set_color`.
 
 ### E17. Foliage of a multi-part model
 

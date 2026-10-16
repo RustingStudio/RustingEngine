@@ -1084,7 +1084,13 @@ const API_GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "classes",
-        &["in_class", "has_class", "add_class", "remove_class"],
+        &[
+            "in_class",
+            "has_class",
+            "add_class",
+            "remove_class",
+            "children",
+        ],
     ),
     (
         "sound",
