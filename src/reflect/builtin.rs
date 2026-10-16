@@ -25,13 +25,13 @@ use crate::runtime::{
     Fracture, GravityVolume, GroundSurface, Health, Heightfield, HudAnchor,
     HudElement, InputAction, Joint, JointAxis, JointKind, JointMotor,
     JointSpring, LightCookie, LightProbeGrid, Lightmap, LootEntry, LootTable,
-    MaterialOverride, MeshSurfaces, MotionBlur, ObjectState, PhysicsMaterial,
-    PhysicsSettings, PhysicsSyncMode, Pickup, PlatformerController,
-    PlayerController, Polygon2d, PostShader, PostVolume, ProceduralSky,
-    QualityProfile, RandomSeed, ReflectionProbe, RenderBounds, RenderSettings,
-    ReverbZone, SceneBackground, SceneInstance, ShadowQuality, SkyLight,
-    SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid, Sprite,
-    SpriteAnimation, Squash, StateAction, StateTransition, SurfaceClip,
+    MaterialOverride, MeshSurfaces, MotionBlur, ObjectState, OceanWave,
+    PhysicsMaterial, PhysicsSettings, PhysicsSyncMode, Pickup,
+    PlatformerController, PlayerController, Polygon2d, PostShader, PostVolume,
+    ProceduralSky, QualityProfile, RandomSeed, ReflectionProbe, RenderBounds,
+    RenderSettings, ReverbZone, SceneBackground, SceneInstance, ShadowQuality,
+    SkyLight, SkyShader, SlideSound, SoftBlock, SoundCue, SoundId, SpawnGrid,
+    Sprite, SpriteAnimation, Squash, StateAction, StateTransition, SurfaceClip,
     Terrain, TerrainFracture, TerrainLayer, TileKind, TileMap, ToneMapper,
     ToneMapping, Tween, TweenProperty, TweenRepeat, Vehicle, WaterBody, Wheel,
 };
@@ -811,6 +811,17 @@ crate::reflect! {
         shore_foam: f32 { unit: "m", min: 0.0, doc: "foam band width along the shore in metres of depth; 0 is none" },
         ripples: f32 { min: 0.0, max: 1.0, doc: "strength of small scrolling waves on top of the mesh; 0 is none" },
         ripple_length: f32 { unit: "m", min: 0.01, doc: "distance between small waves" },
+        waves: Vec<OceanWave> { doc: "Gerstner waves in place of the three sines; empty keeps the sines" },
+        time: Option<f64> { unit: "s", doc: "the game's own clock for the waves; null follows the fixed tick" },
+    }
+}
+
+crate::reflect! {
+    struct OceanWave {
+        direction: f32 { unit: "deg", doc: "direction the crests travel around +Y; 0 is +X" },
+        length: f32 { unit: "m", min: 0.05, doc: "distance between crests; longer waves travel faster" },
+        height: f32 { unit: "m", min: 0.0, doc: "crest height above the rest level" },
+        steepness: f32 { min: 0.0, max: 1.0, doc: "0 is a sine, 1 a pointed crest; keep the sum over all waves at 1 or below" },
     }
 }
 

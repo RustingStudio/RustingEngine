@@ -780,8 +780,7 @@ pub(super) fn player_move(
     mut pushed: Query<&mut RigidBody, Without<PlayerController>>,
 ) {
     let dt = time.fixed_delta.as_secs_f32();
-    let seconds =
-        (time.fixed_tick as f64 * time.fixed_delta.as_secs_f64()) as f32;
+    let seconds = time.fixed_tick as f64 * time.fixed_delta.as_secs_f64();
     let pose_of = |floor: Entity| {
         let (t, parent, global) = floors.get(floor).ok()?;
         Some((
@@ -902,7 +901,7 @@ fn water_at(
         Without<PlayerController>,
     >,
     position: [f32; 3],
-    seconds: f32,
+    seconds: f64,
 ) -> Option<(f32, [f32; 3])> {
     let [x, _, z] = position;
     waters
@@ -910,7 +909,10 @@ fn water_at(
         .filter_map(|(water, transform, parent, global)| {
             let origin = world_position(transform, parent, global);
             water.contains(origin, x, z).then(|| {
-                (origin[1] + water.wave(x, z, seconds).0, water.current())
+                (
+                    origin[1] + water.wave(x, z, water.clock(seconds)).0,
+                    water.current(),
+                )
             })
         })
         // Highest wins, then the stronger current, so query order never

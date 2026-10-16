@@ -4,6 +4,7 @@
 
 ### Added
 
+- `rusting.water` takes `waves`, a list of Gerstner `OceanWave`s (`direction`, `length`, `height`, `steepness`) with sharp crests and analytic normals in place of the three sines, and `time`, a game clock for the waves in place of the fixed tick. `WaterBody::wave` returns the swayed surface and takes its time as `f64`, so waves keep their shape hours in; `WaterBody` is no longer `Copy` (RAFT).
 - Scenario step `{"scroll": [dx, dy]}` turns the mouse wheel over the cursor, so a scenario can scroll an egui `ScrollArea` and `click` rows below the fold. Game code reads the wheel with `RuntimeInput::scroll()`, in lines, from the window too (RAFT).
 - Scenario step `{"key": "SuperLeft"}` taps one key by its `KeyCode` name, for keys no action uses (RAFT).
 - `GameScene::set_cursor_captured(bool)` grabs or frees the cursor; called on the frame Esc went down, it keeps the player controller from freeing the cursor for an Esc the game used. `set_mouse_look(.., true)` now grabs the cursor at once while the window has focus, and losing focus frees it (RAFT).

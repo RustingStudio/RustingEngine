@@ -179,6 +179,19 @@ no Gerstner waves, no way to change the waves at runtime, and no game clock.
   place of the fixed tick's). `WaterBody::wave` returns the swayed Gerstner surface. `WaterBody`
   stops being `Copy`, and `wave` takes its time as `f64`.
 
+Status: split into E1a (waves, clock, `f64` time) and E1b (`ocean`). The staged change on
+`raft-v2-gaps` is not on this machine, so both are rebuilt here.
+E1a: done (this commit, tests: `gerstner_waves_sharpen_crests_and_keep_time_in_f64`,
+`a_water_clock_moves_the_mesh_in_place_of_the_fixed_tick`). `WaterBody` gains
+`waves: Vec<OceanWave>` (`direction`, `length`, `height`, `steepness`; deep-water speed,
+analytic normals) and `time: Option<f64>`; `WaterBody::clock` picks the seconds the mesh,
+buoyancy and swimmers use. `wave` takes `f64` time, wraps phases in `f64`, and returns the
+swayed surface over `(x, z)` (8 fixed-point steps back to the swayed start point). `WaterBody`
+is no longer `Copy`. Passed: `cargo fmt --all --check`, clippy default /
+`--no-default-features` / `--features gpu-tests` with `-D warnings`, `cargo test --workspace`,
+and the locked `--features gpu-tests` run.
+E1b (`ocean`): not started.
+
 ### E2. Clouds on `rusting.procedural_sky`
 
 - Instead: the sky has no clouds, so weather barely shows overhead.

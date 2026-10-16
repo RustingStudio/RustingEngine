@@ -1,8 +1,9 @@
 //! Water you can build seas, lakes and rivers with: a flat rectangle of
 //! animated waves that dynamic bodies float on and a current can carry.
 //!
-//! Waves are a sum of three sine waves, a function of position and the fixed
-//! tick, so the surface is deterministic and needs no particle solver.
+//! Waves are a sum of three sine waves, or of the Gerstner `waves` you list,
+//! a function of position and the fixed tick (or the water's own `time`), so
+//! the surface is deterministic and needs no particle solver.
 //! Use [`super::FluidBlock`] for small splashing volumes instead.
 
 // The per-axis loops index several small arrays at once; iterators read worse.
@@ -24,13 +25,7 @@ use std::f32::consts::TAU;
 /// `flow_direction` turns both the waves and the current, so a long thin
 /// water with a `flow_speed` makes a river.
 #[derive(
-    Component,
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
+    Component, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize,
 )]
 #[serde(default)]
 pub struct WaterBody {
@@ -68,6 +63,41 @@ pub struct WaterBody {
     pub ripples: f32,
     /// Distance between those small waves in metres.
     pub ripple_length: f32,
+    /// Gerstner waves that replace the three sines of `wave_height`,
+    /// `wave_length` and `wave_speed`; empty keeps the sines.
+    pub waves: Vec<OceanWave>,
+    /// Seconds on the game's own clock, for waves that follow a day cycle or
+    /// a pause; `None` follows the fixed tick.
+    pub time: Option<f64>,
+}
+
+/// One Gerstner wave of a [`WaterBody`]: crests that travel at the
+/// deep-water speed for their length and sharpen as `steepness` grows.
+#[derive(
+    Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(default)]
+pub struct OceanWave {
+    /// Direction the crests travel, in degrees around +Y (0 is +X).
+    pub direction: f32,
+    /// Distance between crests in metres.
+    pub length: f32,
+    /// Crest height above the rest level in metres.
+    pub height: f32,
+    /// 0 is a sine; 1 pinches the crest to a point. Keep the sum over all
+    /// waves at 1 or below, or crests fold over.
+    pub steepness: f32,
+}
+
+impl Default for OceanWave {
+    fn default() -> Self {
+        Self {
+            direction: 0.0,
+            length: 20.0,
+            height: 0.5,
+            steepness: 0.5,
+        }
+    }
 }
 
 impl Default for WaterBody {
@@ -87,6 +117,8 @@ impl Default for WaterBody {
             shore_foam: 0.0,
             ripples: 0.0,
             ripple_length: 1.0,
+            waves: Vec::new(),
+            time: None,
         }
     }
 }
@@ -98,10 +130,39 @@ const WAVES: [[f32; 4]; 3] = [
     [0.14, 0.41, 0.6, -0.9],
 ];
 
+/// `k * (along - speed * time)` wrapped to one turn, in `f64` so the waves
+/// keep their shape hours into a game.
+fn phase(k: f32, along: f32, speed: f32, time: f64) -> f32 {
+    let travel = f64::from(along) - f64::from(speed) * time;
+    (f64::from(k) * travel).rem_euclid(std::f64::consts::TAU) as f32
+}
+
 impl WaterBody {
+    /// The seconds the waves run on: the water's own `time`, else
+    /// `fixed_seconds` of the fixed tick.
+    #[must_use]
+    pub fn clock(&self, fixed_seconds: f64) -> f64 {
+        self.time.unwrap_or(fixed_seconds)
+    }
+
     /// Height above the rest level and the surface slope `[dh/dx, dh/dz]` at
-    /// a world position `time` seconds into the simulation.
-    pub fn wave(&self, x: f32, z: f32, time: f32) -> (f32, [f32; 2]) {
+    /// a world position `time` seconds into the simulation. Gerstner
+    /// `waves` sway the surface sideways, so this is the swayed surface
+    /// over `(x, z)`.
+    #[must_use]
+    pub fn wave(&self, x: f32, z: f32, time: f64) -> (f32, [f32; 2]) {
+        if !self.waves.is_empty() {
+            // The point over (x, z) came from a spot the waves swayed;
+            // each step finds it closer, by `steepness` at worst.
+            // ponytail: fixed 8 steps; a Newton step if steep seas drift.
+            let mut start = [x, z];
+            for _ in 0..8 {
+                let sway = self.gerstner(start, time).2;
+                start = [x - sway[0], z - sway[1]];
+            }
+            let (height, slope, _) = self.gerstner(start, time);
+            return (height, slope);
+        }
         let base = self.flow_direction.to_radians();
         let mut height = 0.0;
         let mut slope = [0.0; 2];
@@ -109,8 +170,8 @@ impl WaterBody {
             let angle = base + turn;
             let dir = [angle.cos(), angle.sin()];
             let k = TAU / (self.wave_length.max(0.05) * length);
-            let phase =
-                k * (dir[0] * x + dir[1] * z - self.wave_speed * speed * time);
+            let along = dir[0] * x + dir[1] * z;
+            let phase = phase(k, along, self.wave_speed * speed, time);
             let a = amplitude * self.wave_height;
             height += a * phase.sin();
             let d = a * k * phase.cos();
@@ -118,6 +179,35 @@ impl WaterBody {
             slope[1] += d * dir[1];
         }
         (height, slope)
+    }
+
+    /// Height, slope and sideways sway of the Gerstner surface point that
+    /// starts at `(x, z)` before the waves move it.
+    fn gerstner(
+        &self,
+        [x, z]: [f32; 2],
+        time: f64,
+    ) -> (f32, [f32; 2], [f32; 2]) {
+        let (mut height, mut tilt, mut sway, mut up) =
+            (0.0, [0.0; 2], [0.0; 2], 1.0);
+        for wave in &self.waves {
+            let angle = wave.direction.to_radians();
+            let dir = [angle.cos(), angle.sin()];
+            let k = TAU / wave.length.max(0.05);
+            // Deep water: longer waves travel faster.
+            let speed = (9.81 / k).sqrt();
+            let (sin, cos) =
+                phase(k, dir[0] * x + dir[1] * z, speed, time).sin_cos();
+            let steepness = wave.steepness.clamp(0.0, 1.0);
+            height += wave.height * sin;
+            up -= steepness * sin;
+            for axis in 0..2 {
+                tilt[axis] += k * wave.height * dir[axis] * cos;
+                sway[axis] += steepness / k * dir[axis] * cos;
+            }
+        }
+        let up = up.max(1e-3);
+        (height, [tilt[0] / up, tilt[1] / up], sway)
     }
 
     /// Velocity of the current in metres per second.
@@ -172,7 +262,7 @@ fn water_material(water: &WaterBody) -> MaterialAsset {
     }
 }
 
-fn build_mesh(water: &WaterBody, center: [f32; 3], time: f32) -> MeshAsset {
+fn build_mesh(water: &WaterBody, center: [f32; 3], time: f64) -> MeshAsset {
     let longer = water.size[0].max(water.size[1]).max(0.01);
     let cells = water.resolution.clamp(2, 256) as f32;
     let nx = ((water.size[0] / longer * cells).ceil() as usize).max(1);
@@ -227,15 +317,14 @@ pub(super) fn sync_water(
     )>,
     markers: Query<&super::FluidParticle>,
 ) {
-    let seconds =
-        (time.fixed_tick as f64 * time.fixed_delta.as_secs_f64()) as f32;
+    let seconds = time.fixed_tick as f64 * time.fixed_delta.as_secs_f64();
     let Some(mut assets) = assets else {
         return;
     };
     for (owner, water, transform, parent, global, mesh) in &mut waters {
         let position =
             super::cpu_physics::world_position(transform, parent, global);
-        let built = build_mesh(water, position, seconds);
+        let built = build_mesh(water, position, water.clock(seconds));
         let existing = mesh.as_deref().filter(|mesh| {
             markers
                 .get(mesh.entity)
@@ -329,8 +418,7 @@ pub(super) fn float_in_water(
         return;
     }
     let dt = time.fixed_delta.as_secs_f32();
-    let seconds =
-        (time.fixed_tick as f64 * time.fixed_delta.as_secs_f64()) as f32;
+    let seconds = time.fixed_tick as f64 * time.fixed_delta.as_secs_f64();
     let gravity = physics.gravity;
     let gravity_size = Vector3::from(gravity).norm();
     let mut waters: Vec<_> = waters.iter().collect();
@@ -410,7 +498,8 @@ pub(super) fn float_in_water(
             if !water.contains(origin, center[0], center[2]) {
                 continue;
             }
-            let (height, _) = water.wave(center[0], center[2], seconds);
+            let (height, _) =
+                water.wave(center[0], center[2], water.clock(seconds));
             let surface = origin[1] + height;
             let submerged = ((surface - (center[1] - reach))
                 / (2.0 * reach).max(1e-4))
@@ -567,6 +656,66 @@ mod tests {
         let a = water.wave(1.3, -2.1, 4.0);
         assert_eq!(a, water.wave(1.3, -2.1, 4.0));
         assert!(a.0.abs() <= water.wave_height);
+    }
+
+    #[test]
+    fn gerstner_waves_sharpen_crests_and_keep_time_in_f64() {
+        let water = WaterBody {
+            waves: vec![OceanWave {
+                direction: 0.0,
+                length: 10.0,
+                height: 1.0,
+                steepness: 0.5,
+            }],
+            ..WaterBody::default()
+        };
+        // Narrow crests and wide troughs pull the mean height down by
+        // steepness * height / 2 under a fixed spot, where a sine has none.
+        let n = 1000;
+        let mean = (0..n)
+            .map(|i| water.wave(10.0 * i as f32 / n as f32, 0.0, 0.0).0)
+            .sum::<f32>()
+            / n as f32;
+        assert!((mean + 0.25).abs() < 0.01, "{mean}");
+        // The slope is the swayed surface's own.
+        let (x, e) = (3.1, 1e-3);
+        let dx = (water.wave(x + e, 0.0, 0.0).0
+            - water.wave(x - e, 0.0, 0.0).0)
+            / (2.0 * e);
+        let slope = water.wave(x, 0.0, 0.0).1;
+        assert!((slope[0] - dx).abs() < 0.02 && slope[1].abs() < 1e-6);
+        // Hours in, one period later the sea looks the same.
+        let period = 10.0 / (9.81 * 10.0 / TAU).sqrt();
+        let (late, later) = (1e6, 1e6 + f64::from(period));
+        let (a, b) = (water.wave(2.0, 1.0, late), water.wave(2.0, 1.0, later));
+        assert!((a.0 - b.0).abs() < 1e-3, "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn a_water_clock_moves_the_mesh_in_place_of_the_fixed_tick() {
+        use crate::runtime::App;
+        let water = WaterBody {
+            size: [4.0, 4.0],
+            resolution: 4,
+            time: Some(123.4),
+            ..WaterBody::default()
+        };
+        let mut app = App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        app.world_mut().resource_mut::<FrameTime>().fixed_tick = 20;
+        let owner = app
+            .world_mut()
+            .spawn((water.clone(), crate::Transform::default()))
+            .id();
+        app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
+            .unwrap();
+        let mesh = app.world().get::<WaterMesh>(owner).unwrap().mesh;
+        let assets = app.world().resource::<AssetServer>();
+        let built = assets.meshes.get(mesh).unwrap();
+        assert_eq!(*built, build_mesh(&water, [0.0; 3], 123.4));
+        let fixed = app.world().resource::<FrameTime>();
+        let seconds = fixed.fixed_tick as f64 * fixed.fixed_delta.as_secs_f64();
+        assert_ne!(*built, build_mesh(&water, [0.0; 3], seconds));
     }
 
     #[test]

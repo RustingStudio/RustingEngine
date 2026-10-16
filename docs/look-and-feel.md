@@ -304,6 +304,25 @@ reflections already make) while any of them is on.
 
 The depth needs the lit view; debug views draw the plain `color`.
 
+For a sea, list Gerstner `waves` in place of the three built-in sines
+(`wave_height`, `wave_length`, `wave_speed`). Each wave travels toward
+`direction` (degrees around +Y, 0 is +X) at the deep-water speed for its
+`length`, rises `height` metres, and leans its crests by `steepness`: 0 is a
+sine, 1 a pointed crest. Keep the sum of `steepness` at 1 or below, or crests
+fold over. Floating bodies and swimmers ride the same surface.
+
+```json
+"waves": [
+  {"direction": 0, "length": 24, "height": 0.6, "steepness": 0.4},
+  {"direction": 35, "length": 11, "height": 0.25, "steepness": 0.3},
+  {"direction": -50, "length": 5, "height": 0.08, "steepness": 0.2}
+]
+```
+
+`time` runs the waves on the game's own clock in seconds, so a pause or a
+time skip moves them; `null` follows the fixed tick. Game code reads the
+surface with `WaterBody::wave(x, z, water.clock(seconds))`.
+
 ## Text in the world
 
 `rusting.text` puts text on a sign, over a door or above an object. It
