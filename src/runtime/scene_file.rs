@@ -2563,6 +2563,20 @@ fn map_scene_asset_paths(
             reflect::map_asset_paths(&mut value, &mut asset)?;
             *serialized = value.to_string();
         }
+        if let Some(serialized) =
+            entity.components.get_mut(HEIGHTFIELD_COMPONENT)
+        {
+            if let Ok(mut value) = serde_json::from_str::<Value>(serialized) {
+                if let Some(Value::String(image)) = value.get_mut("image") {
+                    if !image.is_empty() {
+                        *image = convert(Path::new(image.as_str()), false)?
+                            .to_string_lossy()
+                            .into_owned();
+                        *serialized = value.to_string();
+                    }
+                }
+            }
+        }
         if let Some(serialized) = entity.components.get_mut(TERRAIN_COMPONENT) {
             if let Ok(mut value) = serde_json::from_str::<Value>(serialized) {
                 let mut changed = false;

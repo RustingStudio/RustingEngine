@@ -566,6 +566,16 @@ window's size.
 
 ## Terrain layers
 
+Keep big heightfields out of the scene file: set `image` on
+`rusting.heightfield` to a 16-bit grey PNG or a `.r16`/`.raw` square of
+little-endian samples, relative to the scene, and `height_scale` to the
+height of white in metres. The scene saves the image path, not the
+samples.
+
+```json
+{"image": "assets/island.png", "height_scale": 40.0, "spacing": 2.0}
+```
+
 A `rusting.terrain` paints up to four layers. Each layer keeps its image at
 full size up to 2048 px, with mipmaps and anisotropic filtering, so a 1K or
 2K ground texture stays sharp near the camera and calm in the distance.

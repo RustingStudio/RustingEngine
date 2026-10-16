@@ -95,11 +95,14 @@ impl Default for GravityVolume {
 /// A grid of ground heights for a `Heightfield` collider: `heights[row]
 /// [column]`, rows along +Z and columns along +X, `spacing` metres apart and
 /// centred on the entity. [`Heightfield::mesh`] gives the same surface to
-/// draw.
+/// draw. With an `image`, the heights load from that file and are not saved.
 #[derive(
     Component, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize,
 )]
-#[serde(default)]
+#[serde(
+    try_from = "super::terrain::HeightfieldFile",
+    into = "super::terrain::HeightfieldFile"
+)]
 pub struct Heightfield {
     pub heights: Vec<Vec<f32>>,
     pub spacing: f32,
@@ -109,6 +112,12 @@ pub struct Heightfield {
     /// and [`PhysicsMaterial`].
     pub cells: Vec<Vec<u8>>,
     pub surfaces: Vec<GroundSurface>,
+    /// 16-bit grey PNG, or `.r16`/`.raw` square of little-endian samples,
+    /// that `heights` load from; empty keeps the saved heights. Image row 0
+    /// is `heights[0]`.
+    pub image: String,
+    /// Height of a white sample, in metres.
+    pub height_scale: f32,
 }
 
 impl Default for Heightfield {
@@ -118,6 +127,8 @@ impl Default for Heightfield {
             spacing: 1.0,
             cells: Vec::new(),
             surfaces: Vec::new(),
+            image: String::new(),
+            height_scale: 1.0,
         }
     }
 }

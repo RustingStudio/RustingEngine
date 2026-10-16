@@ -4,6 +4,7 @@
 
 ### Added
 
+- `rusting.heightfield` loads its heights from a 16-bit PNG or `.r16`/`.raw` file with `image` and `height_scale`, so big terrains stay out of the scene file.
 - The quality profile thins `rusting.foliage`: Eco draws 30% of each scatter and Balanced 60%, keeping the first copies.
 - `rusting.foliage` on the parent of a multi-part model (a palm's trunk and leaves) scatters the whole model, each part keeping its place on every copy.
 - `GameScene::children(name)` lists the names of a node's children, so game code can tint or hide a model part by part.

@@ -7,7 +7,7 @@
 //! built into the [`AssetServer`] at extraction time and tracked by
 //! [`TerrainChunks`], which is not saved: a loaded scene rebuilds it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bevy_ecs::change_detection::{DetectChanges, Tick};
 use bevy_ecs::prelude::{Component, Entity, Ref, With, Without, World};
@@ -19,6 +19,102 @@ use crate::assets::{
     AssetServer, Handle, LodGroupAsset, LodLevel, LodMetric, MaterialAsset,
     MeshAsset, MeshVertex, TextureAsset, TextureColorSpace, TextureSampler,
 };
+
+/// How a [`Heightfield`] is saved: heights from an `image` are left out
+/// and read again on load.
+// ponytail: sculpting an image heightfield is lost on save, and the image
+// is not hot-reloaded; write the heights back to the image when that matters.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(super) struct HeightfieldFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heights: Option<Vec<Vec<f32>>>,
+    spacing: f32,
+    cells: Vec<Vec<u8>>,
+    surfaces: Vec<super::GroundSurface>,
+    image: String,
+    height_scale: f32,
+}
+
+impl Default for HeightfieldFile {
+    fn default() -> Self {
+        Heightfield::default().into()
+    }
+}
+
+impl From<Heightfield> for HeightfieldFile {
+    fn from(field: Heightfield) -> Self {
+        Self {
+            heights: field.image.is_empty().then_some(field.heights),
+            spacing: field.spacing,
+            cells: field.cells,
+            surfaces: field.surfaces,
+            image: field.image,
+            height_scale: field.height_scale,
+        }
+    }
+}
+
+impl TryFrom<HeightfieldFile> for Heightfield {
+    type Error = String;
+
+    fn try_from(file: HeightfieldFile) -> Result<Self, String> {
+        let heights = if file.image.is_empty() {
+            file.heights.unwrap_or_default()
+        } else {
+            read_height_image(Path::new(&file.image), file.height_scale)
+                .map_err(|error| {
+                    format!("heightfield image {}: {error}", file.image)
+                })?
+        };
+        Ok(Self {
+            heights,
+            spacing: file.spacing,
+            cells: file.cells,
+            surfaces: file.surfaces,
+            image: file.image,
+            height_scale: file.height_scale,
+        })
+    }
+}
+
+/// Rows of heights from a 16-bit grey image (any format the `image` crate
+/// reads) or a `.r16`/`.raw` square of little-endian samples; white is
+/// `scale` metres.
+fn read_height_image(path: &Path, scale: f32) -> Result<Vec<Vec<f32>>, String> {
+    let raw = matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("r16" | "raw")
+    );
+    let (columns, samples) = if raw {
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        let samples: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let side = samples.len().isqrt();
+        if side < 2 || side * side != samples.len() || bytes.len() % 2 != 0 {
+            return Err("a raw heightmap is a square of 16-bit samples".into());
+        }
+        (side, samples)
+    } else {
+        let image = image::open(path)
+            .map_err(|error| error.to_string())?
+            .into_luma16();
+        (image.width() as usize, image.into_raw())
+    };
+    if columns < 2 || samples.len() < 2 * columns {
+        return Err("a heightmap needs at least 2 by 2 samples".into());
+    }
+    Ok(samples
+        .chunks(columns)
+        .map(|row| {
+            row.iter()
+                .map(|&sample| f32::from(sample) / f32::from(u16::MAX) * scale)
+                .collect()
+        })
+        .collect())
+}
 
 /// Layers the splat material blends; later ones are ignored.
 pub const MAX_TERRAIN_LAYERS: usize = 4;
@@ -779,6 +875,89 @@ fn layer_normals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heightfields_read_their_heights_from_an_image_under_the_scene() {
+        let folder = std::env::temp_dir()
+            .join(format!("rusting-heightfield-image-{}", std::process::id()));
+        std::fs::create_dir_all(folder.join("assets")).unwrap();
+        // Three columns, two rows; white is `height_scale` metres.
+        let png = image::ImageBuffer::<image::Luma<u16>, _>::from_raw(
+            3,
+            2,
+            vec![0, 65535, 32768, 65535, 0, 13107],
+        )
+        .unwrap();
+        png.save(folder.join("assets/island.png")).unwrap();
+        let raw: Vec<u8> = [0_u16, 65535, 65535, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        std::fs::write(folder.join("assets/reef.r16"), raw).unwrap();
+        let read = |name: &str| {
+            let path = folder.join("assets").join(name);
+            serde_json::from_value::<Heightfield>(serde_json::json!({
+                "image": path, "height_scale": 10.0, "spacing": 2.0,
+            }))
+        };
+        let island = read("island.png").unwrap();
+        let near = |a: &[Vec<f32>], b: &[[f32; 3]]| {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(a, b)| {
+                    a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3)
+                })
+        };
+        assert!(near(&island.heights, &[[0.0, 10.0, 5.0], [10.0, 0.0, 2.0]]));
+        assert_eq!(island.spacing, 2.0);
+        assert_eq!(
+            read("reef.r16").unwrap().heights,
+            [[0.0, 10.0], [10.0, 0.0]]
+        );
+        let missing = read("none.png").unwrap_err().to_string();
+        assert!(missing.contains("none.png"), "{missing}");
+        // Saved scenes keep the image, not the samples it gave.
+        let saved = serde_json::to_value(&island).unwrap();
+        assert!(saved.get("heights").is_none(), "{saved}");
+        assert_eq!(
+            serde_json::from_value::<Heightfield>(saved).unwrap(),
+            island
+        );
+        let inline = serde_json::to_value(field(2, 2)).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Heightfield>(inline).unwrap(),
+            field(2, 2)
+        );
+        // A scene names the image relative to its own file.
+        let scene = folder.join("main.rscene");
+        std::fs::write(
+            &scene,
+            serde_json::json!({
+                "format_version": crate::runtime::SCENE_FORMAT_VERSION,
+                "name": "Main",
+                "entities": [{
+                    "id": uuid::Uuid::new_v4(),
+                    "name": "Island",
+                    "components": {"rusting.heightfield": serde_json::json!({
+                        "image": "assets/island.png", "height_scale": 10.0,
+                    }).to_string()},
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut app = crate::App::new();
+        app.add_plugin(crate::assets::AssetPlugin).unwrap();
+        crate::runtime::load_scene(
+            app.world_mut(),
+            &scene,
+            crate::runtime::SceneLoadMode::Replace,
+        )
+        .unwrap();
+        let world = app.world_mut();
+        let loaded = world.query::<&Heightfield>().single(world).unwrap();
+        assert!(near(&loaded.heights, &[[0.0, 10.0, 5.0], [10.0, 0.0, 2.0]]));
+        std::fs::remove_dir_all(folder).unwrap();
+    }
 
     fn field(rows: usize, columns: usize) -> Heightfield {
         Heightfield {

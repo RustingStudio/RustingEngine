@@ -1252,9 +1252,9 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.heightfield",
-        summary: "A grid of ground heights for a collider with shape \"Heightfield\" on the same object (static only, like TriangleMesh). heights[row][column] in metres; rows run along +Z and columns along +X, spacing metres apart, centred on the object and scaled by its transform. Add rusting.terrain to draw it, or draw it from game code with Heightfield::mesh(). cells[row][column] (one row and column fewer than heights) picks an entry of surfaces for that cell, a patch such as ice or mud with its own friction, restitution and material name (sound_cue with_material matches it); missing cells and indices past the end use the collider's own values and physics_material.",
+        summary: "A grid of ground heights for a collider with shape \"Heightfield\" on the same object (static only, like TriangleMesh). heights[row][column] in metres; rows run along +Z and columns along +X, spacing metres apart, centred on the object and scaled by its transform. Add rusting.terrain to draw it, or draw it from game code with Heightfield::mesh(). cells[row][column] (one row and column fewer than heights) picks an entry of surfaces for that cell, a patch such as ice or mud with its own friction, restitution and material name (sound_cue with_material matches it); missing cells and indices past the end use the collider's own values and physics_material. image (relative to the scene file, such as \"assets/island.png\") loads the heights from a 16-bit grey PNG or a .r16/.raw square of little-endian samples instead: image row 0 is heights[0] and a white sample is height_scale metres (default 1). Saved scenes keep the image and leave the heights out, so sculpting such a heightfield is not saved.",
         gpu: NO_GPU,
-        example: || json!({"heights": [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.5, 0.0]], "spacing": 2.0, "cells": [[0, 255], [255, 255]], "surfaces": [{"name": "ice", "friction": 0.02, "restitution": 0.0}]}),
+        example: || json!({"heights": [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.5, 0.0]], "spacing": 2.0, "cells": [[0, 255], [255, 255]], "surfaces": [{"name": "ice", "friction": 0.02, "restitution": 0.0}], "image": "", "height_scale": 1.0}),
     },
     ComponentSection {
         key: "rusting.axis_lock",

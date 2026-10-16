@@ -5445,6 +5445,7 @@ fn heightfield_cells_with_their_own_surface_change_friction_and_sound() {
             friction: 0.0,
             restitution: 0.0,
         }],
+        ..Heightfield::default()
     });
     let slide = |app: &mut App, x: f32| {
         let world = app.world_mut();

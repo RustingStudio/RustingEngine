@@ -397,6 +397,8 @@ add about 160k samples (~45k lines) and 0.8 MB to `scenes/main.rscene`.
 - Instead: the generator writes the samples inline.
 - Wanted: a heightfield that reads a 16-bit PNG or raw file under `assets/` with a height
   scale, like the textures do.
+- Status: done (this commit, test: `heightfields_read_their_heights_from_an_image_under_the_scene`).
+  `Heightfield.image` (relative to the scene) and `height_scale`; saved scenes drop the samples.
 
 ### E20. World pose of a named bone
 

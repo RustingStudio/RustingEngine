@@ -859,6 +859,8 @@ crate::reflect! {
         spacing: f32 { unit: "m", min: 0.001, doc: "distance between neighbouring samples" },
         cells: Vec<Vec<u8>> { doc: "cells[row][column]: index into surfaces; missing cells use the collider's own" },
         surfaces: Vec<GroundSurface> { doc: "ground patches with their own friction, restitution and sound material" },
+        image: String { doc: "16-bit grey PNG or .r16/.raw square under assets/ the heights load from; empty keeps the saved heights" },
+        height_scale: f32 { unit: "m", doc: "height of a white image sample" },
     }
 }
 
