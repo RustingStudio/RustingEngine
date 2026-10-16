@@ -21,6 +21,41 @@ pub struct MeshRenderer {
     pub receive_shadows: bool,
 }
 
+/// Which layer draws a [`MeshRenderer`]. While the active camera has a
+/// [`ViewmodelCamera`], `Viewmodel` meshes draw over the world with that
+/// camera's own field of view, so a held tool never pokes into walls.
+#[derive(
+    Component,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RenderLayer {
+    #[default]
+    World,
+    Viewmodel,
+}
+
+/// On a camera: draws [`RenderLayer::Viewmodel`] meshes over the world with
+/// this vertical field of view. Perspective cameras only.
+#[derive(
+    Component,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ViewmodelCamera {
+    pub vertical_fov_radians: f32,
+}
+
 /// Per-object values that replace its material's: a red and a blue crate
 /// share one material and still draw in one instanced batch. Unset fields
 /// keep the material's value.

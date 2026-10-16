@@ -270,6 +270,11 @@ pub struct RenderWorld {
     /// Drawn tint of each flashing renderable, sorted by entity: rgb from
     /// its own or an ancestor's [`super::Flash`], a the strength.
     pub flashes: Vec<(Entity, [f32; 4])>,
+    /// Renderables on [`super::RenderLayer::Viewmodel`], sorted. Empty
+    /// unless the active camera has a [`super::ViewmodelCamera`].
+    pub viewmodels: Vec<Entity>,
+    /// The active camera's [`super::ViewmodelCamera`] field of view.
+    pub viewmodel_fov: Option<f32>,
     /// Each renderable's [`super::MaterialOverride`], sorted by entity.
     pub material_overrides: Vec<(Entity, super::MaterialOverride)>,
     /// Index of each entity in `renderables`.
@@ -764,6 +769,21 @@ pub fn extract_render_world(world: &mut World) {
     );
 
     let flashes = collect_flashes(world);
+    let viewmodel_fov = active_camera.as_ref().and_then(|camera| {
+        world
+            .get::<super::ViewmodelCamera>(camera.entity)
+            .map(|viewmodel| viewmodel.vertical_fov_radians)
+    });
+    let mut viewmodels = Vec::new();
+    if viewmodel_fov.is_some() {
+        viewmodels = world
+            .query_filtered::<(Entity, &super::RenderLayer), With<MeshRenderer>>()
+            .iter(world)
+            .filter(|(_, layer)| **layer == super::RenderLayer::Viewmodel)
+            .map(|(entity, _)| entity)
+            .collect();
+        viewmodels.sort();
+    }
     let mut material_overrides = world
         .query_filtered::<(Entity, &super::MaterialOverride), With<MeshRenderer>>()
         .iter(world)
@@ -775,6 +795,8 @@ pub fn extract_render_world(world: &mut World) {
         .map(|renderables| collect_foliage(world, renderables));
     let mut render_world = world.resource_mut::<RenderWorld>();
     render_world.flashes = flashes;
+    render_world.viewmodels = viewmodels;
+    render_world.viewmodel_fov = viewmodel_fov;
     render_world.material_overrides = material_overrides;
     match renderables {
         None => {
@@ -1962,6 +1984,43 @@ mod tests {
                 .trauma,
             0.0
         );
+    }
+
+    #[test]
+    fn viewmodels_extract_only_under_a_viewmodel_camera() {
+        use crate::runtime::{RenderLayer, ViewmodelCamera};
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let server = AssetServer::default();
+        let camera = app.spawn((
+            Transform::default(),
+            Camera {
+                active: true,
+                ..Camera::default()
+            },
+        ));
+        let tool = app.spawn((
+            Transform::default(),
+            renderer(&server),
+            RenderLayer::Viewmodel,
+        ));
+        app.spawn((
+            Transform::default(),
+            renderer(&server),
+            RenderLayer::World,
+        ));
+        app.update(Duration::ZERO).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        assert!(render_world.viewmodels.is_empty());
+        assert_eq!(render_world.viewmodel_fov, None);
+
+        app.world_mut().entity_mut(camera).insert(ViewmodelCamera {
+            vertical_fov_radians: 1.0,
+        });
+        app.update(Duration::ZERO).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        assert_eq!(render_world.viewmodels, vec![tool]);
+        assert_eq!(render_world.viewmodel_fov, Some(1.0));
     }
 
     #[test]

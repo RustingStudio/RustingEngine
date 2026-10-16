@@ -1141,6 +1141,8 @@ struct PreparedRenderInstances {
     physics_revision: u64,
     /// `RenderWorld::wetness` the wettable colors were packed for.
     wetness: f32,
+    /// `RenderWorld::viewmodels` the flags in `physics.w` were packed for.
+    viewmodels: Vec<bevy_ecs::entity::Entity>,
     material_revisions: Vec<(Handle<MaterialAsset>, u64)>,
     instances: Subbuffer<[RenderInstanceUpload]>,
     /// Opaque and masked batches.
@@ -3235,7 +3237,14 @@ impl SceneRenderer {
                 lights.ambient[2],
                 render_world.elapsed_seconds,
             ],
-            ground_ambient: lights.ground_ambient,
+            // w: the clip-space xy scale that gives viewmodel meshes their
+            // own field of view.
+            ground_ambient: [
+                lights.ground_ambient[0],
+                lights.ground_ambient[1],
+                lights.ground_ambient[2],
+                viewmodel_scale(camera, render_world.viewmodel_fov),
+            ],
             // y: shadowed light index plus one, or 0 for none.
             light_info: [
                 lights.count,
@@ -7432,6 +7441,7 @@ impl SceneRenderer {
                     == render_world.material_overrides
                 && prepared.lightmaps == render_world.lightmaps
                 && prepared.wetness == render_world.wetness
+                && prepared.viewmodels == render_world.viewmodels
                 && prepared.lod_signature == lod_signature
                 && prepared.screens == screens
                 && prepared.physics_revision
@@ -7672,6 +7682,12 @@ impl SceneRenderer {
                     f32::to_bits(cutoff),
                     u32::from(renderable.cast_shadows)
                         | u32::from(renderable.receive_shadows) << 1
+                        | u32::from(
+                            render_world
+                                .viewmodels
+                                .binary_search(&renderable.entity)
+                                .is_ok(),
+                        ) << 2
                         | lightmap_slot(render_world, renderable.entity) << 8,
                 ],
                 transmission: material.map_or([0.0; 4], |material| {
@@ -7860,6 +7876,7 @@ impl SceneRenderer {
         self.prepared_instances = Some(PreparedRenderInstances {
             renderables_revision: render_world.renderables_revision,
             wetness: render_world.wetness,
+            viewmodels: render_world.viewmodels.clone(),
             layout_revision: render_world.renderables_layout_revision,
             packed,
             sources,
@@ -11618,6 +11635,26 @@ fn halton(mut index: u32, base: u32) -> f32 {
     value
 }
 
+/// How much to scale clip-space xy so viewmodel meshes appear with
+/// `viewmodel_fov` instead of the camera's own.
+// ponytail: frustum culling and screen-space effects still use the main
+// camera, so a viewmodel wider than the world view can be culled early.
+fn viewmodel_scale(
+    camera: Option<ExtractedCamera>,
+    viewmodel_fov: Option<f32>,
+) -> f32 {
+    match (camera.map(|camera| camera.projection), viewmodel_fov) {
+        (
+            Some(Projection::Perspective {
+                vertical_fov_radians,
+                ..
+            }),
+            Some(fov),
+        ) => (vertical_fov_radians * 0.5).tan() / (fov * 0.5).tan(),
+        _ => 1.0,
+    }
+}
+
 fn view_projection(
     camera: Option<ExtractedCamera>,
     extent: [u32; 2],
@@ -12337,6 +12374,12 @@ void main() {
     // Normals and tangents follow the local shear, the lean times the slope.
     lean *= bend.y;
     gl_Position = camera.view_projection * world_position;
+    // Viewmodel meshes take their own field of view and squash toward the
+    // near plane, so they draw over the world without a depth clear.
+    if ((instance.physics.w & 4u) != 0u) {
+        gl_Position.xy *= camera.ground_ambient.w;
+        gl_Position.z *= 0.05;
+    }
     mat3 normal_matrix;
     if (instance.physics.x == 0xffffffffu) {
         normal_matrix = mat3(instance.normal);
@@ -13061,7 +13104,9 @@ void main() {
     bool bounded = instance.sphere.w >= 0.0;
     bool frustum = level < 4u
         && (!bounded || cull.info.z != 0u || in_frustum(center, radius));
-    bool shown = frustum && (phase != 2u || !bounded || !occluded(center, radius));
+    // Viewmodel meshes draw over the world, so nothing occludes them.
+    bool shown = frustum && (phase != 2u || !bounded
+        || (render.physics.w & 4u) != 0u || !occluded(center, radius));
     // The early phase draws last frame's visible opaque instances; the late
     // phase recomputes this before overwriting the history.
     bool early = phase != 0u && frustum && occlusion.data[index] != 0u
@@ -13931,6 +13976,57 @@ mod tests {
             "wet {wet:?} dry {dry:?}"
         );
         assert_eq!(render_pixel(&mut sail, center), plain);
+    }
+
+    #[test]
+    fn viewmodel_meshes_draw_over_walls_with_their_own_fov() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let color = |base_color| MaterialAsset {
+            base_color,
+            ..MaterialAsset::default()
+        };
+        // A red wall in front of a green held tool.
+        let mut scene = SlabScene::with_extent(
+            &[
+                (0.0, color([1.0, 0.0, 0.0, 1.0])),
+                (-2.0, color([0.0, 1.0, 0.0, 1.0])),
+            ],
+            [32, 32],
+        );
+        let fov = 60f32.to_radians();
+        if let Some(camera) = &mut scene.render_world.active_camera {
+            camera.projection = Projection::Perspective {
+                vertical_fov_radians: fov,
+                near: 0.1,
+                far: 30.0,
+            };
+        }
+        let green = |scene: &mut SlabScene| {
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            scene
+                .pixels()
+                .chunks(4)
+                .filter(|bgra| u32::from(bgra[1]) > u32::from(bgra[2]) + 100)
+                .count()
+        };
+        assert_eq!(green(&mut scene), 0);
+        let tool = scene.render_world.renderables[1].entity;
+        scene.render_world.viewmodels = vec![tool];
+        scene.render_world.viewmodel_fov = Some(fov);
+        let same_fov = green(&mut scene);
+        assert!(same_fov > 32 * 32 / 8, "{same_fov} green pixels");
+        scene.render_world.viewmodel_fov = Some(90f32.to_radians());
+        let wider = green(&mut scene);
+        assert!(wider > 0 && wider < same_fov / 2, "{wider} vs {same_fov}");
     }
 
     #[test]

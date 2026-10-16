@@ -253,6 +253,15 @@ and no second pass that clears depth.
 - Wanted: a render layer on `MeshRenderer`, and a camera that draws only that layer over the
   main view after clearing depth, with its own FOV (spec 5).
 
+Status: split into E7a (renderer and components) and E7b (scene files, editor, schema).
+E7a: done (this commit, tests: `viewmodel_meshes_draw_over_walls_with_their_own_fov` (GPU),
+`viewmodels_extract_only_under_a_viewmodel_camera`). The layer is a `RenderLayer` component
+(`World`, `Viewmodel`) next to `MeshRenderer`, since `MeshRenderer` literals are everywhere.
+The camera side is `ViewmodelCamera { vertical_fov_radians }` on the active camera. There is
+no second pass: viewmodel meshes scale clip-space xy to their FOV and squash their depth
+toward the near plane, so they draw over walls in the same pass and keep true world lighting.
+Frustum culling still uses the main camera's FOV.
+
 ### E8. Reading the resolved quality profile
 
 `resolve_quality` runs inside the renderer. On an integrated GPU it picks Eco, under 4 GB of
