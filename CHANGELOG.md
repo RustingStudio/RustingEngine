@@ -4,6 +4,7 @@
 
 ### Added
 
+- `rusting.wind` blows over the whole scene: foliage and swaying materials lean in it without a force field, physics bodies ignore it, and particles feel it times their emitter's new `wind_factor`.
 - `GameScene::bone_world(object, bone)` gives a named bone's world matrix after the latest animation step, so game code can attach a held object to a hand.
 - `rusting.heightfield` loads its heights from a 16-bit PNG or `.r16`/`.raw` file with `image` and `height_scale`, so big terrains stay out of the scene file.
 - The quality profile thins `rusting.foliage`: Eco draws 30% of each scatter and Balanced 60%, keeping the first copies.

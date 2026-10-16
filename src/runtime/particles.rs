@@ -238,6 +238,9 @@ pub struct ParticleEmitter {
     pub turbulence: f32,
     /// Size of the swirls: higher makes smaller, faster eddies.
     pub turbulence_frequency: f32,
+    /// Share of the scene's [`Wind`](super::Wind) the particles feel; 0
+    /// ignores it.
+    pub wind_factor: f32,
     /// Size multiplier over life. Empty keeps the start size.
     pub size_over_life: Vec<CurveKey>,
     /// Linear RGBA over life. Empty is white.
@@ -307,6 +310,7 @@ impl Default for ParticleEmitter {
             wind: [0.0; 3],
             turbulence: 0.0,
             turbulence_frequency: 1.0,
+            wind_factor: 1.0,
             size_over_life: Vec::new(),
             color_over_life: Vec::new(),
             start_colors: Vec::new(),
@@ -603,8 +607,15 @@ fn integrate(
     particle: &mut Particle,
     dt: f32,
     time: f32,
+    wind: Option<&super::Wind>,
 ) {
     let mut accel = emitter.wind;
+    if let Some(wind) = wind {
+        let push = wind.push_at(particle.position, time);
+        for (accel, push) in accel.iter_mut().zip(push) {
+            *accel += push * emitter.wind_factor;
+        }
+    }
     accel[1] -= emitter.gravity;
     if emitter.turbulence != 0.0 {
         let f = emitter.turbulence_frequency;
@@ -632,6 +643,7 @@ fn integrate(
 }
 
 /// Advances one emitter by one fixed step `tick` of `dt` seconds.
+#[allow(clippy::too_many_arguments)]
 fn step(
     emitter: &ParticleEmitter,
     system: &mut ParticleSystem,
@@ -640,13 +652,14 @@ fn step(
     tick: u64,
     stream: u64,
     dt: f32,
+    wind: Option<&super::Wind>,
 ) {
     if system.paused {
         return;
     }
     let time = system.time;
     system.particles.retain_mut(|particle| {
-        integrate(emitter, particle, dt, time);
+        integrate(emitter, particle, dt, time, wind);
         particle.age < particle.lifetime
     });
     if !system.playing {
@@ -873,11 +886,13 @@ pub(super) fn update_particles(
     mut emitters: Query<EmitterParts>,
     boxes: Query<BlockerParts>,
     grounds: Query<GroundParts>,
+    winds: Query<(Entity, &super::Wind)>,
 ) {
     let dt = time.fixed_delta.as_secs_f32();
     let blockers = Blockers::new(boxes.iter(), grounds.iter());
+    let wind = super::Wind::first(winds);
     for parts in &mut emitters {
-        advance(parts, &blockers, &seed, time.fixed_tick, dt);
+        advance(parts, &blockers, &seed, time.fixed_tick, dt, wind);
     }
 }
 
@@ -892,6 +907,7 @@ fn advance(
     seed: &RandomSeed,
     tick: u64,
     dt: f32,
+    wind: Option<&super::Wind>,
 ) {
     let stream = stream_key(entity, id);
     let frame = emitter_frame(global, transform);
@@ -901,10 +917,10 @@ fn advance(
         system.started = true;
         system.playing |= emitter.autoplay;
         if emitter.prewarm && system.playing {
-            prewarm(&emitter, &mut system, frame, seed, tick, stream, dt);
+            prewarm(&emitter, &mut system, frame, seed, tick, stream, dt, wind);
         }
     }
-    step(&emitter, &mut system, frame, seed, tick, stream, dt);
+    step(&emitter, &mut system, frame, seed, tick, stream, dt, wind);
     if emitter.blockers {
         let local = emitter.space == ParticleSpace::Local;
         system.particles.retain(|particle| {
@@ -958,14 +974,17 @@ pub fn preview_particles(world: &mut World, real: Duration) {
         Query<EmitterParts>,
         Query<BlockerParts>,
         Query<GroundParts>,
+        Query<(Entity, &super::Wind)>,
     )>::new(world);
-    let Ok((mut emitters, boxes, grounds)) = state.get_mut(world) else {
+    let Ok((mut emitters, boxes, grounds, winds)) = state.get_mut(world) else {
         return;
     };
     let blockers = Blockers::new(boxes.iter(), grounds.iter());
+    let wind = super::Wind::first(winds);
     for tick in first..first + steps {
         for parts in &mut emitters {
-            advance(parts, &blockers, &seed, tick, fixed.as_secs_f32());
+            let dt = fixed.as_secs_f32();
+            advance(parts, &blockers, &seed, tick, dt, wind);
         }
     }
 }
@@ -1014,6 +1033,7 @@ fn apply_command(system: &mut ParticleSystem, command: ParticleCommand) {
 /// Plays one cycle (at most ten seconds) before the first visible step.
 /// Ticks before the scene's first count backward from `tick`, so prewarm
 /// draws its own random values.
+#[allow(clippy::too_many_arguments)]
 fn prewarm(
     emitter: &ParticleEmitter,
     system: &mut ParticleSystem,
@@ -1022,6 +1042,7 @@ fn prewarm(
     tick: u64,
     stream: u64,
     dt: f32,
+    wind: Option<&super::Wind>,
 ) {
     if dt <= 0.0 {
         return;
@@ -1031,7 +1052,7 @@ fn prewarm(
     let warm = RandomSeed::stream("particles_prewarm", stream);
     for index in 0..steps {
         let virtual_tick = tick.wrapping_sub(steps - index);
-        step(emitter, system, frame, seed, virtual_tick, warm, dt);
+        step(emitter, system, frame, seed, virtual_tick, warm, dt, wind);
     }
 }
 
@@ -1413,6 +1434,15 @@ mod tests {
     use super::*;
 
     fn run(emitter: &ParticleEmitter, ticks: u64, seed: u64) -> ParticleSystem {
+        run_in(emitter, ticks, seed, None)
+    }
+
+    fn run_in(
+        emitter: &ParticleEmitter,
+        ticks: u64,
+        seed: u64,
+        wind: Option<&super::super::Wind>,
+    ) -> ParticleSystem {
         let mut system = ParticleSystem {
             playing: emitter.autoplay,
             started: true,
@@ -1421,9 +1451,47 @@ mod tests {
         let frame = emitter_frame(None, None);
         let seed = RandomSeed(seed);
         for tick in 0..ticks {
-            step(emitter, &mut system, frame, &seed, tick, 7, 1.0 / 60.0);
+            step(
+                emitter,
+                &mut system,
+                frame,
+                &seed,
+                tick,
+                7,
+                1.0 / 60.0,
+                wind,
+            );
         }
         system
+    }
+
+    #[test]
+    fn scene_wind_pushes_particles_by_their_wind_factor() {
+        let wind = super::super::Wind {
+            direction: [0.0, 0.0, 2.0],
+            strength: 4.0,
+            gusts: 0.0,
+        };
+        let drift = |wind_factor: f32, wind: Option<&super::super::Wind>| {
+            let emitter = ParticleEmitter {
+                wind_factor,
+                ..ParticleEmitter::default()
+            };
+            run_in(&emitter, 30, 1, wind).particles
+        };
+        let still = drift(1.0, None);
+        assert!(!still.is_empty());
+        assert_eq!(drift(0.0, Some(&wind)), still, "a zero factor ignores it");
+        let blown = drift(1.0, Some(&wind));
+        assert_eq!(blown.len(), still.len());
+        for (blown, still) in blown.iter().zip(&still) {
+            let gained = blown.velocity[2] - still.velocity[2];
+            assert!(
+                (gained - 4.0 * blown.age).abs() < 1e-4,
+                "{gained} after {} s",
+                blown.age
+            );
+        }
     }
 
     #[test]
@@ -1586,6 +1654,7 @@ mod tests {
                 tick,
                 7,
                 1.0 / 60.0,
+                None,
             );
         }
         assert_eq!(system.alive(), 40, "second burst capped");
@@ -1598,6 +1667,7 @@ mod tests {
                 tick,
                 7,
                 1.0 / 60.0,
+                None,
             );
         }
         assert_eq!(system.alive(), 0);
@@ -1758,6 +1828,7 @@ mod tests {
             0,
             7,
             1.0 / 60.0,
+            None,
         );
         assert!(system.alive() > 50, "{}", system.alive());
     }

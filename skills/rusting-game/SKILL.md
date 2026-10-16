@@ -245,6 +245,7 @@ each one's fields, defaults and an example:
 - `rusting.light_probe_grid`: Grid of resolution light probes spread through a world-aligned box of half size extents around the object.
 - `rusting.lightmap`: On an object with a mesh_renderer: bakes the light bouncing onto it into six square faces of resolution texels wrapped around its mesh's box.
 - `rusting.foliage`: On an object with a mesh_renderer, or on the parent of a multi-part model such as a palm's trunk and leaves: draws count copies of its mesh (of every mesh under it, each part keeping its place on the copy) in place of the object, scattered over a disc of radius metres on its local XZ plane, each turned and scaled between scale_min and scale_max at random by seed.
+- `rusting.wind`: Scene-wide wind blowing toward direction at strength m/s², with gusts (a share of strength, 0 for steady wind) that drift through the scene.
 - `rusting.terrain`: On an object with a rusting.heightfield: draws the heights as terrain in square chunks of chunk_cells cells (0, the default, picks the size from the heightfield so the terrain makes at most about 150 chunks; each chunk is one draw per view and shadow cascade).
 - `rusting.fog`: Exponential height fog: the scene fades into color with distance, thinning above height by height_falloff per metre.
 - `rusting.procedural_sky`: Daylight sky computed from the sun (the shadow-casting directional light, else the first one): blue overhead, pale at the horizon, orange at sunset, dark at night, with a sun disc of sun_size degrees.
@@ -280,7 +281,7 @@ each one's fields, defaults and an example:
 - `rusting.slide_sound`: Loops clip on this body while it slides or rolls against another collider, louder the faster it moves across the contact (full volume at full_volume_speed m/s, silent under min_speed).
 - `rusting.reverb_zone`: Room reverb on a bus while the listener (the active camera, or set_listener) is inside this entity's collider; give it a sensor collider.
 - `rusting.burst_emitter`: Spawns particles that fly out, fall, and shrink, when the body starts touching something or game code calls trigger().
-- `rusting.particle_emitter`: Particle effects: rate and bursts per cycle, an emission shape (Point, Box, Sphere, Cone, Circle), random [min, max] ranges for lifetime, speed, size, rotation and spin, gravity, drag, wind and turbulence, size and color keys over life, fades, World or Local space, Billboard or Velocity facing, Alpha or Additive blend.
+- `rusting.particle_emitter`: Particle effects: rate and bursts per cycle, an emission shape (Point, Box, Sphere, Cone, Circle), random [min, max] ranges for lifetime, speed, size, rotation and spin, gravity, drag, wind and turbulence, wind_factor (the share of the scene's rusting.wind the particles feel, default 1), size and color keys over life, fades, World or Local space, Billboard or Velocity facing, Alpha or Additive blend.
 - `rusting.particle_blocker`: A box of half size extents around the object, turned and scaled with it, that removes the particles of every rusting.particle_emitter with blockers on as they enter it: a cabin's roof and walls that keep the rain out.
 - `rusting.particle_shader`: On an object with a rusting.particle_emitter: GLSL that changes how its particles look.
 - `rusting.animation`: Keyframe animation: named clips of tracks keyed over time.

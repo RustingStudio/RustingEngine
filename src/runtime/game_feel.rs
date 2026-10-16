@@ -1384,6 +1384,80 @@ impl Default for Lightmap {
     }
 }
 
+/// Scene-wide wind: leans every [`Foliage`] copy and swaying material as a
+/// [`FieldKind::Wind`](super::FieldKind) force field would, everywhere and
+/// without a sensor, and pushes particles by their emitter's `wind_factor`.
+/// Physics bodies do not feel it. The first `Wind` by entity is used.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Wind {
+    /// World direction the wind blows toward.
+    pub direction: [f32; 3],
+    /// Push in m/s², like a wind force field's `strength`.
+    pub strength: f32,
+    /// Gust size as a share of `strength`, 0 for steady wind.
+    pub gusts: f32,
+}
+
+impl Default for Wind {
+    fn default() -> Self {
+        Self {
+            direction: [1.0, 0.0, 0.0],
+            strength: 5.0,
+            gusts: 0.5,
+        }
+    }
+}
+
+impl Wind {
+    /// The scene's wind: the first by entity.
+    #[must_use]
+    pub fn of_scene(world: &World) -> Option<Self> {
+        let mut winds = world.try_query::<(Entity, &Self)>()?;
+        Self::first(winds.iter(world)).cloned()
+    }
+
+    /// The first wind by entity among `winds`.
+    pub fn first<'a>(
+        winds: impl IntoIterator<Item = (Entity, &'a Self)>,
+    ) -> Option<&'a Self> {
+        winds
+            .into_iter()
+            .min_by_key(|(entity, _)| entity.index_u32())
+            .map(|(_, wind)| wind)
+    }
+
+    /// The same wind as a force field of kind `Wind`.
+    #[must_use]
+    pub fn field(&self) -> super::ForceField {
+        super::ForceField {
+            kind: super::FieldKind::Wind,
+            strength: self.strength,
+            direction: self.direction,
+            turbulence: self.gusts,
+            ..super::ForceField::default()
+        }
+    }
+
+    /// Push in m/s² at world `point` after `seconds`, gusts included.
+    #[must_use]
+    pub fn push_at(&self, point: [f32; 3], seconds: f32) -> [f32; 3] {
+        self.field()
+            .push(point.into(), nalgebra::Vector3::zeros(), seconds, None)
+            .into()
+    }
+
+    /// The field filling the world, for the renderer's lean.
+    pub(crate) fn gpu_field(&self) -> super::GpuForceField {
+        super::GpuForceField {
+            model: GlobalTransform::default().matrix,
+            // A box 200 km across, encoded like `GpuCollider::shape`.
+            shape: [0.0, 1e5, 1e5, 1e5],
+            field: self.field(),
+        }
+    }
+}
+
 /// Scatters `count` copies of this object's mesh over a disc of `radius`
 /// metres on its local XZ plane, each turned and scaled at random by
 /// `seed`, in place of the single object. Copies share the object's

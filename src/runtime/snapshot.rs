@@ -497,6 +497,7 @@ pub(super) fn register_engine_types(types: &mut SnapshotTypes) {
     types.register::<super::LightProbeGrid>();
     types.register::<super::Lightmap>();
     types.register::<super::Foliage>();
+    types.register::<super::Wind>();
     types.register::<super::Terrain>();
     types.register::<super::Fog>();
     types.register::<super::ColorGrading>();

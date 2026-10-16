@@ -656,8 +656,16 @@ time:
   above the origin, then runs straight. 0 leans the whole mesh as one.
 - Put the origin at the foot of the trunk. Nothing below it bends when
   `height` is above 0.
-- Only `rusting.force_field` sensors move it, so add a Wind field around the
-  trees. Fields of kind Custom do not bend meshes.
+- Add `rusting.wind` to the environment object to sway every tree and
+  copy of foliage in the scene, or a Wind `rusting.force_field` around a
+  few trees. Fields of kind Custom do not bend meshes.
+
+```json
+"rusting.wind": {"direction": [1.0, 0.0, 0.3], "strength": 5.0, "gusts": 0.5}
+```
+
+- `rusting.wind` pushes no physics bodies. Particles feel it times their
+  emitter's `wind_factor`, 1 by default; set 0 to keep sparks out of it.
 
 ## Free models
 

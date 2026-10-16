@@ -105,7 +105,8 @@ emitters fresh; the preview's particles stay in the editor.
 - **Motion.** `direction` plus `spread` (half angle in radians; `3.14`
   sends particles every way). `gravity` pulls down, `drag` slows, `wind`
   pushes in world space and `turbulence` swirls (`turbulence_frequency`
-  sets the swirl size).
+  sets the swirl size). The scene's `rusting.wind` adds its push times
+  `wind_factor` (1 by default, 0 ignores it).
 - **Over life.** `size_over_life` multiplies the start size and
   `color_over_life` sets linear RGBA, both keyed by life fraction `t` from
   0 to 1. `fade_in` and `fade_out` are fractions of life spent fading.

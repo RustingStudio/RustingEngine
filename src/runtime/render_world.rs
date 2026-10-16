@@ -236,6 +236,9 @@ pub struct RenderWorld {
     /// Force-field sensors from the last CPU physics step, which push GPU
     /// bodies too.
     pub gpu_force_fields: Vec<super::GpuForceField>,
+    /// The scene's [`super::Wind`] as a field filling the world: foliage and
+    /// swaying materials lean in it, GPU bodies do not feel it.
+    pub wind: Option<super::GpuForceField>,
     /// Resolved [`super::GpuConditionShader`]s, in dispatch order.
     pub gpu_condition_shaders: Vec<ExtractedConditionShader>,
     /// Wrapped `PhysicsSolver::Custom` hook files, one per distinct path,
@@ -736,6 +739,7 @@ pub fn extract_render_world(world: &mut World) {
             Some(physics) => (Vec::new(), physics.gpu_force_fields(world)),
             None => Default::default(),
         };
+    let wind = super::Wind::of_scene(world).map(|wind| wind.gpu_field());
     let gpu_lod = world.get_resource::<super::GpuSimulationLod>().copied();
     let gpu_observers = if gpu_lod.is_some() {
         world
@@ -953,6 +957,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.gpu_condition_shaders = condition_shaders;
     render_world.gpu_colliders = gpu_colliders;
     render_world.gpu_force_fields = gpu_force_fields;
+    render_world.wind = wind;
     render_world.physics_tick = time.fixed_tick;
     render_world.fixed_delta_seconds = time.fixed_delta.as_secs_f32();
     render_world.elapsed_seconds = time.elapsed.as_secs_f32();
@@ -995,6 +1000,12 @@ fn collect_particles(world: &mut World) -> Vec<super::ParticleBatch> {
 }
 
 fn collect_gpu_particles(world: &mut World) -> Vec<super::GpuParticleBatch> {
+    // ponytail: the scene wind is sampled at each emitter's origin once a
+    // frame; GPU particles far from it miss the gusts' drift.
+    let wind = super::Wind::of_scene(world);
+    let seconds = world
+        .get_resource::<super::FrameTime>()
+        .map_or(0.0, |time| time.elapsed.as_secs_f32());
     let mut query = world.query::<(
         Entity,
         &super::ParticleEmitter,
@@ -1012,6 +1023,13 @@ fn collect_gpu_particles(world: &mut World) -> Vec<super::GpuParticleBatch> {
         .map(|(entity, emitter, system, global, id)| {
             let mut batch =
                 super::gpu_particle_batch(entity, emitter, system, global, id);
+            if let Some(wind) = &wind {
+                let [x, y, z, _] = batch.rows[3];
+                let push = wind.push_at([x, y, z], seconds);
+                for (row, push) in batch.rows[5].iter_mut().zip(push) {
+                    *row += push * emitter.wind_factor;
+                }
+            }
             if emitter.on_parent_death > 0 {
                 batch.parent = world
                     .get::<super::Parent>(entity)
@@ -1996,6 +2014,37 @@ mod tests {
         step(&mut app);
         let render_world = app.world().resource::<RenderWorld>();
         assert!(render_world.gpu_force_fields.is_empty());
+    }
+
+    #[test]
+    fn scene_wind_reaches_the_lean_and_gpu_particles_but_not_bodies() {
+        use crate::runtime::{
+            ParticleEmitter, ParticleSimulation, ParticleSystem, Wind,
+        };
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let wind = Wind {
+            direction: [0.0, 0.0, 1.0],
+            strength: 3.0,
+            gusts: 0.0,
+        };
+        app.spawn(wind.clone());
+        app.spawn((
+            ParticleEmitter {
+                simulation: ParticleSimulation::Gpu,
+                wind: [1.0, 0.0, 0.0],
+                wind_factor: 2.0,
+                ..ParticleEmitter::default()
+            },
+            ParticleSystem::default(),
+        ));
+        app.update(Duration::from_secs_f64(1.0 / 60.0)).unwrap();
+        let render_world = app.world().resource::<RenderWorld>();
+        let lean = render_world.wind.as_ref().map(|found| &found.field);
+        assert_eq!(lean, Some(&wind.field()));
+        assert!(render_world.gpu_force_fields.is_empty(), "no body feels it");
+        let row = render_world.gpu_particles[0].rows[5];
+        assert_eq!(row[..3], [1.0, 0.0, 6.0]);
     }
 
     #[test]

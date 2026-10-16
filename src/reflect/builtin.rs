@@ -34,7 +34,7 @@ use crate::runtime::{
     SoundId, SpawnGrid, Sprite, SpriteAnimation, Squash, StateAction,
     StateTransition, SurfaceClip, Terrain, TerrainFracture, TerrainLayer,
     TileKind, TileMap, ToneMapper, ToneMapping, Tween, TweenProperty,
-    TweenRepeat, Vehicle, ViewmodelCamera, WaterBody, Wheel,
+    TweenRepeat, Vehicle, ViewmodelCamera, WaterBody, Wheel, Wind,
 };
 use crate::runtime::{
     Animation, AnimationClip, AnimationCompare, AnimationLayer,
@@ -508,6 +508,7 @@ crate::reflect! {
         wind: [f32; 3] { unit: "m/s²", doc: "constant world push" },
         turbulence: f32 { unit: "m/s²", min: 0.0 },
         turbulence_frequency: f32 { unit: "1/m", min: 0.0 },
+        wind_factor: f32 { unit: "factor", min: 0.0, doc: "share of the scene's rusting.wind; 0 ignores it" },
         size_over_life: Vec<CurveKey> { doc: "size factor keys by life" },
         color_over_life: Vec<ColorKey> { doc: "color keys by life" },
         start_colors: Vec<[f32; 4]> {
@@ -1301,6 +1302,14 @@ crate::reflect! {
         normal: PathBuf { unit: "asset path", doc: "tangent-space normal map (OpenGL style, green up); empty keeps the ground's normal" },
         roughness: PathBuf { unit: "asset path", doc: "roughness map, read from its red channel; empty is 0.9" },
         tiling: f32 { unit: "m", min: 0.0, doc: "metres this layer repeats over; 0 uses the terrain's tiling" },
+    }
+}
+
+crate::reflect! {
+    struct Wind {
+        direction: [f32; 3] { doc: "world direction the wind blows toward" },
+        strength: f32 { unit: "m/s²", min: 0.0, doc: "push, like a wind force field's strength" },
+        gusts: f32 { unit: "factor", min: 0.0, doc: "gust size as a share of strength; 0 is steady" },
     }
 }
 

@@ -444,7 +444,7 @@ impl Default for ForceField {
 impl ForceField {
     /// Acceleration on a body at `offset` from the field's centre, moving
     /// at `velocity`, at `seconds` of fixed time.
-    fn push(
+    pub(crate) fn push(
         &self,
         offset: Vector3<f32>,
         velocity: Vector3<f32>,

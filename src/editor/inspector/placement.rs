@@ -50,6 +50,7 @@ use crate::runtime::{
     FOG_SHADER_COMPONENT, MATERIAL_OVERRIDE_COMPONENT, MOTION_BLUR_COMPONENT,
     POST_SHADER_COMPONENT, RENDER_LAYER_COMPONENT, SKY_SHADER_COMPONENT,
     SPAWN_GRID_COMPONENT, SQUASH_COMPONENT, VIEWMODEL_CAMERA_COMPONENT,
+    WIND_COMPONENT,
 };
 
 /// Components that together make a World Environment object.
@@ -86,6 +87,7 @@ fn kind(name: &str) -> Kind {
         | MOTION_BLUR_COMPONENT
         | POST_VOLUME_COMPONENT
         | PROCEDURAL_SKY_COMPONENT
+        | WIND_COMPONENT
         | AMBIENT_OCCLUSION_COMPONENT => Kind::Environment,
         HUD_ELEMENT_COMPONENT => Kind::Hud,
         TILE_MAP_COMPONENT => Kind::TileMap,
@@ -145,6 +147,7 @@ pub(in crate::editor) fn placement(
             first_with::<crate::runtime::EnvironmentMap>(world)
         }
         FOG_COMPONENT => first_with::<Fog>(world),
+        WIND_COMPONENT => first_with::<crate::runtime::Wind>(world),
         PROCEDURAL_SKY_COMPONENT => {
             first_with::<crate::runtime::ProceduralSky>(world)
         }
@@ -476,6 +479,10 @@ pub(in crate::editor) fn component_help(
         FOLIAGE_COMPONENT => (
             "Scatters copies of the mesh, leaning in wind fields.",
             "Grass, flowers, rocks, debris fields.",
+        ),
+        WIND_COMPONENT => (
+            "Blows over the whole scene: sways foliage and pushes particles.",
+            "Grass and trees moving everywhere, drifting smoke and rain.",
         ),
         TERRAIN_COMPONENT => (
             "Draws the heightfield as painted terrain with LOD.",

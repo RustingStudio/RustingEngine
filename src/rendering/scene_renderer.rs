@@ -3151,6 +3151,7 @@ impl SceneRenderer {
         let mut lean_fields = render_world
             .gpu_force_fields
             .iter()
+            .chain(&render_world.wind)
             .map(GpuForceFieldUpload::from)
             .collect::<Vec<_>>();
         if lean_fields.is_empty() {
@@ -24499,8 +24500,9 @@ mod tests {
         }
         let mut scene = SlabScene::with_extent(&[], [32, 32]);
         // A plain 0.2 x 1.6 m pillar at the origin, no foliage, in a wind
-        // extracted through a real app from the CPU physics fields.
-        let mut load = |sway: MaterialSway| {
+        // extracted through a real app from the CPU physics fields, or in
+        // a scene Wind beside a field of no strength.
+        let mut load = |sway: MaterialSway, scene_wind: bool| {
             let material = scene.assets.materials.insert(MaterialAsset {
                 sway,
                 ..MaterialAsset::default()
@@ -24538,11 +24540,18 @@ mod tests {
                 },
                 ForceField {
                     kind: FieldKind::Wind,
-                    strength: 10.0,
+                    strength: if scene_wind { 0.0 } else { 10.0 },
                     direction: [1.0, 0.0, 0.0],
                     ..ForceField::default()
                 },
             ));
+            if scene_wind {
+                app.spawn(crate::runtime::Wind {
+                    direction: [1.0, 0.0, 0.0],
+                    strength: 10.0,
+                    gusts: 0.0,
+                });
+            }
             for _ in 0..3 {
                 app.update(std::time::Duration::from_secs_f64(1.0 / 60.0))
                     .unwrap();
@@ -24551,6 +24560,7 @@ mod tests {
             let world = &mut scene.render_world;
             world.renderables = extracted.renderables.clone();
             world.gpu_force_fields = extracted.gpu_force_fields.clone();
+            world.wind = extracted.wind.clone();
             world.renderables_revision += 1;
             [[16, 4], [21, 4], [16, 28], [11, 28]].map(|pixel| {
                 render_pixel(&mut scene, pixel)
@@ -24561,21 +24571,35 @@ mod tests {
         // Pixels are 1/16 m; rows 4 and 28 are 0.72 m above and below the
         // origin, and a 0.5 m lean per metre moves them 0.36 m.
         let [top, top_leaned, bottom, bottom_leaned] =
-            load(MaterialSway::default());
+            load(MaterialSway::default(), false);
         assert!(top && !top_leaned && bottom && !bottom_leaned, "still");
-        let [top, top_leaned, bottom, bottom_leaned] = load(MaterialSway {
-            amplitude: 0.05,
-            ..MaterialSway::default()
-        });
+        let [top, top_leaned, bottom, bottom_leaned] = load(
+            MaterialSway {
+                amplitude: 0.05,
+                ..MaterialSway::default()
+            },
+            false,
+        );
         assert!(!top && top_leaned, "wind leans the top right");
         assert!(!bottom && bottom_leaned, "a straight shear swings the base");
-        let [top, top_leaned, bottom, bottom_leaned] = load(MaterialSway {
-            amplitude: 0.05,
-            height: 0.1,
-            ..MaterialSway::default()
-        });
+        let [top, top_leaned, bottom, bottom_leaned] = load(
+            MaterialSway {
+                amplitude: 0.05,
+                height: 0.1,
+                ..MaterialSway::default()
+            },
+            false,
+        );
         assert!(!top && top_leaned, "the bent top still leans");
         assert!(bottom && !bottom_leaned, "below the origin stays rooted");
+        let [top, top_leaned, ..] = load(
+            MaterialSway {
+                amplitude: 0.05,
+                ..MaterialSway::default()
+            },
+            true,
+        );
+        assert!(!top && top_leaned, "a scene wind leans it with no field");
     }
 
     #[test]

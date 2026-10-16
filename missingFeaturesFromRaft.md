@@ -422,6 +422,10 @@ outside a field), and a Wind force field also pushes every GPU particle
   (0.5 m/s²), so rain, smoke and fire are pushed too; higher `sway` values make up for it.
 - Wanted: a scene-level wind (direction, strength, gusts) that sways foliage and materials
   without being a force field, with a per-emitter wind factor for particles.
+- Status: done (this commit, test: `scene_wind_pushes_particles_by_their_wind_factor`,
+  `scene_wind_reaches_the_lean_and_gpu_particles_but_not_bodies`,
+  `swaying_materials_bend_plain_meshes_in_wind_fields`). `rusting.wind` and
+  `ParticleEmitter::wind_factor`.
 
 ## Bugs seen
 
