@@ -4,6 +4,7 @@
 
 ### Added
 
+- `GameScene::set_max_texture_size(px)` and `RenderSettings::max_texture_size`: textures larger than the cap upload at half size until they fit, so a Low preset loads 2K textures at 1K (RAFT).
 - `ShadowQuality` sets the sun's cascade count: 2 on Low, 3 on Medium and 4 on High, so low settings render fewer shadow views (RAFT).
 - `GameScene::resolved_quality()`: the quality profile the renderer draws with, `Auto` resolved from the GPU, so game content can scale with it (RAFT).
 - `rusting.render_layer` (`RenderLayer::Viewmodel`) on a mesh and `rusting.viewmodel_camera` (`ViewmodelCamera { vertical_fov_radians }`) on the active camera: held tools draw over the world with their own field of view and never poke into walls (RAFT).

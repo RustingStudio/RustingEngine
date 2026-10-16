@@ -1033,6 +1033,8 @@ struct PreparedTexture {
     view: Option<Arc<ImageView>>,
     sampler: Arc<Sampler>,
     source_revision: u64,
+    /// `RenderWorld::max_texture_size` it was uploaded under.
+    max_size: u32,
 }
 
 /// A camera image for one screen material; see
@@ -2214,6 +2216,7 @@ impl SceneRenderer {
                 color_space: TextureColorSpace::Linear,
                 sampler: TextureSampler::default(),
             },
+            0,
             &mut pending_texture_uploads,
         )?;
         let white_texture = (white_view, default_sampler.clone());
@@ -2226,6 +2229,7 @@ impl SceneRenderer {
                 color_space: TextureColorSpace::Linear,
                 sampler: TextureSampler::default(),
             },
+            0,
             &mut pending_texture_uploads,
         )
         .map(|view| (view, default_sampler.clone()))?;
@@ -2238,6 +2242,7 @@ impl SceneRenderer {
                     color_space: TextureColorSpace::Linear,
                     sampler: TextureSampler::default(),
                 },
+                0,
                 &mut pending_texture_uploads,
             )
             .map(|view| (view, default_sampler.clone()))
@@ -3100,6 +3105,7 @@ impl SceneRenderer {
                 )
                 .chain(render_world.color_lut.map(|(texture, _)| texture))
                 .collect(),
+            render_world.max_texture_size,
         )?;
         let particle_steps = self.prepare_gpu_particles(render_world)?;
         let skin_steps = self.prepare_skinning(render_world, assets)?;
@@ -7065,6 +7071,7 @@ impl SceneRenderer {
         &mut self,
         assets: &AssetServer,
         lit: Vec<Handle<TextureAsset>>,
+        max_texture_size: u32,
     ) -> Result<(), SceneRenderError> {
         let materials = self
             .prepared_instances
@@ -7085,11 +7092,12 @@ impl SceneRenderer {
             .collect::<Vec<_>>();
         for &handle in &used {
             let revision = assets.textures.revision(handle).unwrap_or(0);
-            if self
-                .prepared_textures
-                .get(&handle.key())
-                .is_some_and(|prepared| prepared.source_revision == revision)
-            {
+            if self.prepared_textures.get(&handle.key()).is_some_and(
+                |prepared| {
+                    prepared.source_revision == revision
+                        && prepared.max_size == max_texture_size
+                },
+            ) {
                 continue;
             }
             let Some(texture) = assets.textures.get(handle) else {
@@ -7109,6 +7117,7 @@ impl SceneRenderer {
             let view = create_texture(
                 &self.memory_allocator,
                 texture,
+                max_texture_size,
                 &mut self.pending_texture_uploads,
             )
             .ok();
@@ -7129,6 +7138,7 @@ impl SceneRenderer {
                     view,
                     sampler,
                     source_revision: revision,
+                    max_size: max_texture_size,
                 },
             );
         }
@@ -9366,6 +9376,7 @@ fn gpu_cull_buffers(
 fn create_texture(
     memory_allocator: &Arc<StandardMemoryAllocator>,
     texture: &TextureAsset,
+    max_size: u32,
     pending: &mut Vec<PendingTextureUpload>,
 ) -> Result<Arc<ImageView>, SceneRenderError> {
     let [width, height] = texture.size;
@@ -9388,6 +9399,17 @@ fn create_texture(
             texture.rgba8.len()
         )));
     }
+    // ponytail: HDR textures upload at full size under the cap; halve their
+    // f16 texels too if environment maps outgrow a low-memory GPU.
+    let capped = (texel_bytes == 4)
+        .then(|| {
+            cap_texture_size(&texture.rgba8, texture.size, layers, max_size)
+        })
+        .flatten();
+    let ([width, height], texels) = match &capped {
+        Some((size, texels)) => (*size, texels.as_slice()),
+        None => (texture.size, texture.rgba8.as_slice()),
+    };
     let staging = Buffer::from_iter(
         memory_allocator.clone(),
         BufferCreateInfo {
@@ -9399,7 +9421,7 @@ fn create_texture(
                 | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
         },
-        texture.rgba8.iter().copied(),
+        texels.iter().copied(),
     )
     .map_err(|error| SceneRenderError(error.to_string()))?;
     let image = Image::new(
@@ -9425,6 +9447,48 @@ fn create_texture(
         .map_err(|error| SceneRenderError(error.to_string()))?;
     pending.push((staging, image));
     Ok(view)
+}
+
+/// Halves `layers` RGBA8 images stored back to back with a 2x2 box filter
+/// until neither side exceeds `max_size`. `None` when there is no cap (0)
+/// or the size already fits.
+fn cap_texture_size(
+    rgba8: &[u8],
+    [mut width, mut height]: [u32; 2],
+    layers: usize,
+    max_size: u32,
+) -> Option<([u32; 2], Vec<u8>)> {
+    if max_size == 0 || width.max(height) <= max_size {
+        return None;
+    }
+    let mut texels = rgba8.to_vec();
+    while width.max(height) > max_size {
+        let (w, h) = (width as usize, height as usize);
+        let (half_w, half_h) = ((w / 2).max(1), (h / 2).max(1));
+        let mut half = Vec::with_capacity(half_w * half_h * 4 * layers);
+        for layer in texels.chunks_exact(w * h * 4) {
+            for y in 0..half_h {
+                for x in 0..half_w {
+                    for channel in 0..4 {
+                        let texel = |tx: usize, ty: usize| {
+                            u32::from(
+                                layer[(ty.min(h - 1) * w + tx.min(w - 1)) * 4
+                                    + channel],
+                            )
+                        };
+                        let sum = texel(2 * x, 2 * y)
+                            + texel(2 * x + 1, 2 * y)
+                            + texel(2 * x, 2 * y + 1)
+                            + texel(2 * x + 1, 2 * y + 1);
+                        half.push(((sum + 2) / 4) as u8);
+                    }
+                }
+            }
+        }
+        texels = half;
+        (width, height) = (half_w as u32, half_h as u32);
+    }
+    Some(([width, height], texels))
 }
 
 /// Writes one material's set 1, maps in shader binding order.
@@ -14831,6 +14895,67 @@ mod tests {
         assert_eq!(at(columns - 1, rows - 1, 0), [8]);
         assert!(!list[2 * CLUSTER_COUNT..].contains(&7));
         assert!(!list[2 * CLUSTER_COUNT..].contains(&9));
+    }
+
+    #[test]
+    fn texture_cap_halves_each_layer_until_it_fits() {
+        // Two 4x2 layers: the first ramps 0..=70 by 10, the second is 200.
+        let mut rgba8 = (0..8u8).flat_map(|i| [i * 10; 4]).collect::<Vec<_>>();
+        rgba8.extend([200; 32]);
+        assert_eq!(cap_texture_size(&rgba8, [4, 2], 2, 0), None);
+        assert_eq!(cap_texture_size(&rgba8, [4, 2], 2, 4), None);
+        let (size, texels) = cap_texture_size(&rgba8, [4, 2], 2, 2).unwrap();
+        assert_eq!(size, [2, 1]);
+        // (0 + 10 + 40 + 50) / 4 = 25, (20 + 30 + 60 + 70) / 4 = 45.
+        let expected = [[25u8; 4], [45; 4], [200; 4], [200; 4]].concat();
+        assert_eq!(texels, expected);
+        let (size, _) = cap_texture_size(&rgba8, [4, 2], 2, 1).unwrap();
+        assert_eq!(size, [1, 1]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn max_texture_size_reuploads_textures_at_the_capped_size() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let mut scene = SlabScene::new(&[(0.0, MaterialAsset::default())]);
+        let texture = scene.assets.textures.insert(TextureAsset {
+            size: [8, 8],
+            rgba8: [0, 255, 0, 255].repeat(64),
+            color_space: TextureColorSpace::Srgb,
+            sampler: TextureSampler::default(),
+        });
+        let material = scene.render_world.renderables[0].material;
+        scene
+            .assets
+            .materials
+            .get_mut(material)
+            .unwrap()
+            .base_color_texture = Some(texture);
+        let extent_under = |scene: &mut SlabScene, cap: u32| {
+            scene.render_world.max_texture_size = cap;
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            let view = scene.renderer.prepared_textures[&texture.key()]
+                .view
+                .clone()
+                .unwrap();
+            let extent = view.image().extent();
+            (extent, view.image().mip_levels())
+        };
+        assert_eq!(extent_under(&mut scene, 0), ([8, 8, 1], 4));
+        assert_eq!(extent_under(&mut scene, 4), ([4, 4, 1], 3));
+        assert_eq!(extent_under(&mut scene, 16), ([8, 8, 1], 4));
     }
 
     #[test]

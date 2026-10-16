@@ -460,6 +460,10 @@ pub struct RenderSettings {
     /// Screen-space reflections and refraction of the opaque scene. Off
     /// skips the scene copy, mip chain and depth pyramid.
     pub reflections: bool,
+    /// Largest texture side uploaded to the GPU, in pixels; 0 uploads
+    /// textures at full size. A larger texture is halved until it fits, so
+    /// 1024 loads only the 1K level of 2K textures on a low-memory GPU.
+    pub max_texture_size: u32,
 }
 
 impl Default for RenderSettings {
@@ -478,6 +482,7 @@ impl Default for RenderSettings {
             shadows: ShadowQuality::Auto,
             hard_shadows: false,
             reflections: true,
+            max_texture_size: 0,
         }
     }
 }

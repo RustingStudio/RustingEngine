@@ -820,6 +820,14 @@ impl GameScene<'_> {
         self.world.resource_mut::<RenderSettings>().hard_shadows = hard;
     }
 
+    /// Caps the side of every texture uploaded to the GPU at `size` pixels;
+    /// 0 removes the cap. Larger textures are halved until they fit and
+    /// re-upload when the cap changes, so a Low preset can set 1024 to load
+    /// only the 1K level of 2K textures.
+    pub fn set_max_texture_size(&mut self, size: u32) {
+        self.world.resource_mut::<RenderSettings>().max_texture_size = size;
+    }
+
     /// Renders the 3D scene at `scale` of the window size, from 0.25 to 2.0,
     /// and stretches it over the window. Below 1 trades sharpness for frame
     /// rate; above 1 supersamples. UI stays at full resolution. Captures and

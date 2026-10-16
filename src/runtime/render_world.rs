@@ -267,6 +267,8 @@ pub struct RenderWorld {
     /// Set from `RenderSettings::reflections` being off; the default keeps
     /// reflections on.
     pub reflections_disabled: bool,
+    /// From `RenderSettings::max_texture_size`; 0 is no cap.
+    pub max_texture_size: u32,
     /// Drawn tint of each flashing renderable, sorted by entity: rgb from
     /// its own or an ancestor's [`super::Flash`], a the strength.
     pub flashes: Vec<(Entity, [f32; 4])>,
@@ -758,6 +760,7 @@ pub fn extract_render_world(world: &mut World) {
         shadows,
         hard_shadows,
         reflections,
+        max_texture_size,
     ) = (
         render_settings.background_color,
         render_settings.quality,
@@ -766,6 +769,7 @@ pub fn extract_render_world(world: &mut World) {
         render_settings.shadows,
         render_settings.hard_shadows,
         render_settings.reflections,
+        render_settings.max_texture_size,
     );
 
     let flashes = collect_flashes(world);
@@ -947,6 +951,7 @@ pub fn extract_render_world(world: &mut World) {
     render_world.shadows = shadows;
     render_world.hard_shadows = hard_shadows;
     render_world.reflections_disabled = !reflections;
+    render_world.max_texture_size = max_texture_size;
 }
 
 fn collect_particles(world: &mut World) -> Vec<super::ParticleBatch> {

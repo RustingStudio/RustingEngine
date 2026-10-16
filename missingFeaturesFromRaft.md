@@ -294,6 +294,9 @@ High 4096 and 80 m. It does not set how many cascades there are.
 - Wanted: a setting that limits loaded textures to a maximum size or mip level. Spec 4.2 ships
   2K textures with 1K mips, and Low should load only the 1K level so it fits the iGPU's memory
   and bandwidth.
+- Status: done (this commit, test: `max_texture_size_reuploads_textures_at_the_capped_size`,
+  `texture_cap_halves_each_layer_until_it_fits`). `set_max_texture_size(1024)`; HDR textures
+  keep full size.
 
 ### E11. Water waves on the GPU
 

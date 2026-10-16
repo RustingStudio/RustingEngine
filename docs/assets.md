@@ -138,6 +138,14 @@ Sounds are the exception: `rusting.sound_cue.clip` and `play_sound` take a
 path relative to `assets/`, such as `sounds/hit.wav`. See
 [Audio](audio.md).
 
+### Cap texture size for low-end GPUs
+
+`scene.set_max_texture_size(1024)` caps every texture side at 1024 pixels,
+so a Low video preset loads only the 1K level of 2K textures. Larger
+textures are halved until they fit and upload again when the cap changes;
+0 removes the cap. HDR textures keep their full size. The cap is not saved:
+set it again at startup like the other video settings.
+
 ## Replace an asset
 
 ```bash

@@ -1788,6 +1788,10 @@ crate::reflect! {
             doc: "One shadow-map tap per pixel: crisp shadow edges instead of 3x3 filtered ones.",
         },
         reflections: bool,
+        max_texture_size: u32 {
+            unit: "px",
+            doc: "Largest texture side uploaded to the GPU; larger textures are halved until they fit. 0 is no cap.",
+        },
     }
 }
 
