@@ -245,6 +245,9 @@ pub struct RenderWorld {
     pub physics_tick: u64,
     pub fixed_delta_seconds: f32,
     pub elapsed_seconds: f32,
+    /// Global wetness from 0 to 1 set by `GameScene::set_wetness`; darkens
+    /// and smooths `wettable` materials.
+    pub wetness: f32,
     pub physics_gravity: [f32; 3],
     /// `AxisLock::mask` of `PhysicsSettings::gpu_locks`.
     pub physics_lock_mask: u32,

@@ -228,6 +228,8 @@ Passed: `cargo fmt --all --check`, clippy default / `--no-default-features` /
   rain.
 - Wanted: one global `wetness` value from 0 to 1. Materials marked `wettable` get darker albedo
   and lower roughness as it rises.
+- Status: done (this commit, test: `wetness_darkens_only_wettable_materials`). Scene files do
+  not save `wettable` yet (needs a cooked format version); games set it in code.
 
 ### E5. GPU skinning (done)
 

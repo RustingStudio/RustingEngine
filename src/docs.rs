@@ -1132,6 +1132,7 @@ const API_GROUPS: &[(&str, &[&str])] = &[
             "set_exposure",
             "set_hard_shadows",
             "set_terrain_look",
+            "set_wetness",
             "create_texture",
             "edit_texture",
         ],

@@ -1342,6 +1342,9 @@ pub struct MaterialAsset {
     /// Lights each triangle with its own face normal, taken from
     /// screen-space derivatives, for a faceted low-poly look on any mesh.
     pub flat_shading: bool,
+    /// Gets darker and shinier as `GameScene::set_wetness` rises, for
+    /// decks, sails and rocks in the rain. Off by default.
+    pub wettable: bool,
     /// Terrain paint: the base-color texture is an array of four layers
     /// blended by the vertex color's RGBA weights, and the normal texture,
     /// if any, an array of their normals (rgb) and roughness (alpha). Set
@@ -1387,6 +1390,7 @@ impl Default for MaterialAsset {
             uv_scale: [1.0; 2],
             uv_offset: [0.0; 2],
             flat_shading: false,
+            wettable: false,
             splat: false,
             splat_scale: [1.0; 4],
             shader: String::new(),

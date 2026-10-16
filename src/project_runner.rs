@@ -3514,6 +3514,14 @@ impl GameScene<'_> {
         true
     }
 
+    /// Sets the global wetness from 0 (dry) to 1 (soaked). Materials with
+    /// `wettable` get darker and shinier as it rises, such as decks, sails
+    /// and rocks in the rain. Cheap to call every frame.
+    pub fn set_wetness(&mut self, wetness: f32) {
+        self.world.resource_mut::<RenderWorld>().wetness =
+            wetness.clamp(0.0, 1.0);
+    }
+
     /// Tries to return a scene object by name.
     pub fn try_object(&mut self, name: &str) -> Option<GameObject<'_>> {
         let entity = find_named_entity(self.world, name)?;

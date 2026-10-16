@@ -3389,6 +3389,9 @@ fn runtime_material(
         uv_scale: material.uv_scale,
         uv_offset: material.uv_offset,
         flat_shading: material.flat_shading,
+        // ponytail: scene files do not save `wettable` yet; that needs a
+        // cooked format version. Games set it in code.
+        wettable: false,
         splat: false,
         splat_scale: [1.0; 4],
         // ponytail: scene files do not save surface shaders yet; that

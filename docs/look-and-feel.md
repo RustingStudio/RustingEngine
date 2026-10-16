@@ -588,6 +588,12 @@ Make layer images seamless: they repeat every `tiling` metres.
   `set_field` on `/components/rusting.terrain/tint` also skips the
   rebuild, but it copies the whole terrain, splat weights included,
   through JSON on each call.
+- Everything else gets wet through one global value:
+  `scene.set_wetness(rain.min(1.0))` takes 0 (dry) to 1 (soaked), and every
+  material created with `wettable: true` darkens its base color by up to
+  half and its roughness by up to 70 percent. Scene files do not save
+  `wettable` yet, so set it on the `MaterialAsset` you pass to
+  `create_material`.
 
 ### Grass on the terrain
 

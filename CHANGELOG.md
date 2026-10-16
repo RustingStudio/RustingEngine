@@ -4,6 +4,7 @@
 
 ### Added
 
+- `GameScene::set_wetness(0..1)` and `MaterialAsset::wettable`: wettable materials darken and turn glossy as the global wetness rises, so decks, sails and rocks get wet in the rain, not only terrain.
 - `rusting.particle_blocker` boxes and the emitter option `blockers`: CPU particles die inside the boxes and below `rusting.heightfield` ground, so rain stops at roofs (RAFT).
 - `rusting.procedural_sky` draws clouds: `cloud_cover` (0..1), `cloud_darkness` (0..1), `cloud_speed` (m/s) and `wind_direction` (world x, z). They glow at their edges toward the sun and hide its disc; lighting still sees the clear sky (RAFT).
 - `rusting.water` `ocean: true` makes an endless sea: bodies float and players swim everywhere, and the surface grid follows the active camera with cells that grow away from it (RAFT).

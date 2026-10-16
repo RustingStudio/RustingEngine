@@ -1139,6 +1139,8 @@ struct PreparedRenderInstances {
     /// `RenderWorld::lightmaps` the slots in `physics.w` were packed for.
     lightmaps: Vec<(bevy_ecs::entity::Entity, crate::runtime::Lightmap)>,
     physics_revision: u64,
+    /// `RenderWorld::wetness` the wettable colors were packed for.
+    wetness: f32,
     material_revisions: Vec<(Handle<MaterialAsset>, u64)>,
     instances: Subbuffer<[RenderInstanceUpload]>,
     /// Opaque and masked batches.
@@ -7426,6 +7428,7 @@ impl SceneRenderer {
                 && prepared.material_overrides
                     == render_world.material_overrides
                 && prepared.lightmaps == render_world.lightmaps
+                && prepared.wetness == render_world.wetness
                 && prepared.lod_signature == lod_signature
                 && prepared.screens == screens
                 && prepared.physics_revision
@@ -7624,6 +7627,14 @@ impl SceneRenderer {
                 if let Some([u, v]) = values.uv_offset {
                     uv_transform[2..].copy_from_slice(&[u, v]);
                 }
+            }
+            // Wet surfaces darken (light soaks in) and turn glossy.
+            if material.is_some_and(|material| material.wettable) {
+                let wetness = render_world.wetness;
+                for channel in &mut color[..3] {
+                    *channel *= 1.0 - 0.5 * wetness;
+                }
+                surface[1] *= 1.0 - 0.7 * wetness;
             }
             if let Ok(found) = render_world
                 .flashes
@@ -7845,6 +7856,7 @@ impl SceneRenderer {
         let instances = upload;
         self.prepared_instances = Some(PreparedRenderInstances {
             renderables_revision: render_world.renderables_revision,
+            wetness: render_world.wetness,
             layout_revision: render_world.renderables_layout_revision,
             packed,
             sources,
@@ -13842,6 +13854,37 @@ mod tests {
         let [b, g, r, _]: [u8; 4] =
             scene.pixels()[index..index + 4].try_into().unwrap();
         [r, g, b]
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn wetness_darkens_only_wettable_materials() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let mut deck = SlabScene::new(&[(
+            0.0,
+            MaterialAsset {
+                wettable: true,
+                ..MaterialAsset::default()
+            },
+        )]);
+        let mut sail = SlabScene::new(&[(0.0, MaterialAsset::default())]);
+        let center = [4, 4];
+        let dry = render_pixel(&mut deck, center);
+        let plain = render_pixel(&mut sail, center);
+        deck.render_world.wetness = 1.0;
+        sail.render_world.wetness = 1.0;
+        let wet = render_pixel(&mut deck, center);
+        assert!(
+            u32::from(wet[0]) + 30 < u32::from(dry[0]),
+            "wet {wet:?} dry {dry:?}"
+        );
+        assert_eq!(render_pixel(&mut sail, center), plain);
     }
 
     #[test]

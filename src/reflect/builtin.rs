@@ -1840,6 +1840,9 @@ crate::reflect! {
         flat_shading: bool {
             doc: "Light each triangle with its own face normal for a faceted, low-poly look.",
         },
+        wettable: bool {
+            doc: "Darker and shinier as the global wetness (GameScene::set_wetness) rises.",
+        },
         splat: bool {
             doc: "Terrain paint: blend the base-color array's four layers by the vertex color.",
         },
