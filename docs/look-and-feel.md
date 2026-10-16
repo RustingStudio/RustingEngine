@@ -166,8 +166,12 @@ grading and fog without a volume apply everywhere else:
   seconds.
 - `distortion` bulges the image like a curved tube and sways its rows over
   time. The corners turn black.
+- `lens_droplets` puts rain on the camera lens for a first-person view in
+  a storm: round drops appear, bend the image behind them like small
+  lenses, and fade after a few seconds. 0.3 is a light shower, 1 covers
+  much of the lens. The drops follow the fixed tick like the grain.
 
-`chromatic_aberration`, `color_bleed` and `distortion` read neighboring
+`chromatic_aberration`, `color_bleed`, `distortion` and `lens_droplets` read neighboring
 pixels, so they add a copy of the HDR image to the frame (about one
 full-screen copy; small next to bloom). The others cost nearly nothing.
 

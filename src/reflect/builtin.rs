@@ -1410,6 +1410,10 @@ crate::reflect! {
             unit: "factor", min: 0.0, max: 1.0,
             doc: "tube bulge and row wobble over time",
         },
+        lens_droplets: f32 {
+            unit: "factor", min: 0.0, max: 1.0,
+            doc: "rain drops on the camera lens that bend the image behind them",
+        },
     }
 }
 

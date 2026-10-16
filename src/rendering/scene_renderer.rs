@@ -3476,6 +3476,7 @@ impl SceneRenderer {
             || grade.chromatic_aberration > 0.0
             || grade.color_bleed > 0.0
             || grade.distortion > 0.0
+            || grade.lens_droplets > 0.0
             || depth_of_field.is_some()
             || motion_blur.is_some();
         // Bloom, the copy and auto exposure read the finished HDR outside
@@ -5687,11 +5688,13 @@ impl SceneRenderer {
                     ],
                     saturation: grade.saturation,
                     vignette: grade.vignette,
+                    // The push constants are full; lens droplets ride in
+                    // the spare w.
                     shadows: [
                         grade.shadows[0],
                         grade.shadows[1],
                         grade.shadows[2],
-                        1.0,
+                        grade.lens_droplets,
                     ],
                     highlights: [
                         grade.highlights[0],
@@ -13854,6 +13857,49 @@ mod tests {
         let [b, g, r, _]: [u8; 4] =
             scene.pixels()[index..index + 4].try_into().unwrap();
         [r, g, b]
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "gpu-tests"),
+        ignore = "run with `--features gpu-tests` on a machine with a Vulkan driver"
+    )]
+    fn lens_droplets_bend_the_image_and_follow_the_tick() {
+        if vulkano::VulkanLibrary::new().is_err() {
+            eprintln!("skipping: no Vulkan driver present");
+            return;
+        }
+        let mut scene = SlabScene::with_extent(
+            &[(0.0, MaterialAsset::default())],
+            [64, 64],
+        );
+        scene.render_world.fixed_delta_seconds = 1.0 / 60.0;
+        let frame = |scene: &mut SlabScene| {
+            let before = scene.now();
+            scene
+                .render(before)
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+            scene.pixels()
+        };
+        let plain = frame(&mut scene);
+        scene.render_world.color_grading = Some(crate::runtime::ColorGrading {
+            lens_droplets: 1.0,
+            ..crate::runtime::ColorGrading::default()
+        });
+        let rainy = frame(&mut scene);
+        let changed = plain
+            .chunks(4)
+            .zip(rainy.chunks(4))
+            .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 20))
+            .count();
+        assert!(changed > 64 * 64 / 20, "only {changed} pixels changed");
+        // The same tick draws the same drops; ten seconds later they moved.
+        assert_eq!(frame(&mut scene), rainy);
+        scene.render_world.physics_tick += 600;
+        assert_ne!(frame(&mut scene), rainy);
     }
 
     #[test]

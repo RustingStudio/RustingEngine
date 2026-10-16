@@ -6,7 +6,8 @@ layout(set = 0, binding = 1) uniform sampler2D bloom;
 // glow's intensity, 0 when the frame has none; inv_extent is one over the
 // target size in pixels.
 // contrast, saturation, shadows, highlights and vignette follow
-// ColorGrading; the defaults leave the color unchanged.
+// ColorGrading; the defaults leave the color unchanged. shadows.w is
+// ColorGrading::lens_droplets.
 // A copy of the HDR image in `scene`, for effects that read other pixels;
 // up to date only when `sampled` is 1.
 layout(set = 0, binding = 2) uniform sampler2D scene_image;
@@ -137,6 +138,36 @@ vec3 fxaa(vec2 uv) {
     l = sqrt(l / (1.0 + l));
     return l < lo || l > hi ? near : far;
 }
+// Rain on the lens: two grids of cells, each holding at most one round drop
+// that lives a few seconds at a random spot and shows the image behind it
+// flipped, like a small lens, with a darker rim. strength is the share of
+// cells with a drop; everything follows seconds, so a tick repeats.
+vec3 lens_droplets(vec2 uv, vec3 color, float strength, float seconds) {
+    vec2 aspect = vec2(tone.inv_extent.y / tone.inv_extent.x, 1.0);
+    for (uint layer = 0u; layer < 2u; layer++) {
+        float cells = layer == 0u ? 6.0 : 11.0;
+        vec2 p = uv * aspect * cells;
+        uvec2 id = uvec2(floor(p)) + uvec2(layer * 977u, 0u);
+        float t = seconds / (3.0 + 2.0 * noise(id, 1u)) + noise(id, 2u);
+        uint life = uint(t) * 8u;
+        if (noise(id, life + 3u) >= strength) {
+            continue;
+        }
+        vec2 center = 0.3 + 0.4 * vec2(noise(id, life + 4u), noise(id, life + 5u));
+        float radius = 0.12 + 0.16 * noise(id, life + 6u);
+        vec2 d = (fract(p) - center) / radius;
+        float r2 = dot(d, d);
+        if (r2 >= 1.0) {
+            continue;
+        }
+        float age = fract(t);
+        float fade = smoothstep(0.0, 0.05, age) * (1.0 - smoothstep(0.6, 1.0, age));
+        vec2 bend = d * radius / (cells * aspect) * 1.6;
+        vec3 seen = hdr_at(uv - bend) * (1.0 - 0.5 * smoothstep(0.5, 1.0, r2));
+        return mix(color, seen, fade);
+    }
+    return color;
+}
 // The post shader hook; see post.glsl.
 #include "post.glsl"
 void main() {
@@ -153,6 +184,9 @@ void main() {
         }
         hdr.rgb = tone.blur > 0.0 ? defocus(uv)
             : (tone.flags & 4u) != 0u ? fxaa(uv) : hdr_at(uv);
+        if (tone.shadows.w > 0.0) {
+            hdr.rgb = lens_droplets(uv, hdr.rgb, tone.shadows.w, tone.tape.z);
+        }
         if (motion.strength > 0.0) {
             // Screen motion since last frame, in uv, centered on the pixel.
             float d = textureLod(scene_depth, uv, 0.0).r;

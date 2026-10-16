@@ -849,15 +849,15 @@ const COMPONENT_SECTIONS: &[ComponentSection] = &[
     },
     ComponentSection {
         key: "rusting.color_grading",
-        summary: "Runs after tone mapping: contrast around mid grey, saturation (0 grey, 1 unchanged), shadows and highlights color tints, vignette (0..1) darkening the corners, and film/CRT effects (0..1, off at 0): grain, chromatic_aberration, scanlines, color_bleed, noise_band, distortion. Grain and the noise band follow the fixed tick. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
+        summary: "Runs after tone mapping: contrast around mid grey, saturation (0 grey, 1 unchanged), shadows and highlights color tints, vignette (0..1) darkening the corners, and film/CRT effects (0..1, off at 0): grain, chromatic_aberration, scanlines, color_bleed, noise_band, distortion. lens_droplets (0..1) puts rain drops on the lens that bend the image behind them. Grain, the noise band and the drops follow the fixed tick. The first one found is used; one on an object with rusting.post_volume applies only in that area.",
         gpu: "a few instructions per pixel; chromatic_aberration, color_bleed or distortion add one full-screen copy",
-        example: || json!({"contrast": 1.1, "saturation": 0.9, "shadows": [0.92, 0.98, 1.1], "highlights": [1.08, 1.0, 0.9], "vignette": 0.3, "grain": 0.1, "chromatic_aberration": 0.2, "scanlines": 0.0, "color_bleed": 0.0, "noise_band": 0.0, "distortion": 0.0}),
+        example: || json!({"contrast": 1.1, "saturation": 0.9, "shadows": [0.92, 0.98, 1.1], "highlights": [1.08, 1.0, 0.9], "vignette": 0.3, "grain": 0.1, "chromatic_aberration": 0.2, "scanlines": 0.0, "color_bleed": 0.0, "noise_band": 0.0, "distortion": 0.0, "lens_droplets": 0.0}),
     },
     ComponentSection {
         key: "rusting.camera_screen",
         summary: "On an object with a mesh: shows what the camera entity named camera sees, at size [w, h] pixels, in place of the material's base color and emissive maps. The camera may be inactive. Give each screen its own material. update_every draws the feed every N frames; enabled false, or a screen out of view, keeps the last image. grading is the feed's own color grading (e.g. scanlines and grain). exposure multiplies the scene's exposure for the feed only (4 makes a dark room readable on a monitor).",
         gpu: "renders the scene once more per screen each time its feed draws",
-        example: || json!({"camera": "Cam B", "size": [320, 180], "update_every": 2, "enabled": true, "exposure": 2.0, "grading": {"contrast": 1.2, "saturation": 0.6, "shadows": [1.0, 1.0, 1.0], "highlights": [1.0, 1.0, 1.0], "vignette": 0.4, "grain": 0.3, "chromatic_aberration": 0.4, "scanlines": 0.6, "color_bleed": 0.3, "noise_band": 0.5, "distortion": 0.3}}),
+        example: || json!({"camera": "Cam B", "size": [320, 180], "update_every": 2, "enabled": true, "exposure": 2.0, "grading": {"contrast": 1.2, "saturation": 0.6, "shadows": [1.0, 1.0, 1.0], "highlights": [1.0, 1.0, 1.0], "vignette": 0.4, "grain": 0.3, "chromatic_aberration": 0.4, "scanlines": 0.6, "color_bleed": 0.3, "noise_band": 0.5, "distortion": 0.3, "lens_droplets": 0.0}}),
     },
     ComponentSection {
         key: "rusting.environment_map",

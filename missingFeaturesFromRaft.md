@@ -240,6 +240,8 @@ needed here. What is still missing is E15.
 
 - Wanted: a post effect for rain on the camera lens, with a strength from 0 to 1. It is for
   the first-person view in storms.
+- Status: done (this commit, test: `lens_droplets_bend_the_image_and_follow_the_tick`).
+  `rusting.color_grading` `lens_droplets`, drawn in the tone-map pass.
 
 ### E7. Viewmodel layer with its own FOV
 

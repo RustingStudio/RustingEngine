@@ -1787,6 +1787,10 @@ pub struct ColorGrading {
     /// Bulges the image like a curved tube and wobbles its rows over time,
     /// 0 to 1. Corners pushed off the image turn black.
     pub distortion: f32,
+    /// Rain on the camera lens, 0 to 1: round drops that appear, bend the
+    /// image behind them like small lenses and fade after a few seconds.
+    /// Higher values cover more of the lens. Follows the fixed tick.
+    pub lens_droplets: f32,
 }
 
 impl ColorGrading {
@@ -1803,6 +1807,7 @@ impl ColorGrading {
         color_bleed: 0.0,
         noise_band: 0.0,
         distortion: 0.0,
+        lens_droplets: 0.0,
     };
 
     /// Blends toward `other` by `t` (0 keeps `self`, 1 gives `other`).
@@ -1826,6 +1831,7 @@ impl ColorGrading {
             color_bleed: mix(self.color_bleed, other.color_bleed),
             noise_band: mix(self.noise_band, other.noise_band),
             distortion: mix(self.distortion, other.distortion),
+            lens_droplets: mix(self.lens_droplets, other.lens_droplets),
         }
     }
 }
