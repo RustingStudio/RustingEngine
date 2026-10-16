@@ -349,6 +349,9 @@ still point at the original's bones, so only the original animates.
   (`src/view/movers.rs`, ONE_INSTANCE). Players use a fixed pool of 7 avatars in the scene.
 - Wanted: `copy_tree` remaps Animation tracks and skin joints onto the copied bones, so a copy
   animates on its own.
+- Status: done (this commit, test: `copies_of_copies_animate_their_own_bones`). Tracks and
+  joints already resolve copied bones by path; a copy of a copy named them
+  `"Shark 3/Shark 2/Tail"`, so path `Tail` missed. `copy_tree` now drops the old prefix.
 
 ### E16. Listing a node's children
 

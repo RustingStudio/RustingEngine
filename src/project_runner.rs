@@ -4160,7 +4160,8 @@ fn forget_old_scene(world: &mut World) {
 
 /// Clones `entity` and its descendants, naming the copy `name` (unnamed
 /// when `None`). Each copy gets a new `SceneId`; named children become
-/// `"<name>/<child>"`, parented to the copy. Panics when a copy's name is
+/// `"<name>/<child>"` (a copied child's own prefix dropped), parented to
+/// the copy, so animation tracks and skin joints find the copy's bones. Panics when a copy's name is
 /// taken, so the name index never points two names at one object.
 fn copy_tree(world: &mut World, entity: Entity, name: Option<&str>) -> Entity {
     if let Some(name) = name {
@@ -4195,11 +4196,18 @@ fn copy_tree(world: &mut World, entity: Entity, name: Option<&str>) -> Entity {
         .get::<crate::runtime::Children>(entity)
         .map(|children| children.0.clone())
         .unwrap_or_default();
+    // A copy of a copy names its children by their step, not
+    // `"<name>/<old name>/<step>"`, so bone paths still find them.
+    let source = world.get::<Name>(entity).map(|n| format!("{}/", n.0));
     for child in children {
-        let child_name = world
-            .get::<Name>(child)
-            .zip(name)
-            .map(|(child, parent)| format!("{parent}/{}", child.0));
+        let child_name =
+            world.get::<Name>(child).zip(name).map(|(child, parent)| {
+                let step = source
+                    .as_deref()
+                    .and_then(|source| child.0.strip_prefix(source))
+                    .unwrap_or(&child.0);
+                format!("{parent}/{step}")
+            });
         let child = copy_tree(world, child, child_name.as_deref());
         let _ = rusting_core::hierarchy::set_parent(world, child, copy);
     }
@@ -8520,6 +8528,65 @@ mod tests {
             world: app.world_mut(),
         };
         scene.spawn_copy("Ember", "Copy", [0.0; 3]);
+    }
+
+    #[test]
+    fn copies_of_copies_animate_their_own_bones() {
+        use crate::runtime::{
+            Animation, AnimationClip, AnimationProperty, AnimationTrack,
+            Interpolation, Keyframe,
+        };
+        let mut app = App::new();
+        let world = app.world_mut();
+        world.insert_resource(crate::runtime::EventQueue::<
+            crate::runtime::AnimationEvent,
+        >::default());
+        let swim = AnimationClip {
+            name: "swim".into(),
+            tracks: vec![AnimationTrack {
+                target: "Tail".into(),
+                property: AnimationProperty::Position,
+                interpolation: Interpolation::Linear,
+                keys: [(0.0, 0.0), (1.0, 1.0)]
+                    .map(|(time, x)| Keyframe {
+                        time,
+                        value: vec![x, 0.0, 0.0],
+                    })
+                    .to_vec(),
+            }],
+            ..AnimationClip::default()
+        };
+        let shark = world
+            .spawn((
+                Name("Shark".into()),
+                Transform::default(),
+                Animation {
+                    clips: vec![swim],
+                    autoplay: "swim".into(),
+                    ..Animation::default()
+                },
+            ))
+            .id();
+        let tail = world
+            .spawn((Name("Tail".into()), Transform::default()))
+            .id();
+        rusting_core::hierarchy::set_parent(world, tail, shark).unwrap();
+        let mut scene = GameScene {
+            world: app.world_mut(),
+        };
+        scene.spawn_copy("Shark", "Shark 2", [0.0; 3]).unwrap();
+        scene.spawn_copy("Shark 2", "Shark 3", [0.0; 3]).unwrap();
+        for tick in 0..5 {
+            crate::runtime::step_animations(app.world_mut(), 0.1, tick);
+        }
+        let world = app.world_mut();
+        for shark in ["Shark", "Shark 2", "Shark 3"] {
+            let root = find_named_entity(world, shark).unwrap();
+            let x = crate::runtime::find_target(world, root, "Tail")
+                .and_then(|tail| world.get::<Transform>(tail))
+                .map(|transform| transform.position[0]);
+            assert!(x.is_some_and(|x| x > 0.1), "{shark} tail at {x:?}");
+        }
     }
 
     #[test]
