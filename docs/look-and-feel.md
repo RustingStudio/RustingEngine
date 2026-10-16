@@ -612,6 +612,8 @@ copies on chosen terrain layers only:
 "rusting.foliage": {"count": 4000, "radius": 30.0, "conform": true, "layers": [1]}
 ```
 
+- The quality profile thins every scatter: `Eco` draws the first 30
+  percent of its copies, `Balanced` 60 percent, and `High` all of them.
 - Put `rusting.foliage` on the parent of a model made of several meshes,
   such as a palm's trunk and leaves, to scatter the whole model: each part
   keeps its place on every copy, and a copy is settled or dropped as one.

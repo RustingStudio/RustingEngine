@@ -166,7 +166,9 @@ scene.set_exposure(1.8); // brighter, e.g. a CCTV feed; 1 is neutral
   Headless runs ignore both.
 - `scene.resolved_quality()` is the profile the renderer draws with, with
   `Auto` resolved from the GPU (`Eco`, `Balanced` or `High`). Scale game
-  content such as foliage counts, rain particles or view distance by it. It
+  content such as rain particles or view distance by it. Foliage thins on
+  its own: `Eco` draws 30 percent of each `rusting.foliage` scatter and
+  `Balanced` 60 percent. It
   stays `Auto` until a renderer starts, such as in headless runs.
 - `set_exposure` writes the scene's `rusting.tone_mapping` exposure and adds
   one when the scene has none.

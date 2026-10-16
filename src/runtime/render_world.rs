@@ -290,6 +290,8 @@ pub struct RenderWorld {
     renderables_signature: Option<u64>,
     /// Tick and component counts seen by the last signature hash.
     renderables_fingerprint: Option<(Tick, [usize; 9])>,
+    /// [`foliage_share`] the renderables were built with.
+    foliage_share: f32,
 }
 
 impl RenderWorld {
@@ -1130,10 +1132,13 @@ fn renderables_changed(world: &mut World) -> RenderablesChange {
             }
         }
     }
+    let share = resolved_foliage_share(world);
     let mut render_world = world.resource_mut::<RenderWorld>();
     changed |= render_world
         .renderables_fingerprint
         .is_none_or(|(_, previous)| previous != counts);
+    changed |= render_world.foliage_share != share;
+    render_world.foliage_share = share;
     render_world.renderables_fingerprint = Some((this_run, counts));
     if changed {
         RenderablesChange::Rebuild
@@ -1193,6 +1198,7 @@ fn renderables_signature(world: &mut World) -> u64 {
         }
     }
     count.hash(&mut hasher);
+    resolved_foliage_share(world).to_bits().hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1262,6 +1268,35 @@ fn collect_foliage(
             Some((at, foliage.sway))
         })
         .collect()
+}
+
+/// Share of each `Foliage`'s copies drawn for a resolved profile: Eco and
+/// Balanced thin grass and trees, keeping the first copies of the scatter.
+#[must_use]
+pub fn foliage_share(profile: super::QualityProfile) -> f32 {
+    match profile {
+        super::QualityProfile::Eco => 0.3,
+        super::QualityProfile::Balanced => 0.6,
+        super::QualityProfile::High | super::QualityProfile::Auto => 1.0,
+    }
+}
+
+/// [`foliage_share`] of the profile the renderer resolves; `Auto` before a
+/// renderer starts draws every copy.
+fn resolved_foliage_share(world: &World) -> f32 {
+    let requested = world
+        .get_resource::<super::RenderSettings>()
+        .map_or(super::QualityProfile::Auto, |settings| settings.quality);
+    foliage_share(
+        world
+            .get_resource::<crate::rendering::scene_renderer::RendererCapabilities>()
+            .map_or(requested, |capabilities| {
+                crate::rendering::scene_renderer::resolve_quality(
+                    requested,
+                    capabilities,
+                )
+            }),
+    )
 }
 
 /// The `Foliage` on `entity` or its nearest ancestor, and the object that
@@ -1351,6 +1386,7 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
         &super::Heightfield,
         Option<&super::Terrain>,
     )>();
+    let share = resolved_foliage_share(world);
     let world_ref = &*world;
     let grounds = fields
         .iter(world_ref)
@@ -1386,9 +1422,11 @@ fn collect_renderables(world: &mut World) -> Vec<ExtractedRenderable> {
                 .try_inverse()
                 .unwrap_or_else(nalgebra::Matrix4::identity)
                 * model;
-            foliage
-                .placements()
+            let placements = foliage.placements();
+            let drawn = (placements.len() as f32 * share).ceil() as usize;
+            placements
                 .into_iter()
+                .take(drawn)
                 .filter_map(|local| settle(foliage, group * local, &grounds))
                 .map(|matrix| ExtractedRenderable {
                     transform: GlobalTransform {
@@ -1781,6 +1819,39 @@ mod tests {
         let placed = copies(&mut app, far);
         assert_eq!(placed.len(), 20);
         assert!(placed.iter().all(|at| at[1] == 0.0));
+    }
+
+    #[test]
+    fn quality_profiles_thin_foliage_from_the_first_copies() {
+        use crate::runtime::{Foliage, QualityProfile, RenderSettings};
+        let mut app = App::new();
+        app.add_plugin(RenderExtractPlugin).unwrap();
+        let server = AssetServer::default();
+        let renderer = renderer(&server);
+        app.insert_resource(server);
+        let foliage = Foliage {
+            count: 10,
+            ..Foliage::default()
+        };
+        let owner =
+            app.spawn((Transform::default(), renderer, foliage.clone()));
+        let mut copies = |quality| {
+            app.world_mut().resource_mut::<RenderSettings>().quality = quality;
+            app.update(Duration::from_secs_f64(1.0 / 60.0)).unwrap();
+            app.world()
+                .resource::<RenderWorld>()
+                .renderables
+                .iter()
+                .filter(|renderable| renderable.entity == owner)
+                .map(|renderable| renderable.transform.matrix)
+                .collect::<Vec<_>>()
+        };
+        let all = copies(QualityProfile::High);
+        assert_eq!(all.len(), 10);
+        assert_eq!(copies(QualityProfile::Eco), all[..3]);
+        assert_eq!(copies(QualityProfile::Balanced), all[..6]);
+        assert_eq!(copies(QualityProfile::Auto), all);
+        assert_eq!(foliage_share(QualityProfile::Eco), 0.3);
     }
 
     #[test]

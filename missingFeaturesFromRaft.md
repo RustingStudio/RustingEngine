@@ -385,6 +385,9 @@ leaves), so they cannot be foliage.
   graphics preset changes (`src/app.rs`, `Graphics::foliage_share`: Low 0.3, Medium 0.6,
   High/Ultra 1.0).
 - Wanted: a per-profile foliage share (and far impostors on Ultra) in the engine.
+- Status: done (this commit, test: `quality_profiles_thin_foliage_from_the_first_copies`).
+  `foliage_share` (Eco 0.3, Balanced 0.6, High 1.0) thins every scatter at extraction. There
+  is no Ultra profile, so far impostors are left out; `rusting asset bake-foliage` cards cover them.
 
 ### E19. Heightfield from an image
 
